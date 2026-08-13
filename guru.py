@@ -361,11 +361,10 @@ active_tools: list = [search_tools]
 
 
 # Key bindings.
-# In modifyOtherKeys mode 2, the terminal re-encodes keyboard Enter as an
-# escape sequence (F14 below), leaving raw \r only for pasted newlines.
-# Raw \r therefore inserts a newline; only the re-encoded Enter submits.
-# Escape+Enter is the universal submit fallback for terminals that do not
-# re-encode Enter.
+# Keyboard Enter sends \r (c-m); pasted newlines from macOS arrive as \n
+# (c-j). By binding c-j to insert-newline and keeping c-m as submit, paste
+# no longer triggers submission. F14 handles the rare terminals that do
+# re-encode Enter via modifyOtherKeys; Escape+Enter is the universal fallback.
 _kb = KeyBindings()
 
 
@@ -374,7 +373,7 @@ def _shift_enter(event: object) -> None:
     event.current_buffer.insert_text('\n')
 
 
-@_kb.add('f14')  # keyboard Enter via modifyOtherKeys — mapped above
+@_kb.add('f14')  # keyboard Enter re-encoded via modifyOtherKeys
 def _mk_enter(event: object) -> None:
     event.current_buffer.validate_and_handle()
 
@@ -384,8 +383,13 @@ def _escape_enter(event: object) -> None:
     event.current_buffer.validate_and_handle()
 
 
-@_kb.add('enter')  # raw \r — only arrives from paste; insert, never submit
+@_kb.add('enter')  # \r — keyboard Enter → submit
 def _enter(event: object) -> None:
+    event.current_buffer.validate_and_handle()
+
+
+@_kb.add('c-j')  # \n — pasted newlines on macOS → insert, never submit
+def _linefeed(event: object) -> None:
     event.current_buffer.insert_text('\n')
 
 
@@ -423,8 +427,8 @@ console.print(f"Using model: [bold]{MODEL}[/bold]")
 console.print("[bold]Qwen Web Agent[/bold]")
 console.print("Type [italic]'exit'[/italic] to quit.")
 console.print(
-    "Enter to submit · Escape+Enter to submit (fallback)"
-    " · Shift+Enter for newline."
+    "Enter to submit · Shift+Enter for newline"
+    " · pasted newlines are safe.\n"
 )
 console.print(
     "Type [italic]'/search <query>'[/italic] to search"
