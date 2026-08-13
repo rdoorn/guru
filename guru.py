@@ -26,6 +26,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.theme import Theme
 
 _parser = argparse.ArgumentParser(description="guru — local Ollama agent")
 _parser.add_argument("--model", default="qwen3-abliterated-32k:latest")
@@ -53,7 +54,15 @@ ANSI_SEQUENCES['\x1b[27;0;13~'] = Keys.F14  # xterm fmt, modifier=0 (alt)
 ANSI_SEQUENCES['\x1b[13;1u'] = Keys.F14      # CSI u, modifier=1 (no mod)
 ANSI_SEQUENCES['\x1b[13u'] = Keys.F14        # CSI u short form
 
-console = Console(highlight=False)
+# Override Rich's markdown link styles: bright blue, no underline. Defaults
+# are markdown.link=bright_blue and markdown.link_url=blue+underline.
+console = Console(
+    highlight=False,
+    theme=Theme({
+        'markdown.link': 'bright_blue',
+        'markdown.link_url': 'bright_blue',
+    }),
+)
 
 _ctrl_c_times: list = []
 
@@ -73,10 +82,15 @@ MODEL = _args.model
 
 # --- Config, setup, and domain safeguards ------------------------------------
 
+# Global config lives in ~/.guru; project-specific state lives in a .guru/
+# folder inside the current project so it travels with the project.
 GURU_HOME = Path(os.path.expanduser('~/.guru'))
-GURU_MD_PATH = GURU_HOME / 'GURU.md'
-DOMAINS_ALLOW_PATH = GURU_HOME / 'domains_allow.txt'
-LOCAL_GURU_MD = Path.cwd() / '.GURU.md'
+GURU_MD_PATH = GURU_HOME / 'GURU.md'                 # global base persona
+
+PROJECT_GURU_DIR = Path.cwd() / '.guru'
+PROJECT_GURU_MD = PROJECT_GURU_DIR / 'GURU.md'       # appended to the global
+DOMAINS_ALLOW_PATH = PROJECT_GURU_DIR / 'domains_allow.txt'  # per-project
+PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
 
 # Search-engine backend host. web_search gates on this so "allow internet
 # access at least once" maps to approving the engine. Structured as a
@@ -86,7 +100,7 @@ SEARCH_BACKEND_DOMAIN = 'duckduckgo.com'
 DEFAULT_GURU_MD = """# GURU.md
 
 Instructions for the guru assistant. Edit this file to change guru's
-behaviour globally. Add a `.GURU.md` in a project directory to append
+behaviour globally. Add a `.guru/GURU.md` inside a project to append
 project-specific instructions.
 
 ## Persona
@@ -101,12 +115,14 @@ project-specific instructions.
 
 
 def _ensure_setup() -> None:
-    """Create ~/.guru, a default GURU.md, and the domains file if missing."""
+    """Create the global ~/.guru dir and a default GURU.md if missing.
+
+    Project state (.guru/ in the current directory) is created lazily on
+    first write so read-only sessions do not litter arbitrary directories.
+    """
     GURU_HOME.mkdir(parents=True, exist_ok=True)
     if not GURU_MD_PATH.exists():
         GURU_MD_PATH.write_text(DEFAULT_GURU_MD, encoding='utf-8')
-    if not DOMAINS_ALLOW_PATH.exists():
-        DOMAINS_ALLOW_PATH.touch()
 
 
 def _load_allowed_domains() -> set:
@@ -128,7 +144,8 @@ def _domain_of(url: str) -> str:
 
 
 def _persist_domain(domain: str) -> None:
-    """Append a newly approved domain to the allow-list file."""
+    """Append a newly approved domain to the project allow-list file."""
+    DOMAINS_ALLOW_PATH.parent.mkdir(parents=True, exist_ok=True)
     with DOMAINS_ALLOW_PATH.open('a', encoding='utf-8') as fh:
         fh.write(domain + '\n')
 
@@ -196,7 +213,9 @@ def web_search(query: str) -> str:
             f"Access to the search engine '{SEARCH_BACKEND_DOMAIN}' was"
             " denied by the user. The search was not performed."
         )
-    console.print(f"\n[cyan]\\[SEARCH][/cyan] {query}")
+    # Tool output shown on screen is debug info for the user (the same text
+    # is sent to the model as normal input), so render it in the debug style.
+    console.print(f"\n[SEARCH] {query}", style="dim yellow", markup=False)
 
     results = list(DDGS().text(query, max_results=10))
 
@@ -217,9 +236,7 @@ def web_search(query: str) -> str:
             f"Summary: {result.get('body')}\n"
         )
         output.append(entry)
-        console.print(f"  [bold]{i}. {result.get('title')}[/bold]")
-        console.print(f"  [dim]URL: {result.get('href')}[/dim]")
-        console.print(f"  {result.get('body')}\n")
+        console.print(entry, style="dim yellow", markup=False)
 
     return "\n".join(output)
 
@@ -450,10 +467,10 @@ def _build_system_prompt() -> str:
     """Assemble the system prompt: built-in + global GURU.md + local .GURU.md.
 
     The built-in prompt is always first so the search_tools mechanism is
-    never lost. The local .GURU.md extends (appends to) the global one.
+    never lost. The project .guru/GURU.md extends (appends to) the global one.
     """
     parts = [SYSTEM_PROMPT.strip()]
-    for path in (GURU_MD_PATH, LOCAL_GURU_MD):
+    for path in (GURU_MD_PATH, PROJECT_GURU_MD):
         try:
             text = path.read_text(encoding='utf-8').strip()
         except OSError:
@@ -657,9 +674,8 @@ def _models_command() -> None:
 # --- Conversation memory: /save and /resume ---------------------------------
 
 def _project_memory_dir() -> Path:
-    """Return ~/.guru/<encoded-cwd>/ for the current working directory."""
-    encoded = str(Path.cwd()).replace(os.sep, '-')
-    return GURU_HOME / encoded
+    """Return the project's .guru/memory directory."""
+    return PROJECT_MEMORY_DIR
 
 
 def _message_to_dict(msg: object) -> dict:
@@ -925,10 +941,13 @@ def _main() -> None:
                     console.print("\n[dim]\\[THINKING][/dim]")
                     console.print(f"[dim italic]{msg.thinking}[/dim italic]")
 
+                # markup=False so brackets in the content/tool_calls repr are
+                # printed literally; style colours the whole line like the tag.
                 console.print(
-                    f"[dim yellow]\\[DEBUG][/dim yellow]"
-                    f" content={repr(msg.content)}"
+                    f"[DEBUG] content={msg.content!r}"
                     f" tool_calls={msg.tool_calls}",
+                    style="dim yellow",
+                    markup=False,
                 )
 
                 messages.append(msg)

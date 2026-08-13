@@ -36,33 +36,39 @@ Requires the Ollama app running in the menu bar.
 | `/resume` | Restore a previously saved conversation (interactive selector) |
 | `exit` / `quit` | Exit |
 
-## Configuration (`~/.guru/`)
+## Configuration
 
-On first run guru creates `~/.guru/` with:
+**Global** — `~/.guru/`:
 
-- `GURU.md` — appended to the built-in system prompt. Edit it to change
-  guru's behaviour globally. A `.GURU.md` in the current directory is
-  appended after it for project-specific instructions.
-- `domains_allow.txt` — the network allow-list (see below).
-- `<encoded-cwd>/*.memory` — saved conversations, one JSON file per `/save`,
-  namespaced by the project directory they were saved from.
+- `GURU.md` — the base system prompt, appended to the built-in one. Edit it to
+  change guru's behaviour everywhere. Auto-created on first run.
+
+**Per-project** — a `.guru/` folder in the current directory, so project
+state travels with the project (created lazily on first write):
+
+- `.guru/GURU.md` — project-specific instructions, appended after the global
+  `GURU.md`.
+- `.guru/domains_allow.txt` — this project's network allow-list (see below).
+- `.guru/memory/*.memory` — saved conversations, one JSON file per `/save`.
 
 ## Network safeguard
 
-All outbound network access is blocked by default. The first time `web_search`
-or `web_fetch` needs a domain, guru asks for approval on the command line:
+All outbound network access is blocked by default, **per project**. The first
+time `web_search` or `web_fetch` needs a domain, guru asks for approval on the
+command line:
 
 ```
 [ACCESS] Request to access example.com.
 Allow access to 'example.com'? [y/N]
 ```
 
-- **Yes** → the domain is added to `~/.guru/domains_allow.txt` and never asked
-  again.
+- **Yes** → the domain is added to `.guru/domains_allow.txt` and never asked
+  again in this project.
 - **No** (or Ctrl+C) → the model is told the request was denied.
 
 Matching is on the hostname only (port ignored). `web_search` gates on the
-search-engine backend (`duckduckgo.com`), so you approve internet access once.
+search-engine backend (`duckduckgo.com`), so you approve internet access once
+per project.
 
 ## Tool directory
 

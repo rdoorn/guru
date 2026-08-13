@@ -1,6 +1,5 @@
 """Unit tests for guru's pure helper functions."""
 import json
-import os
 from pathlib import Path
 
 import guru
@@ -23,13 +22,11 @@ class TestDomainOf:
 
 
 class TestProjectMemoryDir:
-    """Tests for _project_memory_dir path encoding."""
+    """Tests for _project_memory_dir location."""
 
-    def test_encodes_cwd_with_dashes(self) -> None:
+    def test_points_into_project_guru_dir(self) -> None:
         result = guru._project_memory_dir()
-        expected_name = str(Path.cwd()).replace(os.sep, '-')
-        assert result.name == expected_name
-        assert result.parent == guru.GURU_HOME
+        assert result == Path.cwd() / '.guru' / 'memory'
 
 
 class TestBuildSystemPrompt:
@@ -43,7 +40,7 @@ class TestBuildSystemPrompt:
         global_md.write_text('GLOBAL RULES', encoding='utf-8')
         local_md.write_text('LOCAL RULES', encoding='utf-8')
         monkeypatch.setattr(guru, 'GURU_MD_PATH', global_md)
-        monkeypatch.setattr(guru, 'LOCAL_GURU_MD', local_md)
+        monkeypatch.setattr(guru, 'PROJECT_GURU_MD', local_md)
 
         prompt = guru._build_system_prompt()
 
@@ -57,7 +54,7 @@ class TestBuildSystemPrompt:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         monkeypatch.setattr(guru, 'GURU_MD_PATH', tmp_path / 'nope.md')
-        monkeypatch.setattr(guru, 'LOCAL_GURU_MD', tmp_path / 'nope2.md')
+        monkeypatch.setattr(guru, 'PROJECT_GURU_MD', tmp_path / 'nope2.md')
 
         prompt = guru._build_system_prompt()
 
