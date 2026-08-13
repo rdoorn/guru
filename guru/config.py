@@ -72,6 +72,13 @@ url  = "http://localhost:11434"
 # type = "anthropic"
 # auth = "oauth"
 # profile = "guru"   # one-time: `ant auth login --profile guru`
+#
+# [[adapter]]
+# name = "LiteLLM"
+# type = "litellm"                       # OpenAI-compatible proxy
+# base_url = "https://proxy.example/v1"  # include /v1
+# api_key_env = "LITELLM_KEY"            # env var holding the virtual key
+# models = ["azure/gpt-4.1"]            # optional allowlist
 """
 
 SYSTEM_PROMPT = """

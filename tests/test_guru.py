@@ -4,6 +4,7 @@ from pathlib import Path
 
 from guru import config, session, ui
 from guru.adapters import anthropic as anth
+from guru.adapters import litellm as lite
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import conversation, tools
 
@@ -357,3 +358,40 @@ class TestAnthropicTranslation:
         with_tools = anth.neutral_assistant(
             '', [('web_search', {'query': 'x'})])
         assert with_tools['tool_calls'][0]['function']['name'] == 'web_search'
+
+
+class TestLiteLLMTranslation:
+    """Tests for the pure LiteLLM/OpenAI translation helpers."""
+
+    def test_messages_flattened(self) -> None:
+        messages = [
+            {'role': 'system', 'content': 'SYS'},
+            {'role': 'user', 'content': 'hi'},
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [{'function': {'name': 'web_search',
+                                          'arguments': {'query': 'x'}}}]},
+            {'role': 'tool', 'tool_name': 'web_search', 'content': 'results'},
+        ]
+        out = lite.to_openai_messages(messages)
+        assert out[0] == {'role': 'system', 'content': 'SYS'}
+        assert out[1] == {'role': 'user', 'content': 'hi'}
+        assert out[2] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[3]['role'] == 'user'
+        assert 'web_search result' in out[3]['content']
+
+    def test_tool_defs_openai_shape(self) -> None:
+        specs = [{
+            'name': 'web_fetch',
+            'description': 'fetch a page',
+            'parameters': {'url': 'the url'},
+        }]
+        defs = lite.openai_tool_defs(specs)
+        assert defs[0]['type'] == 'function'
+        fn = defs[0]['function']
+        assert fn['name'] == 'web_fetch'
+        assert fn['parameters']['properties']['url']['type'] == 'string'
+        assert fn['parameters']['required'] == ['url']
+
+    def test_base_url_trailing_slash_stripped(self) -> None:
+        a = lite.LiteLLMAdapter(base_url='https://proxy/v1/')
+        assert a.base_url == 'https://proxy/v1'

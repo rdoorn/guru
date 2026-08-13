@@ -129,6 +129,8 @@ class AnthropicAdapter(Adapter):
 
     def _client(self):
         import anthropic
+        if self.auth not in ('api_key', 'oauth'):
+            raise RuntimeError(f"unknown auth mode '{self.auth}'")
         if self.auth == 'oauth':
             # The SDK reads the profile, refreshes tokens (persisting rotated
             # refresh tokens back to the credentials file), and adds the
@@ -152,6 +154,8 @@ class AnthropicAdapter(Adapter):
         try:
             import anthropic  # noqa: F401
         except Exception:
+            return False
+        if self.auth not in ('api_key', 'oauth'):
             return False
         if self.auth == 'oauth':
             # A profile must have been created by a one-time `ant auth login`.
@@ -181,6 +185,8 @@ class AnthropicAdapter(Adapter):
             import anthropic  # noqa: F401
         except Exception:
             return (False, "the anthropic SDK is not installed")
+        if self.auth not in ('api_key', 'oauth'):
+            return (False, f"unknown auth mode '{self.auth}'")
         if (self.auth == 'oauth'
                 and not self._oauth_credentials_path().exists()):
             ok, msg = self._run_ant_login()

@@ -5,6 +5,7 @@ import signal
 
 from guru import config, session, ui
 from guru.adapters.anthropic import AnthropicAdapter
+from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import conversation, tools
 
@@ -32,6 +33,13 @@ def _instantiate(cfg: dict):
             profile=cfg.get('profile'),
             models=cfg.get('models'),
             thinking=cfg.get('thinking', True),
+        )
+    if kind == 'litellm':
+        return LiteLLMAdapter(
+            name=name,
+            base_url=cfg.get('base_url'),
+            api_key_env=cfg.get('api_key_env'),
+            models=cfg.get('models'),
         )
     return None
 
