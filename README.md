@@ -99,12 +99,23 @@ the tool directory works and how to add new tools.
 
 Current tools: `web_search`, `web_fetch`, `fetch_github_releases`.
 
-## Files
+## Architecture
 
-| File | Purpose |
+`guru` is a Python package with a domain layer and pluggable provider adapters.
+Run it with `./start.sh` or `python -m guru`.
+
+| Path | Purpose |
 |------|---------|
-| `guru.py` | Main agent — tool registry, input loop, key bindings |
-| `start.sh` | Launcher — checks Ollama, pulls model if needed, runs guru.py |
-| `pyproject.toml` | Dependencies (managed by uv) |
-| `docs/ollama-wrapper.md` | Full technical documentation |
-| `docs/next-session.md` | Context for continuing development |
+| `guru/cli.py` | Prompt loop, slash commands, cross-adapter `/models` |
+| `guru/session.py` | Shared runtime state (active adapter, model, context, conversation) |
+| `guru/config.py` | Paths, `~/.guru/adapters.toml`, GURU.md assembly, allow-list |
+| `guru/ui.py` | Console, status bar, model picker, key bindings, terminal modes |
+| `guru/domain/tools.py` | Tool directory, discovery, gating, execution |
+| `guru/domain/conversation.py` | Save/resume and compaction (provider-neutral) |
+| `guru/adapters/base.py` | `Adapter` interface + `ModelInfo` |
+| `guru/adapters/ollama.py` | Ollama provider (daemon check + on-demand pull) |
+| `start.sh` | Thin launcher → `python -m guru` |
+| `docs/plans/` | Design docs |
+
+Provider adapters are configured in `~/.guru/adapters.toml`. The Ollama adapter
+is built in; Anthropic (API-key and OAuth) adapters are planned.
