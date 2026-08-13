@@ -30,6 +30,7 @@ def _instantiate(cfg: dict):
             auth=cfg.get('auth', 'api_key'),
             base_url=cfg.get('base_url'),
             api_key_env=cfg.get('api_key_env'),
+            api_key=cfg.get('api_key'),
             profile=cfg.get('profile'),
             models=cfg.get('models'),
             thinking=cfg.get('thinking', True),
@@ -39,6 +40,7 @@ def _instantiate(cfg: dict):
             name=name,
             base_url=cfg.get('base_url'),
             api_key_env=cfg.get('api_key_env'),
+            api_key=cfg.get('api_key'),
             models=cfg.get('models'),
         )
     return None

@@ -78,6 +78,7 @@ url  = "http://localhost:11434"
 # type = "litellm"                       # OpenAI-compatible proxy
 # base_url = "https://proxy.example/v1"  # include /v1
 # api_key_env = "LITELLM_KEY"            # env var holding the virtual key
+# api_key = "sk-..."                     # or inline (used if the env is unset)
 # models = ["azure/gpt-4.1"]            # optional allowlist
 """
 

@@ -106,12 +106,13 @@ class AnthropicAdapter(Adapter):
     """Anthropic Messages API provider (api_key or oauth)."""
 
     def __init__(self, name: str = "Anthropic", auth: str = "api_key",
-                 base_url=None, api_key_env=None, profile=None,
+                 base_url=None, api_key_env=None, api_key=None, profile=None,
                  models=None, thinking: bool = True) -> None:
         self.name = name
         self.auth = auth
         self.base_url = base_url
         self.api_key_env = api_key_env
+        self.api_key = api_key
         self.profile = profile
         self.static_models = models or []
         self.thinking = thinking
@@ -142,7 +143,7 @@ class AnthropicAdapter(Adapter):
                 kwargs['base_url'] = self.base_url
             return anthropic.Anthropic(**kwargs)
         env = self.api_key_env or 'ANTHROPIC_API_KEY'
-        key = os.environ.get(env) or 'local'
+        key = os.environ.get(env) or self.api_key or 'local'
         kwargs = {'api_key': key}
         if self.base_url:
             kwargs['base_url'] = self.base_url

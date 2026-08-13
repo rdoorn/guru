@@ -395,3 +395,17 @@ class TestLiteLLMTranslation:
     def test_base_url_trailing_slash_stripped(self) -> None:
         a = lite.LiteLLMAdapter(base_url='https://proxy/v1/')
         assert a.base_url == 'https://proxy/v1'
+
+    def test_inline_api_key_used_when_env_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv('MY_LLM_KEY', raising=False)
+        a = lite.LiteLLMAdapter(
+            base_url='https://p/v1', api_key_env='MY_LLM_KEY',
+            api_key='sk-123')
+        assert a._key() == 'sk-123'
+
+    def test_env_key_overrides_inline(self, monkeypatch) -> None:
+        monkeypatch.setenv('MY_LLM_KEY', 'sk-env')
+        a = lite.LiteLLMAdapter(
+            base_url='https://p/v1', api_key_env='MY_LLM_KEY',
+            api_key='sk-123')
+        assert a._key() == 'sk-env'

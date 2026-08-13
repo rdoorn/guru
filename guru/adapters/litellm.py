@@ -109,15 +109,22 @@ class LiteLLMAdapter(Adapter):
     """OpenAI-compatible provider (e.g. a LiteLLM proxy)."""
 
     def __init__(self, name: str = "LiteLLM", base_url=None,
-                 api_key_env=None, models=None) -> None:
+                 api_key_env=None, api_key=None, models=None) -> None:
         self.name = name
         self.base_url = (base_url or '').rstrip('/')
         self.api_key_env = api_key_env
+        self.api_key = api_key
         self.static_models = models or []
         self._context_by_model: dict = {}
 
     def _key(self) -> str:
-        return os.environ.get(self.api_key_env or 'OPENAI_API_KEY') or ''
+        """Resolve the key: env var → inline api_key → OPENAI_API_KEY."""
+        return (
+            os.environ.get(self.api_key_env or '')
+            or self.api_key
+            or os.environ.get('OPENAI_API_KEY')
+            or ''
+        )
 
     def _client(self):
         import openai
@@ -133,7 +140,7 @@ class LiteLLMAdapter(Adapter):
             return (False, "no base_url configured")
         if not self._key():
             env = self.api_key_env or 'OPENAI_API_KEY'
-            return (False, f"no API key in ${env}")
+            return (False, f"no API key (set ${env} or api_key in config)")
         try:
             r = requests.get(
                 self.base_url + '/models',
