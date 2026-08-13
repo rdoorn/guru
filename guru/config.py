@@ -69,6 +69,11 @@ url  = "http://localhost:11434"
 # type = "anthropic"
 # auth = "oauth"
 # profile = "guru"   # one-time: `ant auth login --profile guru`
+#
+# [[adapter]]
+# name = "Claude Code"
+# type = "anthropic"
+# auth = "claude_code"   # reuse Claude Code's Keychain OAuth token (macOS)
 """
 
 SYSTEM_PROMPT = """
