@@ -34,7 +34,23 @@ Requires the Ollama app running in the menu bar.
 | `/models` (or `/model`) | Interactive model selector (↑/↓, Enter, Esc) |
 | `/save` | Save the current conversation to disk |
 | `/resume` | Restore a previously saved conversation (interactive selector) |
+| `/compact` | Shrink the conversation to free up context now |
 | `exit` / `quit` | Exit |
+
+## Context management
+
+A status bar pinned to the bottom of the screen shows how full the model's
+context window is (`ctx ████████░░ 78%  26.1k/32.8k`). During model generation
+it stays fixed via a terminal scroll region; at the input prompt the same
+info is shown in the prompt toolbar.
+
+- **Window size** — guru resolves the effective `num_ctx` from the model's
+  modelfile (falling back to `4096`), capped at the model's architecture
+  ceiling. Override with `--num-ctx N`.
+- **Auto-compaction** — when occupancy crosses 85%, guru compacts between
+  turns: it drops old reasoning traces, evicts stale tool outputs, and, if
+  still too large, folds the oldest turns into a summary. Recent turns and the
+  system prompt are always kept. Trigger it manually with `/compact`.
 
 ## Configuration
 

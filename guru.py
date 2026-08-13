@@ -2,6 +2,7 @@ import argparse
 import atexit
 import json
 import os
+import shutil
 import signal
 import sys
 import time
@@ -15,7 +16,7 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
-from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.formatted_text import FormattedText, HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
@@ -30,6 +31,10 @@ from rich.theme import Theme
 
 _parser = argparse.ArgumentParser(description="guru — local Ollama agent")
 _parser.add_argument("--model", default="qwen3-abliterated-32k:latest")
+_parser.add_argument(
+    "--num-ctx", type=int, default=0,
+    help="Override the context window size (0 = auto-detect from the model)",
+)
 # parse_known_args (not parse_args) so importing the module under a test
 # runner — which passes its own argv — does not trigger a SystemExit.
 _args, _ = _parser.parse_known_args()
@@ -96,6 +101,13 @@ PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
 # access at least once" maps to approving the engine. Structured as a
 # constant so additional engines can each declare their own backend host.
 SEARCH_BACKEND_DOMAIN = 'duckduckgo.com'
+
+# ollama's default context window when a model's modelfile does not set one.
+DEFAULT_NUM_CTX = 4096
+# Compact the conversation when occupancy crosses this fraction of num_ctx.
+COMPACT_AT = 0.85
+# Number of most-recent turn-groups kept verbatim during compaction.
+KEEP_RECENT_GROUPS = 4
 
 DEFAULT_GURU_MD = """# GURU.md
 
@@ -176,6 +188,39 @@ def _ensure_domain_allowed(domain: str) -> bool:
         return True
     console.print(f"[red]Denied[/red] {domain}.")
     return False
+
+
+def _resolve_context_window(model: str) -> tuple:
+    """Return (effective num_ctx, architecture ceiling) for a model.
+
+    The effective window is what ollama actually allocates at runtime:
+    the --num-ctx override if given, else the modelfile's num_ctx, else
+    ollama's default. It is capped at the architecture ceiling reported in
+    modelinfo (the model's trained maximum). Returns 0 for ceiling if the
+    model info cannot be read.
+    """
+    try:
+        info = ollama.show(model)
+    except Exception:
+        return (_args.num_ctx or DEFAULT_NUM_CTX, 0)
+
+    modelinfo = info.modelinfo or {}
+    arch = modelinfo.get('general.architecture', '')
+    ceiling = int(modelinfo.get(f'{arch}.context_length', 0) or 0)
+
+    modelfile_num_ctx = 0
+    for line in (info.parameters or '').splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == 'num_ctx':
+            try:
+                modelfile_num_ctx = int(parts[1])
+            except ValueError:
+                pass
+
+    num_ctx = _args.num_ctx or modelfile_num_ctx or DEFAULT_NUM_CTX
+    if ceiling:
+        num_ctx = min(num_ctx, ceiling)
+    return (num_ctx, ceiling)
 
 
 _ensure_setup()
@@ -487,12 +532,10 @@ messages = [
     }
 ]
 
-# Fetch context window size once at startup for the stats footer.
-try:
-    _model_info = ollama.show(MODEL)
-    _ctx_size: int = getattr(_model_info.details, 'context_length', 0) or 0
-except Exception:
-    _ctx_size = 0
+# Effective context window and architecture ceiling, resolved at startup and
+# on every model switch. _ctx_used tracks the latest measured occupancy.
+_NUM_CTX, _CTX_CEILING = _resolve_context_window(MODEL)
+_ctx_used: int = 0
 
 # Active tools persist for the lifetime of the conversation — once a tool is
 # discovered via search_tools it stays available without re-searching.
@@ -641,7 +684,7 @@ def _pick(title: str, options: list, active_idx: int = -1):
 
 def _models_command() -> None:
     """Interactive model selector — ↑/↓ to navigate, Enter to select."""
-    global MODEL, _ctx_size
+    global MODEL, _NUM_CTX, _CTX_CEILING
 
     try:
         model_list = ollama.list().models
@@ -663,12 +706,11 @@ def _models_command() -> None:
     if idx is None:
         return
     MODEL = names[idx]
-    try:
-        info = ollama.show(MODEL)
-        _ctx_size = getattr(info.details, 'context_length', 0) or 0
-    except Exception:
-        _ctx_size = 0
-    console.print(f"\n[green]Model:[/green] [bold]{MODEL}[/bold]")
+    _NUM_CTX, _CTX_CEILING = _resolve_context_window(MODEL)
+    console.print(
+        f"\n[green]Model:[/green] [bold]{MODEL}[/bold]"
+        f" [dim](context {_NUM_CTX:,})[/dim]"
+    )
 
 
 # --- Conversation memory: /save and /resume ---------------------------------
@@ -791,6 +833,231 @@ def _resume_command() -> None:
     )
 
 
+# --- Context status bar ------------------------------------------------------
+#
+# A status line pinned to the bottom of the screen during model generation,
+# using a DECSTBM scroll region so output scrolls above it. During the input
+# prompt the same information is shown via prompt_toolkit's bottom_toolbar.
+
+_status_active: bool = False
+_SGR = {'green': '32', 'yellow': '33', 'red': '31'}
+_TB_TAG = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
+
+
+def _term_size() -> tuple:
+    """Return (rows, columns) of the terminal."""
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    return size.lines, size.columns
+
+
+def _status_fields() -> tuple:
+    """Return (text, colour) for the current context occupancy."""
+    total = _NUM_CTX or 1
+    pct = min(1.0, _ctx_used / total)
+    filled = round(pct * 10)
+    bar = '█' * filled + '░' * (10 - filled)
+    if pct >= COMPACT_AT:
+        colour = 'red'
+    elif pct >= 0.70:
+        colour = 'yellow'
+    else:
+        colour = 'green'
+    text = (
+        f" {MODEL.split(':')[0]} · ctx {bar} {int(pct * 100)}%"
+        f"  {_ctx_used / 1000:.1f}k/{_NUM_CTX / 1000:.1f}k"
+        f" · compact at {int(COMPACT_AT * 100)}%"
+    )
+    return text, colour
+
+
+def _status_enable() -> None:
+    """Reserve the bottom line via a scroll region and draw the bar."""
+    global _status_active
+    if not sys.stdout.isatty():
+        return
+    rows, _ = _term_size()
+    sys.stdout.write(
+        '\n'                     # ensure a spare line before reserving
+        f'\x1b[1;{rows - 1}r'    # scroll region = rows 1..rows-1
+        f'\x1b[{rows - 1};1H'    # cursor to the last line of the region
+    )
+    sys.stdout.flush()
+    _status_active = True
+    _status_draw()
+
+
+def _status_draw() -> None:
+    """Paint the status line at the bottom row without moving the cursor."""
+    if not _status_active:
+        return
+    rows, cols = _term_size()
+    text, colour = _status_fields()
+    text = text[:cols].ljust(cols)
+    sys.stdout.write(
+        '\x1b7'                       # save cursor
+        f'\x1b[{rows};1H\x1b[2K'      # go to status row, clear it
+        f'\x1b[2;{_SGR[colour]}m{text}\x1b[0m'
+        '\x1b8'                       # restore cursor
+    )
+    sys.stdout.flush()
+
+
+def _status_disable() -> None:
+    """Release the scroll region and clear the status line."""
+    global _status_active
+    if not _status_active:
+        return
+    rows, _ = _term_size()
+    sys.stdout.write(
+        '\x1b7'
+        '\x1b[r'                      # reset scroll region to full screen
+        f'\x1b[{rows};1H\x1b[2K'      # clear the status line
+        '\x1b8'
+    )
+    sys.stdout.flush()
+    _status_active = False
+
+
+def _sigwinch_handler(signum: int, frame: object) -> None:
+    """Re-apply the scroll region and redraw the bar after a resize."""
+    if _status_active:
+        rows, _ = _term_size()
+        sys.stdout.write(f'\x1b[1;{rows - 1}r')
+        sys.stdout.flush()
+        _status_draw()
+
+
+def _bottom_toolbar() -> HTML:
+    """Return the context status as a prompt_toolkit bottom toolbar."""
+    text, colour = _status_fields()
+    safe = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    return HTML(f'<{_TB_TAG[colour]}>{safe}</{_TB_TAG[colour]}>')
+
+
+# --- Conversation compaction (hybrid: trim → evict → summarise) --------------
+
+def _msg_role(msg: object) -> str:
+    """Return a message's role whether it is a dict or an ollama Message."""
+    if isinstance(msg, dict):
+        return msg.get('role', '')
+    return getattr(msg, 'role', '')
+
+
+def _msg_content(msg: object) -> str:
+    """Return a message's content whether it is a dict or ollama Message."""
+    if isinstance(msg, dict):
+        return msg.get('content') or ''
+    return getattr(msg, 'content', '') or ''
+
+
+def _group_messages(msgs: list) -> list:
+    """Split messages into turn-groups starting at each user message.
+
+    Keeping an assistant message and its tool results in one group means
+    compaction never separates a tool call from its result.
+    """
+    groups: list = []
+    current: list = []
+    for m in msgs:
+        if _msg_role(m) == 'user' and current:
+            groups.append(current)
+            current = []
+        current.append(m)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _estimate_tokens(msgs: list) -> int:
+    """Rough token estimate (~4 characters per token)."""
+    return sum(len(_msg_content(m)) for m in msgs) // 4
+
+
+def _summarise_groups(groups: list) -> str:
+    """Summarise old turn-groups into a compact note using the model."""
+    lines = []
+    for group in groups:
+        for m in group:
+            content = _msg_content(m).strip()
+            if content:
+                lines.append(f"{_msg_role(m)}: {content}")
+    transcript = "\n".join(lines)[:12000]
+    try:
+        resp = ollama.chat(
+            model=MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': (
+                        'Summarise the following conversation concisely.'
+                        ' Keep facts, decisions, and any URLs or identifiers'
+                        ' the user may refer to later. Output only the'
+                        ' summary.'
+                    ),
+                },
+                {'role': 'user', 'content': transcript},
+            ],
+            think=False,
+            options={'num_ctx': _NUM_CTX},
+        )
+        return (resp.message.content or '').strip() or '(summary unavailable)'
+    except Exception as e:
+        return f'(summary failed: {e})'
+
+
+def _compact_messages(force: bool = False) -> None:
+    """Compact the conversation: trim thinking, evict tool output, summarise.
+
+    Runs the cheap steps first and only calls the model for a summary if the
+    conversation is still too large. Preserves the system prompt and the
+    most recent turn-groups verbatim.
+    """
+    global messages
+    if len(messages) <= 1:
+        return
+    system = messages[0]
+    # Normalising drops per-message 'thinking' blocks — a free saving.
+    history = [_message_to_dict(m) for m in messages[1:]]
+    limit = int(_NUM_CTX * COMPACT_AT)
+
+    if not force and _estimate_tokens(history) <= limit:
+        messages = [system] + history
+        return
+
+    groups = _group_messages(history)
+    if len(groups) <= KEEP_RECENT_GROUPS:
+        old, recent = [], groups
+    else:
+        old = groups[:-KEEP_RECENT_GROUPS]
+        recent = groups[-KEEP_RECENT_GROUPS:]
+
+    # Evict tool outputs from old groups (biggest, least-needed context).
+    for group in old:
+        for m in group:
+            if m.get('role') == 'tool' and m.get('content'):
+                m['content'] = '[old tool output evicted to save context]'
+
+    flat = [m for g in (old + recent) for m in g]
+    if not force and _estimate_tokens(flat) <= limit:
+        console.print("[dim]\\[COMPACT] evicted old tool outputs[/dim]")
+        messages = [system] + flat
+        return
+
+    if old:
+        summary = _summarise_groups(old)
+        note = {
+            'role': 'system',
+            'content': 'Summary of earlier conversation:\n' + summary,
+        }
+        recent_flat = [m for g in recent for m in g]
+        messages = [system, note] + recent_flat
+        console.print(
+            "[dim]\\[COMPACT] folded older turns into a summary[/dim]"
+        )
+    else:
+        messages = [system] + flat
+
+
 def _handle_slash_search(query: str) -> None:
     """Directly invoke web_search and optionally web_fetch for testing."""
     if not _ensure_domain_allowed(SEARCH_BACKEND_DOMAIN):
@@ -846,14 +1113,16 @@ def _print_banner() -> None:
     )
     console.print(
         "[italic]/search <query>[/italic] search · [italic]/models[/italic]"
-        " switch model · [italic]/save[/italic] save chat ·"
-        " [italic]/resume[/italic] restore chat.\n"
+        " model · [italic]/save[/italic] save · [italic]/resume[/italic]"
+        " restore · [italic]/compact[/italic] shrink context.\n"
     )
 
 
 def _main() -> None:
     """Run the interactive prompt loop."""
+    global _ctx_used
     signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGWINCH, _sigwinch_handler)
     atexit.register(
         lambda: (sys.stdout.write(_RESET_TERMINAL), sys.stdout.flush())
     )
@@ -861,7 +1130,9 @@ def _main() -> None:
     while True:
         try:
             question = _session.prompt(
-                '\nYou> ', pre_run=_enable_terminal_modes
+                '\nYou> ',
+                pre_run=_enable_terminal_modes,
+                bottom_toolbar=_bottom_toolbar,
             ).strip()
         except KeyboardInterrupt:
             # modifyOtherKeys Ctrl+C reaches here via prompt_toolkit (not
@@ -899,6 +1170,15 @@ def _main() -> None:
             _resume_command()
             continue
 
+        if question == '/compact':
+            _compact_messages(force=True)
+            _ctx_used = _estimate_tokens(messages)
+            console.print(
+                f"[green]Compacted[/green] · ~{_ctx_used:,} tokens"
+                f" of {_NUM_CTX:,}."
+            )
+            continue
+
         if question.startswith("/search "):
             _handle_slash_search(question[8:].strip())
             continue
@@ -919,6 +1199,7 @@ def _main() -> None:
         total_prompt_tokens: int = 0
         total_eval_tokens: int = 0
 
+        _status_enable()
         try:
             while True:
                 # Non-streaming for tool-call rounds: more reliable tool-call
@@ -928,12 +1209,17 @@ def _main() -> None:
                     messages=messages,
                     think=True,
                     tools=active_tools,
+                    options={'num_ctx': _NUM_CTX},
                 )
 
                 total_prompt_tokens += (
                     getattr(response, 'prompt_eval_count', 0) or 0)
                 total_eval_tokens += (
                     getattr(response, 'eval_count', 0) or 0)
+                # Latest prompt_eval_count is the true window occupancy.
+                _ctx_used = (
+                    getattr(response, 'prompt_eval_count', 0) or _ctx_used)
+                _status_draw()
 
                 msg = response.message
 
@@ -972,9 +1258,9 @@ def _main() -> None:
                     console.print(Markdown(content))
                     console.print()
                     ctx_str = (
-                        f"{total_prompt_tokens:,} / {_ctx_size:,}"
-                        if _ctx_size else
-                        f"{total_prompt_tokens:,}"
+                        f"{_ctx_used:,} / {_NUM_CTX:,}"
+                        if _NUM_CTX else
+                        f"{_ctx_used:,}"
                     )
                     console.rule(
                         f"[dim]{MODEL}  ·  ctx {ctx_str}  ·  "
@@ -1042,6 +1328,18 @@ def _main() -> None:
             del messages[msg_checkpoint:]
             sys.stdout.write(_RESET_TERMINAL)
             sys.stdout.flush()
+        finally:
+            _status_disable()
+
+        # Proactive compaction once the turn's tool calls are all resolved,
+        # so we never split a tool call from its result.
+        if _NUM_CTX and _ctx_used > COMPACT_AT * _NUM_CTX:
+            console.print(
+                f"[dim]\\[COMPACT] context {_ctx_used:,}/{_NUM_CTX:,}"
+                f" over {int(COMPACT_AT * 100)}% — compacting[/dim]"
+            )
+            _compact_messages()
+            _ctx_used = _estimate_tokens(messages)
 
 
 if __name__ == '__main__':
