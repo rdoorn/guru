@@ -4,6 +4,7 @@ import atexit
 import signal
 
 from guru import config, session, ui
+from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import conversation, tools
 
@@ -21,8 +22,15 @@ def _build_adapters() -> list:
             built.append(OllamaAdapter(
                 name=name, url=cfg.get('url', 'http://localhost:11434')))
         elif kind == 'anthropic':
-            # Added in Phase 2; skip for now so the app still starts.
-            continue
+            built.append(AnthropicAdapter(
+                name=name,
+                auth=cfg.get('auth', 'api_key'),
+                base_url=cfg.get('base_url'),
+                api_key_env=cfg.get('api_key_env'),
+                profile=cfg.get('profile'),
+                models=cfg.get('models'),
+                thinking=cfg.get('thinking', True),
+            ))
     if not built:
         built.append(OllamaAdapter())
     return built
@@ -35,29 +43,47 @@ def _select_model(adapter: object, model_id: str) -> None:
 
 
 def _models_command() -> None:
-    """Cross-adapter model selector, grouped by adapter."""
+    """Cross-adapter model selector, grouped by adapter.
+
+    Rows show context window and, for local (Ollama) models, the estimated
+    memory footprint — coloured red when it exceeds 80% of system memory.
+    """
+    total_mem = ui.total_memory_bytes()
+    mem_limit = total_mem * 0.8 if total_mem else 0
+
     options: list = []
     selectable: list = []
+    row_styles: list = []
     entries: list = []            # (adapter, ModelInfo) aligned with rows
     active_idx = -1
 
+    def _add(text: str, sel: bool, entry, style: str = '') -> None:
+        options.append(text)
+        selectable.append(sel)
+        row_styles.append(style)
+        entries.append(entry)
+
     for adapter in ADAPTERS:
-        options.append(f"— {adapter.name} —")
-        selectable.append(False)
-        entries.append(None)
+        _add(f"— {adapter.name} —", False, None)
         if not adapter.available():
-            options.append("  (unavailable)")
-            selectable.append(False)
-            entries.append(None)
+            _add("  (unavailable)", False, None)
             continue
-        for info in adapter.list_models():
-            row = f"{info.label}  ({info.context_window:,} ctx)"
+        infos = adapter.list_models()
+        if not infos:
+            _add("  (no models listed)", False, None)
+            continue
+        for info in infos:
+            row = f"{info.label}  ({info.context_window:,} ctx"
+            warn = False
+            if info.memory:
+                row += f" · {ui.format_bytes(info.memory)}"
+                warn = bool(mem_limit and info.memory > mem_limit)
+            row += ")"
             if (adapter is session.adapter
                     and info.model_id == session.model):
                 active_idx = len(options)
-            options.append(row)
-            selectable.append(True)
-            entries.append((adapter, info))
+            _add(row, True, (adapter, info),
+                 'class:warn' if warn else '')
 
     if not any(selectable):
         ui.console.print("[yellow]No models available.[/yellow]")
@@ -65,7 +91,7 @@ def _models_command() -> None:
 
     idx = ui.pick(
         'Models  ↑/↓ navigate · Enter select · Esc cancel',
-        options, active_idx, selectable,
+        options, active_idx, selectable, row_styles,
     )
     if idx is None or entries[idx] is None:
         return

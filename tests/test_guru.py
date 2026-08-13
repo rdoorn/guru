@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from guru import config, session, ui
+from guru.adapters import anthropic as anth
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import conversation, tools
 
@@ -254,3 +255,67 @@ class TestStatusParts:
         assert 'demo' in left and '32B' in left
         assert '🧠' in ctx_segment
         assert '1234' in right and '56' in right and 'main' in right
+
+
+class TestFormatBytes:
+    """Tests for ui.format_bytes."""
+
+    def test_gigabytes(self) -> None:
+        assert ui.format_bytes(8_200_000_000) == '7.6 GB'
+
+    def test_megabytes(self) -> None:
+        assert ui.format_bytes(5_000_000) == '4.8 MB'
+
+
+class TestActiveSpecs:
+    """Tests for tools.active_specs."""
+
+    def test_search_tools_always_present(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'active_tool_names', set())
+        specs = tools.active_specs()
+        assert [s['name'] for s in specs] == ['search_tools']
+
+    def test_activated_tool_included(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'active_tool_names', {'web_fetch'})
+        names = [s['name'] for s in tools.active_specs()]
+        assert 'search_tools' in names and 'web_fetch' in names
+
+
+class TestAnthropicTranslation:
+    """Tests for the pure Anthropic translation helpers."""
+
+    def test_system_merged_and_history_flattened(self) -> None:
+        messages = [
+            {'role': 'system', 'content': 'BASE'},
+            {'role': 'system', 'content': 'SUMMARY'},
+            {'role': 'user', 'content': 'hello'},
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [{'function': {'name': 'web_search',
+                                          'arguments': {'query': 'x'}}}]},
+            {'role': 'tool', 'tool_name': 'web_search', 'content': 'results'},
+        ]
+        system, native = anth.to_anthropic_messages(messages)
+        assert system == 'BASE\n\nSUMMARY'
+        assert native[0] == {'role': 'user', 'content': 'hello'}
+        assert native[1] == {'role': 'assistant', 'content': '(used tools)'}
+        assert native[2]['role'] == 'user'
+        assert 'web_search result' in native[2]['content']
+
+    def test_tool_defs_schema(self) -> None:
+        specs = [{
+            'name': 'web_fetch',
+            'description': 'fetch a page',
+            'parameters': {'url': 'the url'},
+        }]
+        defs = anth.tool_defs(specs)
+        assert defs[0]['name'] == 'web_fetch'
+        schema = defs[0]['input_schema']
+        assert schema['properties']['url']['type'] == 'string'
+        assert schema['required'] == ['url']
+
+    def test_neutral_assistant_with_and_without_tools(self) -> None:
+        plain = anth.neutral_assistant('hi', [])
+        assert plain == {'role': 'assistant', 'content': 'hi'}
+        with_tools = anth.neutral_assistant(
+            '', [('web_search', {'query': 'x'})])
+        assert with_tools['tool_calls'][0]['function']['name'] == 'web_search'

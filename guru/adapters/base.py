@@ -17,6 +17,8 @@ class ModelInfo:
     label: str
     context_window: int
     size: str = ""
+    # Estimated RAM to run, in bytes (0 = N/A, e.g. a remote model).
+    memory: int = 0
 
 
 class Adapter(ABC):

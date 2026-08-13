@@ -1,9 +1,12 @@
 # guru
 
-Local Ollama chat agent with an on-demand tool directory. The model starts
-each conversation with one meta-tool (`search_tools`) and discovers further
-tools as it needs them — designed to scale to 200+ tools without loading every
-schema into context on every request.
+Local LLM chat agent with an on-demand tool directory and pluggable provider
+adapters. The model starts each conversation with one meta-tool
+(`search_tools`) and discovers further tools as it needs them — designed to
+scale to 200+ tools without loading every schema into context on every request.
+
+Providers: **Ollama** (local) and **Anthropic** (API key or enterprise OAuth),
+all selectable from `/models`.
 
 ## Quick start
 
@@ -58,12 +61,49 @@ prompt the same info is shown in the prompt toolbar.
   still too large, folds the oldest turns into a summary. Recent turns and the
   system prompt are always kept. Trigger it manually with `/compact`.
 
+## Providers
+
+Adapters are configured in `~/.guru/adapters.toml` (auto-created with an Ollama
+entry plus commented Anthropic templates). Each `[[adapter]]` becomes a group
+in `/models`; selecting a model switches the active provider and model. Full
+tool parity — the tool directory works on every provider.
+
+```toml
+[[adapter]]
+name = "Ollama"
+type = "ollama"
+url  = "http://localhost:11434"
+
+[[adapter]]
+name = "Anthropic (local)"
+type = "anthropic"
+auth = "api_key"
+base_url = "http://localhost:8080"      # local endpoint speaking the Messages API
+api_key_env = "GURU_ANTHROPIC_API_KEY"  # key read from this env var
+# models = ["my-local-model"]           # optional; else queried from the endpoint
+# thinking = false                       # disable adaptive thinking for endpoints that lack it
+
+[[adapter]]
+name = "Anthropic Enterprise"
+type = "anthropic"
+auth = "oauth"        # no API key; token from `ant auth login` (ant CLI required)
+profile = "default"   # optional ant profile name
+```
+
+Secrets are never stored in the file — API keys come from the environment and
+the OAuth token is fetched from the `ant` CLI per session.
+
+In `/models`, Ollama models also show their estimated memory footprint,
+coloured **red** when it exceeds 80% of system memory (won't fit comfortably).
+Anthropic models are remote, so no memory is shown.
+
 ## Configuration
 
 **Global** — `~/.guru/`:
 
 - `GURU.md` — the base system prompt, appended to the built-in one. Edit it to
   change guru's behaviour everywhere. Auto-created on first run.
+- `adapters.toml` — provider configuration (see **Providers** above).
 
 **Per-project** — a `.guru/` folder in the current directory, so project
 state travels with the project (created lazily on first write):
@@ -114,8 +154,8 @@ Run it with `./start.sh` or `python -m guru`.
 | `guru/domain/conversation.py` | Save/resume and compaction (provider-neutral) |
 | `guru/adapters/base.py` | `Adapter` interface + `ModelInfo` |
 | `guru/adapters/ollama.py` | Ollama provider (daemon check + on-demand pull) |
+| `guru/adapters/anthropic.py` | Anthropic provider (API-key or OAuth) |
 | `start.sh` | Thin launcher → `python -m guru` |
 | `docs/plans/` | Design docs |
 
-Provider adapters are configured in `~/.guru/adapters.toml`. The Ollama adapter
-is built in; Anthropic (API-key and OAuth) adapters are planned.
+Provider adapters are configured in `~/.guru/adapters.toml` (see **Providers**).

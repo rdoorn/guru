@@ -3,6 +3,7 @@
 Rendering and terminal control live here so the domain and adapters stay
 free of prompt_toolkit / rich / escape-sequence concerns.
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,7 @@ _SELECT_STYLE = Style.from_dict({
     'cursor': 'bold ansicyan',
     'cursor-active': 'bold ansigreen',
     'active': 'ansigreen',
+    'warn': 'ansired',
 })
 # prompt_toolkit's default bottom-toolbar style is reverse-video; clear it.
 _TOOLBAR_STYLE = Style.from_dict({'bottom-toolbar': 'noreverse bg:default'})
@@ -156,17 +158,21 @@ def read_line(prompt: str = '\nYou> ') -> str:
 # --- Model / list picker -----------------------------------------------------
 
 def pick(title: str, options: list, active_idx: int = -1,
-         selectable=None):
+         selectable=None, row_styles=None):
     """Arrow-key selector. Returns the chosen index, or None if cancelled.
 
     ``options`` are display strings. ``selectable`` is an optional list of
     booleans (same length) marking which rows can be chosen — non-selectable
     rows (e.g. group headers) are skipped by the cursor and not highlightable.
+    ``row_styles`` optionally gives a per-row style class (e.g. 'class:warn')
+    applied when a selectable row is neither the cursor nor active.
     """
     if not options:
         return None
     if selectable is None:
         selectable = [True] * len(options)
+    if row_styles is None:
+        row_styles = [''] * len(options)
 
     def _first_selectable(start: int, step: int) -> int:
         i = start
@@ -198,7 +204,7 @@ def pick(title: str, options: list, active_idx: int = -1,
             elif is_active:
                 style = 'class:active'
             else:
-                style = ''
+                style = row_styles[i]
             lines.append((style, f'  {prefix}{opt}{suffix}\n'))
         return FormattedText(lines)
 
@@ -243,6 +249,32 @@ def pick(title: str, options: list, active_idx: int = -1,
 def _term_size() -> tuple:
     size = shutil.get_terminal_size(fallback=(80, 24))
     return size.lines, size.columns
+
+
+def total_memory_bytes() -> int:
+    """Return total physical memory in bytes, or 0 if it can't be read."""
+    try:
+        return (os.sysconf('SC_PAGE_SIZE')
+                * os.sysconf('SC_PHYS_PAGES'))
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:                                   # macOS fallback
+        out = subprocess.run(
+            ['sysctl', '-n', 'hw.memsize'],
+            capture_output=True, text=True, timeout=1)
+        return int(out.stdout.strip())
+    except Exception:
+        return 0
+
+
+def format_bytes(num: int) -> str:
+    """Human-readable size, e.g. '8.2 GB'."""
+    value = float(num)
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if value < 1024 or unit == 'TB':
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
 
 
 def refresh_git_branch() -> None:

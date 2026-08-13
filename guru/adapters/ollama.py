@@ -45,6 +45,9 @@ class OllamaAdapter(Adapter):
                 label=m.model,
                 context_window=num_ctx,
                 size=self._param_size(m.model),
+                # On-disk weight size is a good proxy for the RAM needed to
+                # run the model; used to flag models that won't fit memory.
+                memory=int(getattr(m, 'size', 0) or 0),
             ))
         return infos
 

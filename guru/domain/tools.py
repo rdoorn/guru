@@ -267,6 +267,38 @@ def search_tools(query: str) -> str:
     return "\n".join(lines)
 
 
+_SEARCH_TOOLS_SPEC = {
+    'name': 'search_tools',
+    'description': (
+        'Search the tool directory for tools matching an action you want to'
+        ' perform. Call with a short phrase describing WHAT YOU WANT TO DO.'
+        ' Matched tools become active and can then be called directly.'
+    ),
+    'parameters': {
+        'query': 'A short phrase describing the action you want to perform',
+    },
+}
+
+
+def active_specs() -> list:
+    """Return provider-neutral specs for the currently active tools.
+
+    Each spec is ``{name, description, parameters}``. Adapters translate this
+    to their native tool schema. search_tools is always present; discovered
+    registry tools are added as they are activated.
+    """
+    specs = [_SEARCH_TOOLS_SPEC]
+    for name in TOOL_REGISTRY:
+        if name in session.active_tool_names:
+            info = TOOL_REGISTRY[name]
+            specs.append({
+                'name': name,
+                'description': info['description'],
+                'parameters': info['parameters'],
+            })
+    return specs
+
+
 def reset_active_tools() -> None:
     """Reset the active tool set to just the search_tools meta-tool."""
     session.active_tool_names.clear()
