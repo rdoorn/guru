@@ -8,38 +8,75 @@ from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import conversation, tools
 
-# Configured provider adapters, built from ~/.guru/adapters.toml.
+# Configured provider adapters and their raw config dicts, kept parallel so
+# /adapters can persist enable flags back to ~/.guru/adapters.toml.
 ADAPTERS: list = []
+ADAPTER_CONFIGS: list = []
+
+
+def _instantiate(cfg: dict):
+    """Build one adapter from a config dict, or None for unknown types."""
+    kind = cfg.get('type')
+    name = cfg.get('name', kind or 'adapter')
+    if kind == 'ollama':
+        return OllamaAdapter(
+            name=name, url=cfg.get('url', 'http://localhost:11434'))
+    if kind == 'anthropic':
+        return AnthropicAdapter(
+            name=name,
+            auth=cfg.get('auth', 'api_key'),
+            base_url=cfg.get('base_url'),
+            api_key_env=cfg.get('api_key_env'),
+            profile=cfg.get('profile'),
+            models=cfg.get('models'),
+            thinking=cfg.get('thinking', True),
+        )
+    return None
 
 
 def _build_adapters() -> list:
-    """Instantiate adapters from config. Unknown types are skipped."""
+    """Instantiate adapters from config, carrying their enable flag."""
+    global ADAPTER_CONFIGS
+    ADAPTER_CONFIGS = config.load_adapter_configs() or [
+        {'name': 'Ollama', 'type': 'ollama',
+         'url': 'http://localhost:11434'}]
     built = []
-    for cfg in config.load_adapter_configs():
-        kind = cfg.get('type')
-        name = cfg.get('name', kind or 'adapter')
-        if kind == 'ollama':
-            built.append(OllamaAdapter(
-                name=name, url=cfg.get('url', 'http://localhost:11434')))
-        elif kind == 'anthropic':
-            built.append(AnthropicAdapter(
-                name=name,
-                auth=cfg.get('auth', 'api_key'),
-                base_url=cfg.get('base_url'),
-                api_key_env=cfg.get('api_key_env'),
-                profile=cfg.get('profile'),
-                models=cfg.get('models'),
-                thinking=cfg.get('thinking', True),
-            ))
+    for cfg in ADAPTER_CONFIGS:
+        adapter = _instantiate(cfg)
+        if adapter is None:
+            continue
+        adapter.enabled = bool(cfg.get('enable', True))
+        built.append(adapter)
     if not built:
         built.append(OllamaAdapter())
     return built
+
+
+def _enabled_adapters() -> list:
+    return [a for a in ADAPTERS if a.enabled] or ADAPTERS
 
 
 def _select_model(adapter: object, model_id: str) -> None:
     """Make (adapter, model_id) the active provider + model."""
     session.adapter = adapter
     adapter.activate(model_id)
+
+
+def _startup_select(default_model: str) -> None:
+    """Pick a sensible active adapter+model at startup.
+
+    Prefer an enabled Ollama adapter with the --model argument (preserves the
+    original default); otherwise use the first enabled adapter's first model.
+    """
+    enabled = _enabled_adapters()
+    for adapter in enabled:
+        if isinstance(adapter, OllamaAdapter):
+            _select_model(adapter, default_model)
+            return
+    adapter = enabled[0]
+    models = adapter.list_models()
+    _select_model(
+        adapter, models[0].model_id if models else default_model)
 
 
 def _models_command() -> None:
@@ -64,6 +101,8 @@ def _models_command() -> None:
         entries.append(entry)
 
     for adapter in ADAPTERS:
+        if not adapter.enabled:
+            continue
         _add(f"— {adapter.name} —", False, None)
         if not adapter.available():
             _add("  (unavailable)", False, None)
@@ -101,6 +140,47 @@ def _models_command() -> None:
         f"\n[green]Model:[/green] [bold]{session.model}[/bold]"
         f" [dim]({adapter.name} · context {session.num_ctx:,})[/dim]"
     )
+
+
+def _adapters_command() -> None:
+    """Enable/disable adapters, persist, and verify the enabled ones.
+
+    Space toggles, Enter confirms. On confirm the enable flags are written to
+    adapters.toml, adapters are rebuilt, and each enabled adapter is verified
+    — which triggers the one-time OAuth login for enterprise adapters.
+    """
+    global ADAPTERS
+    if not ADAPTER_CONFIGS:
+        ui.console.print("[yellow]No adapters configured.[/yellow]")
+        return
+    labels = [
+        f"{c.get('name', c.get('type', 'adapter'))} [{c.get('type')}]"
+        for c in ADAPTER_CONFIGS
+    ]
+    states = [bool(c.get('enable', True)) for c in ADAPTER_CONFIGS]
+
+    new_states = ui.pick_multi('Adapters', labels, states)
+    if new_states is None:
+        return
+
+    for cfg, enabled in zip(ADAPTER_CONFIGS, new_states):
+        cfg['enable'] = enabled
+    config.save_adapter_configs(ADAPTER_CONFIGS)
+    ui.console.print(f"[green]Saved[/green] {config.ADAPTERS_PATH}")
+
+    ADAPTERS = _build_adapters()
+    for adapter in ADAPTERS:
+        if not adapter.enabled:
+            continue
+        ui.console.print(f"[dim]Verifying {adapter.name}…[/dim]")
+        ok, msg = adapter.verify()
+        mark, colour = ('✓', 'green') if ok else ('✗', 'red')
+        ui.console.print(f"[{colour}]{mark} {adapter.name}[/{colour}] {msg}")
+
+    # Ensure the active adapter is still enabled; otherwise re-select.
+    active = {a.name for a in ADAPTERS if a.enabled}
+    if session.adapter is None or session.adapter.name not in active:
+        _startup_select(session.model or '')
 
 
 def _handle_slash_search(query: str) -> None:
@@ -153,9 +233,10 @@ def _print_banner() -> None:
         " · pasted newlines are safe.\n"
     )
     ui.console.print(
-        "[italic]/search <query>[/italic] search · [italic]/models[/italic]"
-        " model · [italic]/save[/italic] save · [italic]/resume[/italic]"
-        " restore · [italic]/compact[/italic] shrink context.\n"
+        "[italic]/search[/italic] search · [italic]/models[/italic] model ·"
+        " [italic]/adapters[/italic] providers · [italic]/save[/italic] save ·"
+        " [italic]/resume[/italic] restore · [italic]/compact[/italic]"
+        " shrink context.\n"
     )
 
 
@@ -171,7 +252,7 @@ def main() -> None:
     session.num_ctx_override = args.num_ctx
     global ADAPTERS
     ADAPTERS = _build_adapters()
-    _select_model(ADAPTERS[0], args.model)
+    _startup_select(args.model)
 
     session.messages = [
         {"role": "system", "content": config.build_system_prompt()}]
@@ -204,6 +285,9 @@ def main() -> None:
             continue
         if question in ('/models', '/model'):
             _models_command()
+            continue
+        if question == '/adapters':
+            _adapters_command()
             continue
         if question == '/save':
             conversation.save_conversation()

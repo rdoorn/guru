@@ -244,6 +244,72 @@ def pick(title: str, options: list, active_idx: int = -1,
     return app.run()
 
 
+def pick_multi(title: str, options: list, states: list):
+    """Checkbox multi-select. Space toggles, Enter confirms, Esc cancels.
+
+    Returns the updated list of booleans, or None if cancelled.
+    """
+    if not options:
+        return None
+    states = list(states)
+    state = {'idx': 0}
+
+    def _text() -> FormattedText:
+        lines: list = [
+            ('bold', f' {title}\n'),
+            ('', ' Space toggles · Enter confirms · Esc cancels\n\n'),
+        ]
+        for i, opt in enumerate(options):
+            box = '[x]' if states[i] else '[ ]'
+            cursor = i == state['idx']
+            prefix = '▶ ' if cursor else '  '
+            if cursor:
+                style = 'class:cursor'
+            elif states[i]:
+                style = 'class:active'
+            else:
+                style = ''
+            lines.append((style, f'  {prefix}{box} {opt}\n'))
+        return FormattedText(lines)
+
+    kb = KeyBindings()
+
+    @kb.add('up')
+    def _up(event: object) -> None:
+        state['idx'] = (state['idx'] - 1) % len(options)
+
+    @kb.add('down')
+    def _down(event: object) -> None:
+        state['idx'] = (state['idx'] + 1) % len(options)
+
+    @kb.add('space')
+    def _toggle(event: object) -> None:
+        states[state['idx']] = not states[state['idx']]
+
+    @kb.add('enter')
+    def _confirm(event: object) -> None:
+        event.app.exit(result=states)
+
+    @kb.add('escape')
+    @kb.add('c-c')
+    def _cancel(event: object) -> None:
+        event.app.exit(result=None)
+
+    app = Application(
+        layout=Layout(
+            Window(
+                FormattedTextControl(_text, focusable=True),
+                height=len(options) + 4,
+            )
+        ),
+        key_bindings=kb,
+        style=_SELECT_STYLE,
+        full_screen=False,
+        mouse_support=False,
+    )
+    return app.run()
+
+
 # --- Status bar --------------------------------------------------------------
 
 def _term_size() -> tuple:

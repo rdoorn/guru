@@ -18,6 +18,8 @@ schema and the model's ``tool_use`` requests run through the shared
 """
 import os
 import pathlib
+import shutil
+import subprocess
 
 from rich.markdown import Markdown
 
@@ -160,6 +162,43 @@ class AnthropicAdapter(Adapter):
             # A profile must have been created by a one-time `ant auth login`.
             return self._oauth_credentials_path().exists()
         return True
+
+    def _run_ant_login(self) -> tuple:
+        """Run the one-time browser OAuth login via the ant CLI."""
+        if not shutil.which('ant'):
+            return (False, "the `ant` CLI is not installed — run:"
+                           " brew install anthropics/tap/ant")
+        profile = self.profile or 'default'
+        ui.console.print(
+            f"[dim]Opening browser login: ant auth login"
+            f" --profile {profile}…[/dim]"
+        )
+        try:
+            subprocess.run(['ant', 'auth', 'login', '--profile', profile])
+        except Exception as e:
+            return (False, f"ant auth login failed: {e}")
+        if self._oauth_credentials_path().exists():
+            return (True, "logged in")
+        return (False, "login did not produce credentials")
+
+    def verify(self) -> tuple:
+        try:
+            import anthropic  # noqa: F401
+        except Exception:
+            return (False, "the anthropic SDK is not installed")
+        if (self.auth == 'oauth'
+                and not self._oauth_credentials_path().exists()):
+            ok, msg = self._run_ant_login()
+            if not ok:
+                return (False, msg)
+        if self.static_models:
+            return (True, "configured")
+        try:
+            for _ in self._client().models.list():   # one network round-trip
+                break
+            return (True, "authenticated")
+        except Exception as e:
+            return (False, str(e))
 
     def list_models(self) -> list:
         if self.static_models:

@@ -35,6 +35,7 @@ Requires the Ollama app running in the menu bar.
 |---------|--------|
 | `/search <query>` | Call `web_search` directly and optionally `web_fetch` a result |
 | `/models` (or `/model`) | Interactive model selector (↑/↓, Enter, Esc) |
+| `/adapters` | Enable/disable providers (Space toggles, Enter verifies + saves) |
 | `/save` | Save the current conversation to disk |
 | `/resume` | Restore a previously saved conversation (interactive selector) |
 | `/compact` | Shrink the conversation to free up context now |
@@ -90,8 +91,20 @@ auth = "oauth"        # no API key; token from `ant auth login` (ant CLI require
 profile = "default"   # optional ant profile name
 ```
 
+Each adapter has an `enable` flag (missing = enabled). Manage them with the
+**`/adapters`** command: Space toggles, Enter saves the flags back to
+`adapters.toml` and **verifies** each enabled adapter — a connectivity check
+for Ollama / API-key providers, and for an enterprise OAuth provider the
+one-time browser login (`ant auth login --profile <profile>`) if it hasn't been
+done yet. After the first login, the SDK refreshes and re-stores the token
+automatically; you only re-login when the refresh token hard-expires.
+
 Secrets are never stored in the file — API keys come from the environment and
-the OAuth token is fetched from the `ant` CLI per session.
+the OAuth profile is managed by the `ant` CLI.
+
+> The enterprise OAuth login needs the `ant` CLI:
+> `brew install anthropics/tap/ant`, then run `/adapters` and enable the
+> enterprise provider to trigger the login.
 
 In `/models`, Ollama models also show their estimated memory footprint,
 coloured **red** when it exceeds 80% of system memory (won't fit comfortably).

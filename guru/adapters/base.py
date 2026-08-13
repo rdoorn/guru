@@ -25,6 +25,15 @@ class Adapter(ABC):
     """Base class for provider adapters."""
 
     name: str = "adapter"
+    enabled: bool = True
+
+    def verify(self) -> tuple:
+        """Check the adapter works, triggering auth if needed.
+
+        Returns ``(ok, message)``. The default probes ``available()``;
+        adapters override to run connectivity or login checks.
+        """
+        return (self.available(), "")
 
     @abstractmethod
     def available(self) -> bool:

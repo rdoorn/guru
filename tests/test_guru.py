@@ -281,6 +281,31 @@ class TestActiveSpecs:
         assert 'search_tools' in names and 'web_fetch' in names
 
 
+class TestAdapterConfigRoundTrip:
+    """Tests for config.save_adapter_configs / load_adapter_configs."""
+
+    def test_round_trip_preserves_enable_and_fields(
+            self, tmp_path, monkeypatch) -> None:
+        path = tmp_path / 'adapters.toml'
+        monkeypatch.setattr(config, 'ADAPTERS_PATH', path)
+        monkeypatch.setattr(config, 'GURU_HOME', tmp_path)
+        configs = [
+            {'name': 'Ollama', 'type': 'ollama',
+             'url': 'http://localhost:11434', 'enable': True},
+            {'name': 'Anthropic Enterprise', 'type': 'anthropic',
+             'auth': 'oauth', 'profile': 'guru', 'enable': False,
+             'thinking': True},
+        ]
+        config.save_adapter_configs(configs)
+        loaded = config.load_adapter_configs()
+        assert loaded[0]['name'] == 'Ollama'
+        assert loaded[0]['enable'] is True
+        assert loaded[1]['enable'] is False
+        assert loaded[1]['auth'] == 'oauth'
+        assert loaded[1]['profile'] == 'guru'
+        assert loaded[1]['thinking'] is True
+
+
 class TestAnthropicTranslation:
     """Tests for the pure Anthropic translation helpers."""
 

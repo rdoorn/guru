@@ -31,6 +31,11 @@ class OllamaAdapter(Adapter):
         except Exception:
             return False
 
+    def verify(self) -> tuple:
+        if self.available():
+            return (True, "daemon reachable")
+        return (False, "Ollama daemon not reachable — launch the Ollama app")
+
     def list_models(self) -> list:
         try:
             models = ollama.list().models

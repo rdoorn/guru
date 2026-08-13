@@ -177,6 +177,47 @@ def load_adapter_configs() -> list:
     return data.get('adapter', [])
 
 
+def _toml_value(value: object) -> str:
+    """Serialize a scalar/list value to TOML."""
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return '[' + ', '.join(_toml_value(v) for v in value) + ']'
+    text = str(value).replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{text}"'
+
+
+def save_adapter_configs(configs: list) -> None:
+    """Write adapter config dicts back to adapters.toml.
+
+    Reformats the file (inline comments are not preserved). Only structural
+    config is written — secrets stay in env vars / the ant profile.
+    """
+    order = ('name', 'type', 'enable', 'auth', 'url', 'base_url',
+             'api_key_env', 'profile', 'models', 'thinking')
+    lines = [
+        '# guru adapter configuration.',
+        '# Managed by the /adapters command. Secrets are never stored here —',
+        '# use environment variables or an `ant auth login` profile.',
+        '',
+    ]
+    for cfg in configs:
+        lines.append('[[adapter]]')
+        for key in order:
+            if key in cfg and cfg[key] is not None:
+                lines.append(f'{key} = {_toml_value(cfg[key])}')
+        # Preserve any keys not in the known order.
+        for key, val in cfg.items():
+            if key not in order and val is not None:
+                lines.append(f'{key} = {_toml_value(val)}')
+        lines.append('')
+    GURU_HOME.mkdir(parents=True, exist_ok=True)
+    text = '\n'.join(lines).rstrip() + '\n'
+    ADAPTERS_PATH.write_text(text, encoding='utf-8')
+
+
 # Create global config on import; project state stays lazy.
 ensure_setup()
 ALLOWED_DOMAINS = load_allowed_domains()
