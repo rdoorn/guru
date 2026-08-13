@@ -72,7 +72,10 @@ def run() -> None:
     kb = KeyBindings()
 
     @kb.add('c-d')
+    @kb.add('c-c')
     def _exit(event) -> None:
+        # In A.2, Ctrl+C will cancel the active agent's task and only exit
+        # when idle; for the shell it just exits.
         event.app.exit()
 
     @kb.add('c-right')
