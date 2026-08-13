@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -221,6 +222,15 @@ def _resolve_context_window(model: str) -> tuple:
     if ceiling:
         num_ctx = min(num_ctx, ceiling)
     return (num_ctx, ceiling)
+
+
+def _model_param_size(model: str) -> str:
+    """Return a model's parameter size (e.g. '32B'), or '?' if unknown."""
+    try:
+        info = ollama.show(model)
+        return getattr(info.details, 'parameter_size', '') or '?'
+    except Exception:
+        return '?'
 
 
 _ensure_setup()
@@ -533,9 +543,14 @@ messages = [
 ]
 
 # Effective context window and architecture ceiling, resolved at startup and
-# on every model switch. _ctx_used tracks the latest measured occupancy.
+# on every model switch. _ctx_used tracks the latest measured occupancy;
+# _session_in/_session_out accumulate tokens across the whole session.
 _NUM_CTX, _CTX_CEILING = _resolve_context_window(MODEL)
+_MODEL_SIZE = _model_param_size(MODEL)
 _ctx_used: int = 0
+_session_in: int = 0
+_session_out: int = 0
+_git_branch_value = None
 
 # Active tools persist for the lifetime of the conversation — once a tool is
 # discovered via search_tools it stays available without re-searching.
@@ -684,7 +699,7 @@ def _pick(title: str, options: list, active_idx: int = -1):
 
 def _models_command() -> None:
     """Interactive model selector — ↑/↓ to navigate, Enter to select."""
-    global MODEL, _NUM_CTX, _CTX_CEILING
+    global MODEL, _NUM_CTX, _CTX_CEILING, _MODEL_SIZE
 
     try:
         model_list = ollama.list().models
@@ -707,6 +722,7 @@ def _models_command() -> None:
         return
     MODEL = names[idx]
     _NUM_CTX, _CTX_CEILING = _resolve_context_window(MODEL)
+    _MODEL_SIZE = _model_param_size(MODEL)
     console.print(
         f"\n[green]Model:[/green] [bold]{MODEL}[/bold]"
         f" [dim](context {_NUM_CTX:,})[/dim]"
@@ -842,6 +858,8 @@ def _resume_command() -> None:
 _status_active: bool = False
 _SGR = {'green': '32', 'yellow': '33', 'red': '31'}
 _TB_TAG = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
+_GRAY_SGR = '90'
+_GRAY_TAG = 'ansibrightblack'
 
 
 def _term_size() -> tuple:
@@ -850,8 +868,25 @@ def _term_size() -> tuple:
     return size.lines, size.columns
 
 
-def _status_fields() -> tuple:
-    """Return (text, colour) for the current context occupancy."""
+def _refresh_git_branch() -> None:
+    """Cache the current git branch (or None if not a repo)."""
+    global _git_branch_value
+    try:
+        proc = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            capture_output=True, text=True, timeout=1, cwd=str(Path.cwd()),
+        )
+        branch = proc.stdout.strip()
+        _git_branch_value = branch if proc.returncode == 0 and branch else None
+    except Exception:
+        _git_branch_value = None
+
+
+def _status_parts() -> tuple:
+    """Return (left, ctx_segment, right, colour) for the status line.
+
+    Only the ctx_segment is coloured by fullness; left and right are gray.
+    """
     total = _NUM_CTX or 1
     pct = min(1.0, _ctx_used / total)
     filled = round(pct * 10)
@@ -862,12 +897,13 @@ def _status_fields() -> tuple:
         colour = 'yellow'
     else:
         colour = 'green'
-    text = (
-        f" {MODEL.split(':')[0]} · ctx {bar} {int(pct * 100)}%"
-        f"  {_ctx_used / 1000:.1f}k/{_NUM_CTX / 1000:.1f}k"
-        f" · compact at {int(COMPACT_AT * 100)}%"
+    left = f"🤖 {MODEL.split(':')[0]} | 💪 {_MODEL_SIZE} | "
+    ctx_segment = f"🧠 {int(pct * 100)}% {bar}"
+    right = (
+        f" | ↓ {_session_in} | ↑ {_session_out}"
+        f" | 📁 {Path.cwd().name} | 🌿 {_git_branch_value or 'none'}"
     )
-    return text, colour
+    return left, ctx_segment, right, colour
 
 
 def _status_enable() -> None:
@@ -891,12 +927,21 @@ def _status_draw() -> None:
     if not _status_active:
         return
     rows, cols = _term_size()
-    text, colour = _status_fields()
-    text = text[:cols].ljust(cols)
+    left, ctx_segment, right, colour = _status_parts()
+    plain = left + ctx_segment + right
+    if len(plain) > cols:
+        # Fall back to uncoloured, truncated text if it will not fit.
+        body = plain[:cols]
+    else:
+        body = (
+            f'\x1b[{_GRAY_SGR}m{left}\x1b[0m'
+            f'\x1b[{_SGR[colour]}m{ctx_segment}\x1b[0m'
+            f'\x1b[{_GRAY_SGR}m{right}\x1b[0m'
+        )
     sys.stdout.write(
         '\x1b7'                       # save cursor
         f'\x1b[{rows};1H\x1b[2K'      # go to status row, clear it
-        f'\x1b[2;{_SGR[colour]}m{text}\x1b[0m'
+        f'{body}'
         '\x1b8'                       # restore cursor
     )
     sys.stdout.flush()
@@ -927,11 +972,19 @@ def _sigwinch_handler(signum: int, frame: object) -> None:
         _status_draw()
 
 
+def _tb_escape(text: str) -> str:
+    """Escape text for prompt_toolkit HTML."""
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 def _bottom_toolbar() -> HTML:
     """Return the context status as a prompt_toolkit bottom toolbar."""
-    text, colour = _status_fields()
-    safe = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    return HTML(f'<{_TB_TAG[colour]}>{safe}</{_TB_TAG[colour]}>')
+    left, ctx_segment, right, colour = _status_parts()
+    return HTML(
+        f'<{_GRAY_TAG}>{_tb_escape(left)}</{_GRAY_TAG}>'
+        f'<{_TB_TAG[colour]}>{_tb_escape(ctx_segment)}</{_TB_TAG[colour]}>'
+        f'<{_GRAY_TAG}>{_tb_escape(right)}</{_GRAY_TAG}>'
+    )
 
 
 # --- Conversation compaction (hybrid: trim → evict → summarise) --------------
@@ -1120,7 +1173,7 @@ def _print_banner() -> None:
 
 def _main() -> None:
     """Run the interactive prompt loop."""
-    global _ctx_used
+    global _ctx_used, _session_in, _session_out
     signal.signal(signal.SIGINT, _sigint_handler)
     signal.signal(signal.SIGWINCH, _sigwinch_handler)
     atexit.register(
@@ -1128,6 +1181,7 @@ def _main() -> None:
     )
     _print_banner()
     while True:
+        _refresh_git_branch()
         try:
             question = _session.prompt(
                 '\nYou> ',
@@ -1196,8 +1250,6 @@ def _main() -> None:
 
         called: set = set()
         nudged: int = 0
-        total_prompt_tokens: int = 0
-        total_eval_tokens: int = 0
 
         _status_enable()
         try:
@@ -1212,10 +1264,9 @@ def _main() -> None:
                     options={'num_ctx': _NUM_CTX},
                 )
 
-                total_prompt_tokens += (
-                    getattr(response, 'prompt_eval_count', 0) or 0)
-                total_eval_tokens += (
-                    getattr(response, 'eval_count', 0) or 0)
+                # Accumulate session token counters for the status line.
+                _session_in += getattr(response, 'prompt_eval_count', 0) or 0
+                _session_out += getattr(response, 'eval_count', 0) or 0
                 # Latest prompt_eval_count is the true window occupancy.
                 _ctx_used = (
                     getattr(response, 'prompt_eval_count', 0) or _ctx_used)
@@ -1257,17 +1308,6 @@ def _main() -> None:
                     console.print("\n[bold green]Qwen>[/bold green]")
                     console.print(Markdown(content))
                     console.print()
-                    ctx_str = (
-                        f"{_ctx_used:,} / {_NUM_CTX:,}"
-                        if _NUM_CTX else
-                        f"{_ctx_used:,}"
-                    )
-                    console.rule(
-                        f"[dim]{MODEL}  ·  ctx {ctx_str}  ·  "
-                        f"in {total_prompt_tokens:,}"
-                        f"  ·  out {total_eval_tokens:,}[/dim]",
-                        style="dim",
-                    )
                     break
 
                 # Execute requested tools

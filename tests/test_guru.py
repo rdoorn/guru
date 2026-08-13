@@ -239,22 +239,34 @@ class TestCompactMessages:
         assert result[-1]['content'] == 'a2'
 
 
-class TestStatusFields:
-    """Tests for _status_fields colour thresholds."""
+class TestStatusParts:
+    """Tests for _status_parts colour thresholds and segments."""
 
     def test_green_yellow_red(self, monkeypatch) -> None:
         monkeypatch.setattr(guru, '_NUM_CTX', 1000)
         monkeypatch.setattr(guru, 'MODEL', 'demo:latest')
 
         monkeypatch.setattr(guru, '_ctx_used', 100)
-        _, colour = guru._status_fields()
-        assert colour == 'green'
+        assert guru._status_parts()[3] == 'green'
 
         monkeypatch.setattr(guru, '_ctx_used', 780)
-        text, colour = guru._status_fields()
+        left, ctx_segment, right, colour = guru._status_parts()
         assert colour == 'yellow'
-        assert '78%' in text
+        assert '78%' in ctx_segment
 
         monkeypatch.setattr(guru, '_ctx_used', 900)
-        _, colour = guru._status_fields()
-        assert colour == 'red'
+        assert guru._status_parts()[3] == 'red'
+
+    def test_segments_include_expected_fields(self, monkeypatch) -> None:
+        monkeypatch.setattr(guru, '_NUM_CTX', 1000)
+        monkeypatch.setattr(guru, '_ctx_used', 100)
+        monkeypatch.setattr(guru, 'MODEL', 'demo:latest')
+        monkeypatch.setattr(guru, '_MODEL_SIZE', '32B')
+        monkeypatch.setattr(guru, '_session_in', 1234)
+        monkeypatch.setattr(guru, '_session_out', 56)
+        monkeypatch.setattr(guru, '_git_branch_value', 'main')
+
+        left, ctx_segment, right, _ = guru._status_parts()
+        assert 'demo' in left and '32B' in left
+        assert '🧠' in ctx_segment
+        assert '1234' in right and '56' in right and 'main' in right

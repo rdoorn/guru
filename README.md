@@ -39,10 +39,16 @@ Requires the Ollama app running in the menu bar.
 
 ## Context management
 
-A status bar pinned to the bottom of the screen shows how full the model's
-context window is (`ctx ████████░░ 78%  26.1k/32.8k`). During model generation
-it stays fixed via a terminal scroll region; at the input prompt the same
-info is shown in the prompt toolbar.
+A status bar pinned to the bottom of the screen shows session state:
+
+```
+🤖 qwen3-abliterated-32k | 💪 8.2B | 🧠 28% ███░░░░░░░ | ↓ 289898 | ↑ 784 | 📁 guru | 🌿 main
+```
+
+model · parameter size · context fullness (coloured green/yellow/red) ·
+session input tokens · output tokens · current directory · git branch. During
+model generation it stays fixed via a terminal scroll region; at the input
+prompt the same info is shown in the prompt toolbar.
 
 - **Window size** — guru resolves the effective `num_ctx` from the model's
   modelfile (falling back to `4096`), capped at the model's architecture
