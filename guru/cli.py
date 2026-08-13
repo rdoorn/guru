@@ -76,10 +76,11 @@ def _select_model(adapter: object, model_id: str) -> None:
 
 
 def _restore_last(explicit_model) -> bool:
-    """Restore the last-used adapter + model and ensure it is logged in.
+    """Restore the last-used adapter + model, if it still exists.
 
-    Skipped when --model was passed explicitly. Returns True if a saved
-    selection was restored.
+    Skipped when --model was passed explicitly. Warns and returns False (so
+    the caller falls back) if the adapter is gone/unavailable or the saved
+    model no longer exists on it — never selects a stale model.
     """
     if explicit_model:
         return False
@@ -90,32 +91,52 @@ def _restore_last(explicit_model) -> bool:
     adapter = next(
         (a for a in ADAPTERS if a.name == name and a.enabled), None)
     if adapter is None:
+        ui.console.print(
+            f"[yellow]Last adapter '{name}' is no longer configured;"
+            f" selecting another model.[/yellow]")
+        return False
+    ok, msg = adapter.verify()
+    if not ok:
+        ui.console.print(
+            f"[yellow]Last adapter '{name}' is unavailable ({msg});"
+            f" selecting another model.[/yellow]")
+        return False
+    available = {m.model_id for m in adapter.list_models()}
+    if model_id not in available:
+        ui.console.print(
+            f"[yellow]Last model '{model_id}' no longer exists on"
+            f" '{name}'; selecting another model.[/yellow]")
         return False
     _select_model(adapter, model_id)
-    ok, msg = adapter.verify()
-    style = 'dim' if ok else 'yellow'
-    ui.console.print(
-        f"[{style}]{adapter.name}: {msg or ('ok' if ok else 'not ready')}"
-        f"[/{style}]"
-    )
     return True
 
 
-def _startup_select(default_model: str) -> None:
-    """Pick a sensible active adapter+model at startup.
+def _startup_select(explicit_model) -> None:
+    """Pick an active adapter+model: honour --model, else first available.
 
-    Prefer an enabled Ollama adapter with the --model argument (preserves the
-    original default); otherwise use the first enabled adapter's first model.
+    With no --model, picks the first available model of the first enabled
+    adapter (Ollama first), preferring the default model when it's installed.
+    Only an explicit --model is trusted verbatim (Ollama may pull it).
     """
     enabled = _enabled_adapters()
-    for adapter in enabled:
-        if isinstance(adapter, OllamaAdapter):
-            _select_model(adapter, default_model)
-            return
-    adapter = enabled[0]
-    models = adapter.list_models()
-    _select_model(
-        adapter, models[0].model_id if models else default_model)
+    if explicit_model:
+        target = next(
+            (a for a in enabled if isinstance(a, OllamaAdapter)), enabled[0])
+        _select_model(target, explicit_model)
+        return
+    ordered = sorted(
+        enabled, key=lambda a: 0 if isinstance(a, OllamaAdapter) else 1)
+    for adapter in ordered:
+        model_ids = [m.model_id for m in adapter.list_models()]
+        if not model_ids:
+            continue
+        default_ok = (
+            isinstance(adapter, OllamaAdapter)
+            and DEFAULT_MODEL in model_ids)
+        pick = DEFAULT_MODEL if default_ok else model_ids[0]
+        _select_model(adapter, pick)
+        return
+    _select_model(enabled[0], DEFAULT_MODEL)
 
 
 def _models_command() -> None:
