@@ -16,10 +16,12 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.widgets import HorizontalLine, TextArea
 
 from guru import ui
 from guru.agents import AgentManager
+
+_CTX_COLOUR = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 
 
 def run() -> None:
@@ -40,14 +42,19 @@ def run() -> None:
         parts: list = []
         for active, title in manager.tabs():
             parts.append(
-                ('reverse' if active else 'class:tab', f' {title} '))
+                ('reverse' if active else 'ansibrightblack', f'[{title}]'))
+            parts.append(('', ' '))
         return FormattedText(parts)
 
     tabline = Window(FormattedTextControl(_tabs), height=1)
 
     def _status() -> FormattedText:
-        left, ctx, right, _ = ui._status_parts()
-        return FormattedText([('', left + ctx + right)])
+        left, ctx, right, colour = ui._status_parts()
+        return FormattedText([
+            ('ansibrightblack', left),
+            (_CTX_COLOUR[colour], ctx),
+            ('ansibrightblack', right),
+        ])
 
     statusline = Window(FormattedTextControl(_status), height=1)
 
@@ -76,7 +83,15 @@ def run() -> None:
     def _prev(event) -> None:
         manager.switch(-1)
 
-    root = HSplit([output, tabline, statusline, input_area])
+    # Layout, top to bottom: output · rule · prompt · rule · status · tabs.
+    root = HSplit([
+        output,
+        HorizontalLine(),
+        input_area,
+        HorizontalLine(),
+        statusline,
+        tabline,
+    ])
     app = Application(
         layout=Layout(root, focused_element=input_area),
         key_bindings=kb,
