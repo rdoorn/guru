@@ -306,6 +306,19 @@ class TestAdapterConfigRoundTrip:
         assert loaded[1]['thinking'] is True
 
 
+class TestSettings:
+    """Tests for config.load_settings / save_settings."""
+
+    def test_round_trip(self, tmp_path, monkeypatch) -> None:
+        path = tmp_path / '.guru' / 'settings.json'
+        monkeypatch.setattr(config, 'PROJECT_SETTINGS_PATH', path)
+        assert config.load_settings() == {}
+        config.save_settings({'adapter': 'Claude Code', 'model': 'x'})
+        loaded = config.load_settings()
+        assert loaded['adapter'] == 'Claude Code'
+        assert loaded['model'] == 'x'
+
+
 class TestAnthropicTranslation:
     """Tests for the pure Anthropic translation helpers."""
 

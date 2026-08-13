@@ -99,6 +99,11 @@ one-time browser login (`ant auth login --profile <profile>`) if it hasn't been
 done yet. After the first login, the SDK refreshes and re-stores the token
 automatically; you only re-login when the refresh token hard-expires.
 
+Opening `/models` **logs in / verifies every enabled adapter** first, so the
+list is complete and usable. guru remembers the last adapter + model you used
+per project in `.guru/settings.json` and restores + re-authenticates it on the
+next startup.
+
 Secrets are never stored in the file — API keys come from the environment and
 the OAuth profile is managed by the `ant` CLI.
 

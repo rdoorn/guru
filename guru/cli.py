@@ -13,6 +13,8 @@ from guru.domain import conversation, tools
 ADAPTERS: list = []
 ADAPTER_CONFIGS: list = []
 
+DEFAULT_MODEL = "qwen3-abliterated-32k:latest"
+
 
 def _instantiate(cfg: dict):
     """Build one adapter from a config dict, or None for unknown types."""
@@ -57,9 +59,36 @@ def _enabled_adapters() -> list:
 
 
 def _select_model(adapter: object, model_id: str) -> None:
-    """Make (adapter, model_id) the active provider + model."""
+    """Make (adapter, model_id) the active provider + model and persist it."""
     session.adapter = adapter
     adapter.activate(model_id)
+    config.save_settings({'adapter': adapter.name, 'model': model_id})
+
+
+def _restore_last(explicit_model) -> bool:
+    """Restore the last-used adapter + model and ensure it is logged in.
+
+    Skipped when --model was passed explicitly. Returns True if a saved
+    selection was restored.
+    """
+    if explicit_model:
+        return False
+    saved = config.load_settings()
+    name, model_id = saved.get('adapter'), saved.get('model')
+    if not name or not model_id:
+        return False
+    adapter = next(
+        (a for a in ADAPTERS if a.name == name and a.enabled), None)
+    if adapter is None:
+        return False
+    _select_model(adapter, model_id)
+    ok, msg = adapter.verify()
+    style = 'dim' if ok else 'yellow'
+    ui.console.print(
+        f"[{style}]{adapter.name}: {msg or ('ok' if ok else 'not ready')}"
+        f"[/{style}]"
+    )
+    return True
 
 
 def _startup_select(default_model: str) -> None:
@@ -104,8 +133,10 @@ def _models_command() -> None:
         if not adapter.enabled:
             continue
         _add(f"— {adapter.name} —", False, None)
-        if not adapter.available():
-            _add("  (unavailable)", False, None)
+        # Ensure each enabled adapter is logged in / reachable before listing.
+        ok, msg = adapter.verify()
+        if not ok:
+            _add(f"  (unavailable: {msg[:48]})", False, None)
             continue
         infos = adapter.list_models()
         if not infos:
@@ -242,7 +273,7 @@ def _print_banner() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="guru — local LLM agent")
-    parser.add_argument("--model", default="qwen3-abliterated-32k:latest")
+    parser.add_argument("--model", default=None)
     parser.add_argument(
         "--num-ctx", type=int, default=0,
         help="Override the context window (0 = auto-detect from the model)",
@@ -252,7 +283,9 @@ def main() -> None:
     session.num_ctx_override = args.num_ctx
     global ADAPTERS
     ADAPTERS = _build_adapters()
-    _startup_select(args.model)
+    # Restore the last-used adapter+model (and log in); else pick a default.
+    if not _restore_last(args.model):
+        _startup_select(args.model or DEFAULT_MODEL)
 
     session.messages = [
         {"role": "system", "content": config.build_system_prompt()}]

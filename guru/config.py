@@ -3,6 +3,7 @@
 This module owns filesystem locations and pure configuration. It imports no
 other guru module, so everything else can depend on it freely.
 """
+import json
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,6 +18,8 @@ PROJECT_GURU_DIR = Path.cwd() / '.guru'
 PROJECT_GURU_MD = PROJECT_GURU_DIR / 'GURU.md'       # appended to the global
 DOMAINS_ALLOW_PATH = PROJECT_GURU_DIR / 'domains_allow.txt'  # per-project
 PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
+# Remembers the last-used adapter + model for this project.
+PROJECT_SETTINGS_PATH = PROJECT_GURU_DIR / 'settings.json'
 
 # Search-engine backend host. web_search gates on this so "allow internet
 # access at least once" maps to approving the engine. Structured as a
@@ -150,6 +153,22 @@ def domain_of(url: str) -> str:
         # Bare host without a scheme (e.g. "example.com/path").
         host = urlparse('//' + url).hostname
     return (host or url).lower()
+
+
+def load_settings() -> dict:
+    """Load the project's last-used adapter + model, or {} if none."""
+    try:
+        return json.loads(
+            PROJECT_SETTINGS_PATH.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data: dict) -> None:
+    """Persist the project's last-used adapter + model."""
+    PROJECT_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROJECT_SETTINGS_PATH.write_text(
+        json.dumps(data, indent=2), encoding='utf-8')
 
 
 def build_system_prompt() -> str:
