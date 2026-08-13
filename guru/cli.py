@@ -245,6 +245,43 @@ def _adapters_command() -> None:
         _startup_select(session.model or '')
 
 
+def _human_ctx(n: int) -> str:
+    """Format a context size, e.g. 65536 -> '64k'."""
+    if n % (1024 * 1024) == 0:
+        return f"{n // (1024 * 1024)}M"
+    if n % 1024 == 0:
+        return f"{n // 1024}k"
+    return str(n)
+
+
+def _context_command() -> None:
+    """Pick a context window in halves of the model's max, down to 4k."""
+    ceiling = session.ctx_ceiling or session.num_ctx or 4096
+    options: list = []
+    n = ceiling
+    while n >= 4096:
+        options.append(n)
+        if n == 4096:
+            break
+        n = max(4096, n // 2)
+    labels = [f"{_human_ctx(v)}  ({v:,})" for v in options]
+    active_idx = options.index(session.num_ctx) \
+        if session.num_ctx in options else -1
+    idx = ui.pick(
+        'Context  ↑/↓ navigate · Enter select · Esc cancel',
+        labels, active_idx)
+    if idx is None:
+        return
+    session.num_ctx = options[idx]
+    if isinstance(session.adapter, OllamaAdapter):
+        # Respect the manual choice; don't let auto-fit override it.
+        session.adapter.mark_fitted()
+    ui.console.print(
+        f"[green]Context[/green] set to {session.num_ctx:,}"
+        f" (applies on the next turn)."
+    )
+
+
 def _handle_slash_search(query: str) -> None:
     """Directly invoke web_search and optionally web_fetch for testing."""
     if not tools.ensure_domain_allowed(config.SEARCH_BACKEND_DOMAIN):
@@ -296,9 +333,9 @@ def _print_banner() -> None:
     )
     ui.console.print(
         "[italic]/search[/italic] search · [italic]/models[/italic] model ·"
-        " [italic]/adapters[/italic] providers · [italic]/save[/italic] save ·"
-        " [italic]/resume[/italic] restore · [italic]/compact[/italic]"
-        " shrink context.\n"
+        " [italic]/context[/italic] size · [italic]/adapters[/italic]"
+        " providers · [italic]/save[/italic] save · [italic]/resume[/italic]"
+        " restore · [italic]/compact[/italic] shrink.\n"
     )
 
 
@@ -354,6 +391,9 @@ def main() -> None:
             continue
         if question == '/adapters':
             _adapters_command()
+            continue
+        if question == '/context':
+            _context_command()
             continue
         if question == '/save':
             conversation.save_conversation()

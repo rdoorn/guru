@@ -127,8 +127,13 @@ class OllamaAdapter(Adapter):
 
     # --- fit context to memory ----------------------------------------------
 
-    def _warm(self, num_ctx: int) -> bool:
-        """Load the model at a given context; return False if it won't load."""
+    def mark_fitted(self) -> None:
+        """Mark the current model's context as user-chosen (skips auto-fit)."""
+        if session.model:
+            self._fitted.add(session.model)
+
+    def _reload(self, num_ctx: int) -> bool:
+        """Reload the model at a given context to test the fit."""
         try:
             ollama.chat(
                 model=session.model,
@@ -152,42 +157,38 @@ class OllamaAdapter(Adapter):
             pass
         return True
 
-    def _fit_context(self) -> None:
-        """Shrink num_ctx until the model fits in GPU memory (no CPU spill).
+    def _fit_after_load(self) -> None:
+        """Once the model is loaded, scale context down if it spilled to CPU.
 
-        Ollama spills to CPU (slow) when weights + KV cache exceed VRAM. Halve
-        the context until it fits or we hit the floor, warning on each step.
+        Runs after a real turn has loaded the model. Ollama spills to CPU
+        (slow) when weights + KV cache exceed VRAM; halve the context until it
+        fits or we hit the floor, warning on each step. Once per model.
         """
         if session.model in self._fitted:
             return
         self._fitted.add(session.model)
+        if self._gpu_fits():
+            return
         ceiling = session.ctx_ceiling or session.num_ctx
-        num_ctx = session.num_ctx or _CTX_FLOOR
-        while True:
-            loaded = self._warm(num_ctx)
-            if loaded and self._gpu_fits():
-                session.num_ctx = num_ctx
-                return
+        num_ctx = session.num_ctx
+        while num_ctx > _CTX_FLOOR:
             smaller = max(_CTX_FLOOR, num_ctx // 2)
-            if smaller == num_ctx:
-                ui.console.print(
-                    f"[red]{session.model} still spills to CPU at the minimum"
-                    f" context {num_ctx:,} — it is too large for this"
-                    f" machine's memory. Consider a smaller model or"
-                    f" quant.[/red]")
-                session.num_ctx = num_ctx
-                return
-            reason = "won't load" if not loaded else "spilled to CPU"
             ui.console.print(
-                f"[yellow]{session.model} {reason} at context"
+                f"[yellow]{session.model} spilled to CPU at context"
                 f" {num_ctx:,}; scaling down to {smaller:,}"
                 f" (model max: {ceiling:,}).[/yellow]")
+            session.num_ctx = smaller
             num_ctx = smaller
+            if self._reload(smaller) and self._gpu_fits():
+                return
+        ui.console.print(
+            f"[red]{session.model} still spills to CPU at the minimum context"
+            f" {num_ctx:,} — too large for this machine's memory. Consider a"
+            f" smaller model or quant.[/red]")
 
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
-        self._fit_context()
         called: set = set()
         nudged = 0
         while True:
@@ -201,6 +202,8 @@ class OllamaAdapter(Adapter):
                 tools=session.active_tools,
                 options={'num_ctx': session.num_ctx},
             )
+            # The model is now loaded — check for CPU spill and scale down.
+            self._fit_after_load()
 
             session.session_in += (
                 getattr(response, 'prompt_eval_count', 0) or 0)

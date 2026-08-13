@@ -2,11 +2,22 @@
 import json
 from pathlib import Path
 
-from guru import config, session, ui
+from guru import cli, config, session, ui
 from guru.adapters import anthropic as anth
 from guru.adapters import litellm as lite
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import conversation, tools
+
+
+class TestHumanCtx:
+    """Tests for cli._human_ctx formatting."""
+
+    def test_kilo(self) -> None:
+        assert cli._human_ctx(65536) == '64k'
+        assert cli._human_ctx(4096) == '4k'
+
+    def test_mega(self) -> None:
+        assert cli._human_ctx(1024 * 1024) == '1M'
 
 
 class TestDomainOf:
