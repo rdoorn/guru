@@ -458,6 +458,23 @@ def sigwinch_handler(signum: int, frame: object) -> None:
         status_draw()
 
 
+def note_thinking() -> None:
+    """Show that the agent is working (before a blocking model call)."""
+    console.print("[dim]* thinking…[/dim]")
+
+
+def note_tool(name: str, arg: str) -> None:
+    """Show a tool invocation, e.g. '* web_search kubernetes version'."""
+    text = f"* {name} {arg}".rstrip()
+    console.print(text, style="cyan", markup=False)
+
+
+def debug(text: str) -> None:
+    """Print a debug line only when GURU_DEBUG is set in the environment."""
+    if os.environ.get('GURU_DEBUG'):
+        console.print(f"[DEBUG] {text}", style="dim yellow", markup=False)
+
+
 def _tb_escape(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 

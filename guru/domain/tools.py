@@ -70,10 +70,6 @@ def web_search(query: str) -> str:
             f"Access to the search engine '{config.SEARCH_BACKEND_DOMAIN}'"
             " was denied by the user. The search was not performed."
         )
-    # Tool output shown on screen is debug info for the user (the same text
-    # is sent to the model as normal input), so render it in the debug style.
-    ui.console.print(f"\n[SEARCH] {query}", style="dim yellow", markup=False)
-
     results = list(DDGS().text(query, max_results=10))
 
     scored = sorted(
@@ -106,8 +102,6 @@ def web_fetch(url: str) -> str:
     domain = config.domain_of(url)
     if not ensure_domain_allowed(domain):
         return f"Access to domain '{domain}' was denied by the user."
-    ui.console.print(f"\n[cyan]\\[FETCH][/cyan] {url}")
-
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
@@ -131,7 +125,6 @@ def fetch_github_releases(repo: str) -> str:
     Do NOT use web_search for version questions about GitHub projects —
     use this tool directly.
     """
-    ui.console.print(f"\n[cyan]\\[GITHUB][/cyan] {repo}")
     url = f"https://api.github.com/repos/{repo}/releases/latest"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -250,7 +243,6 @@ def search_tools(query: str) -> str:
 
     Matched tools are added to your active tool set and can be called directly.
     """
-    ui.console.print(f"\n[cyan]\\[TOOL_SEARCH][/cyan] {query}")
     matched = _match_tools(query)
     lines: list = [f"Tools matching '{query}':\n"]
     for name in matched:
@@ -319,9 +311,7 @@ def execute_tool(name: str, arguments: dict) -> str:
     Handles search_tools activation and unknown/error cases. The domain
     allow-list gate is applied inside the individual web tools.
     """
-    ui.console.print(
-        f"[cyan]\\[TOOL][/cyan] [bold]{name}[/bold]: {arguments}"
-    )
+    ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
     if name == "search_tools":
         result = search_tools(**arguments)
         for tn in _match_tools(arguments.get("query", "")):

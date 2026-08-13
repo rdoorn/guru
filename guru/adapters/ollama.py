@@ -127,6 +127,7 @@ class OllamaAdapter(Adapter):
         called: set = set()
         nudged = 0
         while True:
+            ui.note_thinking()
             # Non-streaming for tool-call rounds: more reliable tool-call
             # detection; streaming is reserved for the final text answer.
             response = ollama.chat(
@@ -147,16 +148,8 @@ class OllamaAdapter(Adapter):
 
             msg = response.message
 
-            if msg.thinking:
-                ui.console.print("\n[dim]\\[THINKING][/dim]")
-                ui.console.print(f"[dim italic]{msg.thinking}[/dim italic]")
-
-            ui.console.print(
-                f"[DEBUG] content={msg.content!r}"
-                f" tool_calls={msg.tool_calls}",
-                style="dim yellow",
-                markup=False,
-            )
+            ui.debug(
+                f"content={msg.content!r} tool_calls={msg.tool_calls}")
 
             session.messages.append(msg)
 

@@ -253,6 +253,7 @@ class AnthropicAdapter(Adapter):
         anth_tools = tool_defs(tools.active_specs())
 
         while True:
+            ui.note_thinking()
             kwargs: dict = {
                 'model': session.model,
                 'max_tokens': _MAX_TOKENS,
@@ -278,27 +279,16 @@ class AnthropicAdapter(Adapter):
             ui.status_draw()
 
             text_parts: list = []
-            thinking_parts: list = []
             tool_uses: list = []
             for block in resp.content:
-                if block.type == 'thinking':
-                    thinking_parts.append(getattr(block, 'thinking', '') or '')
-                elif block.type == 'text':
+                if block.type == 'text':
                     text_parts.append(block.text)
                 elif block.type == 'tool_use':
                     tool_uses.append(block)
 
-            if any(thinking_parts):
-                ui.console.print("\n[dim]\\[THINKING][/dim]")
-                ui.console.print(
-                    f"[dim italic]{' '.join(thinking_parts)}[/dim italic]")
-
-            ui.console.print(
-                f"[DEBUG] stop={resp.stop_reason}"
-                f" text={''.join(text_parts)!r}"
-                f" tools={[b.name for b in tool_uses]}",
-                style="dim yellow", markup=False,
-            )
+            ui.debug(
+                f"stop={resp.stop_reason} text={''.join(text_parts)!r}"
+                f" tools={[b.name for b in tool_uses]}")
 
             # Native history keeps precise tool linking for this turn.
             native.append({'role': 'assistant', 'content': resp.content})

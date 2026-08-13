@@ -191,6 +191,7 @@ class LiteLLMAdapter(Adapter):
         oa_tools = openai_tool_defs(tools.active_specs())
 
         while True:
+            ui.note_thinking()
             try:
                 resp = client.chat.completions.create(
                     model=session.model,
@@ -215,12 +216,9 @@ class LiteLLMAdapter(Adapter):
             text = msg.content or ''
             tool_calls = list(getattr(msg, 'tool_calls', None) or [])
 
-            ui.console.print(
-                f"[DEBUG] finish={resp.choices[0].finish_reason}"
-                f" text={text!r}"
-                f" tools={[t.function.name for t in tool_calls]}",
-                style="dim yellow", markup=False,
-            )
+            ui.debug(
+                f"finish={resp.choices[0].finish_reason} text={text!r}"
+                f" tools={[t.function.name for t in tool_calls]}")
 
             # Append the assistant turn to native history for id-linking.
             assistant: dict = {'role': 'assistant', 'content': text or None}
