@@ -72,11 +72,17 @@ def run() -> None:
     kb = KeyBindings()
 
     @kb.add('c-d')
-    @kb.add('c-c')
-    def _exit(event) -> None:
-        # In A.2, Ctrl+C will cancel the active agent's task and only exit
-        # when idle; for the shell it just exits.
+    def _quit(event) -> None:
         event.app.exit()
+
+    @kb.add('c-c')
+    def _ctrl_c(event) -> None:
+        # Double Ctrl+C within 1s exits; a single press cancels (for now,
+        # clears the input — in A.2 it will cancel the active agent's task).
+        if ui.note_ctrl_c():
+            event.app.exit()
+        else:
+            event.current_buffer.text = ''
 
     @kb.add('c-right')
     def _next(event) -> None:
