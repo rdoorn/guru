@@ -422,6 +422,11 @@ while True:
     except EOFError:
         break      # Ctrl+D exits
 
+    # Restore normal mode so Ctrl+C delivers SIGINT during the agent loop.
+    # pre_run=_enable_modify_other_keys re-enables it before the next prompt.
+    sys.stdout.write('\x1b[>4;0m')
+    sys.stdout.flush()
+
     if question.lower() in ["exit", "quit"]:
         break
 
