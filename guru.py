@@ -860,6 +860,9 @@ _SGR = {'green': '32', 'yellow': '33', 'red': '31'}
 _TB_TAG = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 _GRAY_SGR = '90'
 _GRAY_TAG = 'ansibrightblack'
+# prompt_toolkit's default bottom-toolbar style is reverse-video; clear it so
+# the toolbar has no background, matching the pinned generation bar.
+_TOOLBAR_STYLE = Style.from_dict({'bottom-toolbar': 'noreverse bg:default'})
 
 
 def _term_size() -> tuple:
@@ -1187,6 +1190,7 @@ def _main() -> None:
                 '\nYou> ',
                 pre_run=_enable_terminal_modes,
                 bottom_toolbar=_bottom_toolbar,
+                style=_TOOLBAR_STYLE,
             ).strip()
         except KeyboardInterrupt:
             # modifyOtherKeys Ctrl+C reaches here via prompt_toolkit (not
