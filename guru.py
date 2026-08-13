@@ -38,6 +38,13 @@ ANSI_SEQUENCES['\x1b[27;2;13~'] = Keys.F13  # xterm modifyOtherKeys format
 # instead of inserting the escape sequence literally into the buffer.
 ANSI_SEQUENCES['\x1b[99;5u'] = Keys.ControlC    # CSI u Ctrl+C
 ANSI_SEQUENCES['\x1b[27;5;99~'] = Keys.ControlC  # xterm modifyOtherKeys Ctrl+C
+# Map keyboard Enter in modifyOtherKeys mode to F14 so it can be bound to
+# submit independently of raw \r (which arrives from pasted newlines and must
+# NOT submit). Pasted \r is handled by the 'enter' binding as insert-newline.
+ANSI_SEQUENCES['\x1b[27;1;13~'] = Keys.F14  # xterm fmt, modifier=1 (no mod)
+ANSI_SEQUENCES['\x1b[27;0;13~'] = Keys.F14  # xterm fmt, modifier=0 (alt)
+ANSI_SEQUENCES['\x1b[13;1u'] = Keys.F14      # CSI u, modifier=1 (no mod)
+ANSI_SEQUENCES['\x1b[13u'] = Keys.F14        # CSI u short form
 
 console = Console(highlight=False)
 
@@ -353,7 +360,12 @@ active_tool_names: set = set()
 active_tools: list = [search_tools]
 
 
-# Key bindings: Enter submits, Shift+Enter or Escape+Enter inserts a newline.
+# Key bindings.
+# In modifyOtherKeys mode 2, the terminal re-encodes keyboard Enter as an
+# escape sequence (F14 below), leaving raw \r only for pasted newlines.
+# Raw \r therefore inserts a newline; only the re-encoded Enter submits.
+# Escape+Enter is the universal submit fallback for terminals that do not
+# re-encode Enter.
 _kb = KeyBindings()
 
 
@@ -362,15 +374,19 @@ def _shift_enter(event: object) -> None:
     event.current_buffer.insert_text('\n')
 
 
-@_kb.add('escape', 'enter')
-def _escape_enter(event: object) -> None:
-    """Fallback for terminals that can't distinguish Shift+Enter."""
-    event.current_buffer.insert_text('\n')
-
-
-@_kb.add('enter')
-def _enter(event: object) -> None:
+@_kb.add('f14')  # keyboard Enter via modifyOtherKeys — mapped above
+def _mk_enter(event: object) -> None:
     event.current_buffer.validate_and_handle()
+
+
+@_kb.add('escape', 'enter')  # universal submit fallback
+def _escape_enter(event: object) -> None:
+    event.current_buffer.validate_and_handle()
+
+
+@_kb.add('enter')  # raw \r — only arrives from paste; insert, never submit
+def _enter(event: object) -> None:
+    event.current_buffer.insert_text('\n')
 
 
 _session = PromptSession(
@@ -406,7 +422,10 @@ atexit.register(
 console.print(f"Using model: [bold]{MODEL}[/bold]")
 console.print("[bold]Qwen Web Agent[/bold]")
 console.print("Type [italic]'exit'[/italic] to quit.")
-console.print("Shift+Enter (or Escape+Enter) for a new line, Enter to submit.")
+console.print(
+    "Enter to submit · Escape+Enter to submit (fallback)"
+    " · Shift+Enter for newline."
+)
 console.print(
     "Type [italic]'/search <query>'[/italic] to search"
     " · [italic]'/models'[/italic] to switch model.\n"
