@@ -28,6 +28,10 @@ _args = _parser.parse_args()
 # member that is never sent by ordinary terminal use.
 ANSI_SEQUENCES['\x1b[13;2u'] = Keys.F13    # CSI u (iTerm2, Kitty, WezTerm)
 ANSI_SEQUENCES['\x1b[27;2;13~'] = Keys.F13  # xterm modifyOtherKeys format
+# Map Ctrl+C in modifyOtherKeys mode so prompt_toolkit raises KeyboardInterrupt
+# instead of inserting the escape sequence literally into the buffer.
+ANSI_SEQUENCES['\x1b[99;5u'] = Keys.ControlC    # CSI u Ctrl+C
+ANSI_SEQUENCES['\x1b[27;5;99~'] = Keys.ControlC  # xterm modifyOtherKeys Ctrl+C
 
 console = Console(highlight=False)
 
@@ -436,7 +440,15 @@ while True:
             '\nYou> ', pre_run=_enable_modify_other_keys
         ).strip()
     except KeyboardInterrupt:
-        continue   # Ctrl+C clears the current input
+        # modifyOtherKeys Ctrl+C reaches here via prompt_toolkit (not SIGINT),
+        # so track the press manually for double-Ctrl+C exit.
+        now = time.monotonic()
+        _ctrl_c_times[:] = [t for t in _ctrl_c_times if now - t <= 1.0]
+        _ctrl_c_times.append(now)
+        if len(_ctrl_c_times) >= 2:
+            console.print("\n[bold red]Exiting.[/bold red]")
+            sys.exit(0)
+        continue
     except EOFError:
         break      # Ctrl+D exits
 
