@@ -11,3 +11,6 @@ dependencies = [
     "requests>=2.34.2",
     "rich>=15.0.0",
 ]
+
+[tool.uv]
+exclude-newer = "2026-08-06T00:00:00Z"

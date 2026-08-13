@@ -1,7 +1,9 @@
 import argparse
 import atexit
 import os
+import signal
 import sys
+import time
 import ollama
 import requests
 from bs4 import BeautifulSoup
@@ -29,6 +31,21 @@ ANSI_SEQUENCES['\x1b[27;2;13~'] = Keys.F13  # xterm modifyOtherKeys format
 
 console = Console(highlight=False)
 
+_ctrl_c_times: list = []
+
+
+def _sigint_handler(signum: int, frame: object) -> None:
+    """Exit on double Ctrl+C within 1 s; otherwise cancel the current operation."""
+    now = time.monotonic()
+    _ctrl_c_times[:] = [t for t in _ctrl_c_times if now - t <= 1.0]
+    _ctrl_c_times.append(now)
+    if len(_ctrl_c_times) >= 2:
+        console.print("\n[bold red]Exiting.[/bold red]")
+        sys.exit(0)
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGINT, _sigint_handler)
 
 MODEL = _args.model
 
@@ -420,6 +437,7 @@ while True:
     console.print(f" {question} ", style="bold white on grey23")
     console.print()
 
+    msg_checkpoint = len(messages)
     messages.append({
         "role": "user",
         "content": question,
@@ -430,103 +448,119 @@ while True:
     total_prompt_tokens: int = 0
     total_eval_tokens: int = 0
 
-    while True:
-        # Non-streaming for tool-call rounds: more reliable tool-call
-        # detection; streaming is reserved for the final text answer.
-        response = ollama.chat(
-            model=MODEL,
-            messages=messages,
-            think=True,
-            tools=active_tools,
-        )
-
-        total_prompt_tokens += getattr(response, 'prompt_eval_count', 0) or 0
-        total_eval_tokens += getattr(response, 'eval_count', 0) or 0
-
-        msg = response.message
-
-        if msg.thinking:
-            console.print("\n[dim]\\[THINKING][/dim]")
-            console.print(f"[dim italic]{msg.thinking}[/dim italic]")
-
-        console.print(
-            f"[dim yellow]\\[DEBUG][/dim yellow]"
-            f" content={repr(msg.content)}"
-            f" tool_calls={msg.tool_calls}",
-        )
-
-        messages.append(msg)
-
-        if not msg.tool_calls:
-            content = (msg.content or '').strip()
-            if not content and nudged < 1:
-                nudged += 1
-                console.print("[dim yellow]\\[NUDGE][/dim yellow] empty response — retrying")
-                messages.append({
-                    "role": "user",
-                    "content": "Please continue — use search_tools to find what you need, then call it.",
-                })
-                continue
-            console.print("\n[bold green]Qwen>[/bold green]")
-            console.print(Markdown(content))
-            console.print()
-            ctx_str = (
-                f"{total_prompt_tokens:,} / {_ctx_size:,}"
-                if _ctx_size else
-                f"{total_prompt_tokens:,}"
+    try:
+        while True:
+            # Non-streaming for tool-call rounds: more reliable tool-call
+            # detection; streaming is reserved for the final text answer.
+            response = ollama.chat(
+                model=MODEL,
+                messages=messages,
+                think=True,
+                tools=active_tools,
             )
-            console.rule(
-                f"[dim]{MODEL}  ·  ctx {ctx_str}  ·  "
-                f"in {total_prompt_tokens:,}  ·  out {total_eval_tokens:,}[/dim]",
-                style="dim",
+
+            total_prompt_tokens += (
+                getattr(response, 'prompt_eval_count', 0) or 0)
+            total_eval_tokens += (
+                getattr(response, 'eval_count', 0) or 0)
+
+            msg = response.message
+
+            if msg.thinking:
+                console.print("\n[dim]\\[THINKING][/dim]")
+                console.print(f"[dim italic]{msg.thinking}[/dim italic]")
+
+            console.print(
+                f"[dim yellow]\\[DEBUG][/dim yellow]"
+                f" content={repr(msg.content)}"
+                f" tool_calls={msg.tool_calls}",
             )
-            break
 
-        # Execute requested tools
-        for call in msg.tool_calls:
+            messages.append(msg)
 
-            name = call.function.name
-            arguments = call.function.arguments
-
-            # Skip exact duplicates — model should not retry identical calls.
-            call_key = (name, tuple(sorted(arguments.items())))
-            if call_key in called:
-                console.print(
-                    f"[yellow]\\[SKIP][/yellow]"
-                    f" duplicate: {name}({arguments})"
+            if not msg.tool_calls:
+                content = (msg.content or '').strip()
+                if not content and nudged < 1:
+                    nudged += 1
+                    console.print(
+                        "[dim yellow]\\[NUDGE][/dim yellow]"
+                        " empty response — retrying"
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Please continue — use search_tools"
+                            " to find what you need, then call it."
+                        ),
+                    })
+                    continue
+                console.print("\n[bold green]Qwen>[/bold green]")
+                console.print(Markdown(content))
+                console.print()
+                ctx_str = (
+                    f"{total_prompt_tokens:,} / {_ctx_size:,}"
+                    if _ctx_size else
+                    f"{total_prompt_tokens:,}"
                 )
+                console.rule(
+                    f"[dim]{MODEL}  ·  ctx {ctx_str}  ·  "
+                    f"in {total_prompt_tokens:,}"
+                    f"  ·  out {total_eval_tokens:,}[/dim]",
+                    style="dim",
+                )
+                break
+
+            # Execute requested tools
+            for call in msg.tool_calls:
+
+                name = call.function.name
+                arguments = call.function.arguments
+
+                # Skip exact duplicates — do not retry identical calls.
+                call_key = (name, tuple(sorted(arguments.items())))
+                if call_key in called:
+                    console.print(
+                        f"[yellow]\\[SKIP][/yellow]"
+                        f" duplicate: {name}({arguments})"
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_name": name,
+                        "content": (
+                            f"Already called {name} with these arguments. "
+                            "Use the result from the previous call."
+                        ),
+                    })
+                    continue
+                called.add(call_key)
+
+                console.print(
+                    f"[cyan]\\[TOOL][/cyan] [bold]{name}[/bold]: {arguments}"
+                )
+
+                if name == "search_tools":
+                    result = search_tools(**arguments)
+                    for tool_name in _match_tools(arguments.get("query", "")):
+                        if tool_name not in active_tool_names:
+                            active_tool_names.add(tool_name)
+                            active_tools.append(TOOL_REGISTRY[tool_name]["fn"])
+                            console.print(
+                                f"[green]\\[ACTIVATED][/green]"
+                                f" {tool_name}"
+                            )
+                elif name in TOOL_REGISTRY:
+                    try:
+                        result = TOOL_REGISTRY[name]["fn"](**arguments)
+                    except Exception as e:
+                        result = f"Tool error: {e}"
+                else:
+                    result = f"Unknown tool: {name}"
+
                 messages.append({
                     "role": "tool",
                     "tool_name": name,
-                    "content": (
-                        f"Already called {name} with these arguments. "
-                        "Use the result from the previous call."
-                    ),
+                    "content": result,
                 })
-                continue
-            called.add(call_key)
-
-            console.print(
-                f"[cyan]\\[TOOL][/cyan] [bold]{name}[/bold]: {arguments}"
-            )
-
-            if name == "search_tools":
-                result = search_tools(**arguments)
-                for tool_name in _match_tools(arguments.get("query", "")):
-                    if tool_name not in active_tool_names:
-                        active_tool_names.add(tool_name)
-                        active_tools.append(TOOL_REGISTRY[tool_name]["fn"])
-                        console.print(f"[green]\\[ACTIVATED][/green] {tool_name}")
-            elif name in TOOL_REGISTRY:
-                try:
-                    result = TOOL_REGISTRY[name]["fn"](**arguments)
-                except Exception as e:
-                    result = f"Tool error: {e}"
-            else:
-                result = f"Unknown tool: {name}"
-
-            messages.append({
-                "role": "tool",
-                "tool_name": name,
-                "content": result,
-            })
+    except KeyboardInterrupt:
+        console.print("\n[yellow]\\[CANCELLED][/yellow] Response cancelled.")
+        del messages[msg_checkpoint:]
