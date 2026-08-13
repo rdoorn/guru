@@ -9,10 +9,16 @@ import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -391,9 +397,101 @@ console.print("[bold]Qwen Web Agent[/bold]")
 console.print("Type [italic]'exit'[/italic] to quit.")
 console.print("Shift+Enter (or Escape+Enter) for a new line, Enter to submit.")
 console.print(
-    "Type [italic]'/search <query>'[/italic]"
-    " to test search + fetch directly.\n"
+    "Type [italic]'/search <query>'[/italic] to search"
+    " · [italic]'/models'[/italic] to switch model.\n"
 )
+
+
+def _models_command() -> None:
+    """Interactive model selector — ↑/↓ to navigate, Enter to select."""
+    global MODEL, _ctx_size
+
+    try:
+        model_list = ollama.list().models
+    except Exception as e:
+        console.print(f"[red]Error listing models: {e}[/red]")
+        return
+
+    names = sorted(m.model for m in model_list)
+    if not names:
+        console.print("[yellow]No Ollama models found.[/yellow]")
+        return
+
+    state = {
+        'idx': next(
+            (i for i, n in enumerate(names) if n == MODEL), 0
+        ),
+    }
+
+    def _get_text() -> FormattedText:
+        lines: list = [
+            ('bold', ' Models  ↑/↓ navigate · Enter select · Esc cancel\n\n'),
+        ]
+        for i, name in enumerate(names):
+            cursor = i == state['idx']
+            active = name == MODEL
+            prefix = '▶ ' if cursor else '  '
+            suffix = ' ✓' if active else ''
+            if cursor and active:
+                style = 'class:cursor-active'
+            elif cursor:
+                style = 'class:cursor'
+            elif active:
+                style = 'class:active'
+            else:
+                style = ''
+            lines.append((style, f'  {prefix}{name}{suffix}\n'))
+        return FormattedText(lines)
+
+    kb = KeyBindings()
+
+    @kb.add('up')
+    def _up(event: object) -> None:
+        state['idx'] = (state['idx'] - 1) % len(names)
+
+    @kb.add('down')
+    def _down(event: object) -> None:
+        state['idx'] = (state['idx'] + 1) % len(names)
+
+    @kb.add('enter')
+    def _select(event: object) -> None:
+        event.app.exit(result=names[state['idx']])
+
+    @kb.add('escape')
+    @kb.add('c-c')
+    def _cancel(event: object) -> None:
+        event.app.exit(result=None)
+
+    model_style = Style.from_dict({
+        'cursor': 'bold ansicyan',
+        'cursor-active': 'bold ansigreen',
+        'active': 'ansigreen',
+    })
+
+    app = Application(
+        layout=Layout(
+            Window(
+                FormattedTextControl(_get_text, focusable=True),
+                height=len(names) + 2,
+            )
+        ),
+        key_bindings=kb,
+        style=model_style,
+        full_screen=False,
+        mouse_support=False,
+    )
+
+    selected: str | None = app.run()
+
+    if selected is None:
+        return
+    MODEL = selected
+    try:
+        info = ollama.show(MODEL)
+        _ctx_size = getattr(info.details, 'context_length', 0) or 0
+    except Exception:
+        _ctx_size = 0
+    console.print(f"\n[green]Model:[/green] [bold]{MODEL}[/bold]")
 
 
 def _handle_slash_search(query: str) -> None:
@@ -461,6 +559,10 @@ while True:
         break
 
     if not question:
+        continue
+
+    if question == '/models':
+        _models_command()
         continue
 
     if question.startswith("/search "):
