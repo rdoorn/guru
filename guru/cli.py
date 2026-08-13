@@ -346,6 +346,10 @@ def main() -> None:
         "--num-ctx", type=int, default=0,
         help="Override the context window (0 = auto-detect from the model)",
     )
+    parser.add_argument(
+        "--tui", action="store_true",
+        help="Launch the experimental full-screen multi-agent TUI",
+    )
     args, _ = parser.parse_known_args()
 
     session.num_ctx_override = args.num_ctx
@@ -358,6 +362,11 @@ def main() -> None:
     session.messages = [
         {"role": "system", "content": config.build_system_prompt()}]
     tools.reset_active_tools()
+
+    if args.tui:
+        from guru import tui
+        tui.run()
+        return
 
     signal.signal(signal.SIGINT, ui.sigint_handler)
     signal.signal(signal.SIGWINCH, ui.sigwinch_handler)
