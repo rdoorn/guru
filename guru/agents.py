@@ -17,6 +17,8 @@ class Agent:
     title: str = "main"
     lines: list = field(default_factory=list)
     status: str = "idle"        # idle | thinking | error
+    queue: list = field(default_factory=list)   # pending user messages
+    busy: bool = False          # a turn is running in the background
 
     def append(self, text: str) -> None:
         """Append a line (or block) to the scrollback buffer."""

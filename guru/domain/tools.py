@@ -18,6 +18,31 @@ _STOP_WORDS = {
 }
 
 
+# Pluggable domain approval — overridable by the TUI so it doesn't call the
+# blocking input() inside a full-screen app. Signature: (domain) -> bool.
+_domain_asker = None
+
+
+def set_domain_asker(fn) -> None:
+    """Install a custom domain-approval prompt (used by the TUI)."""
+    global _domain_asker
+    _domain_asker = fn
+
+
+def _ask_domain(domain: str) -> bool:
+    """Default terminal approval prompt (REPL)."""
+    ui.console.print(
+        f"\n[yellow]\\[ACCESS][/yellow] Request to access"
+        f" [bold]{domain}[/bold]."
+    )
+    try:
+        return input(
+            f"Allow access to '{domain}'? [y/N] ").strip().lower() \
+            in ('y', 'yes')
+    except (KeyboardInterrupt, EOFError):
+        return False
+
+
 def ensure_domain_allowed(domain: str) -> bool:
     """Return True if the domain is allowed, prompting the user if unknown.
 
@@ -27,15 +52,8 @@ def ensure_domain_allowed(domain: str) -> bool:
     domain = domain.lower()
     if domain in config.ALLOWED_DOMAINS:
         return True
-    ui.console.print(
-        f"\n[yellow]\\[ACCESS][/yellow] Request to access"
-        f" [bold]{domain}[/bold]."
-    )
-    try:
-        answer = input(f"Allow access to '{domain}'? [y/N] ").strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        answer = ''
-    if answer in ('y', 'yes'):
+    asker = _domain_asker or _ask_domain
+    if asker(domain):
         config.ALLOWED_DOMAINS.add(domain)
         config.persist_domain(domain)
         ui.console.print(

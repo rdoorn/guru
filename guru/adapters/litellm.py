@@ -186,11 +186,15 @@ class LiteLLMAdapter(Adapter):
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
+        session.cancel_requested = False
         client = self._client()
         native = to_openai_messages(session.messages)
         oa_tools = openai_tool_defs(tools.active_specs())
 
         while True:
+            if session.cancel_requested:
+                ui.console.print("[yellow]* cancelled[/yellow]")
+                return
             ui.note_thinking()
             try:
                 resp = client.chat.completions.create(

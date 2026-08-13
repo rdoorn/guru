@@ -217,9 +217,13 @@ class OllamaAdapter(Adapter):
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
+        session.cancel_requested = False
         called: set = set()
         nudged = 0
         while True:
+            if session.cancel_requested:
+                ui.console.print("[yellow]* cancelled[/yellow]")
+                return
             ui.note_thinking()
             # Non-streaming for tool-call rounds: more reliable tool-call
             # detection; streaming is reserved for the final text answer.

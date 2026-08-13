@@ -32,3 +32,6 @@ git_branch: Optional[str] = None
 messages: list = []
 active_tools: list = []
 active_tool_names: set = set()
+
+# Cooperative cancellation: adapters check this between rounds and stop.
+cancel_requested: bool = False

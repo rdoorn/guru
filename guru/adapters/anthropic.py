@@ -249,10 +249,14 @@ class AnthropicAdapter(Adapter):
         except Exception as e:
             ui.console.print(f"[red]Anthropic auth error: {e}[/red]")
             return
+        session.cancel_requested = False
         system, native = to_anthropic_messages(session.messages)
         anth_tools = tool_defs(tools.active_specs())
 
         while True:
+            if session.cancel_requested:
+                ui.console.print("[yellow]* cancelled[/yellow]")
+                return
             ui.note_thinking()
             kwargs: dict = {
                 'model': session.model,
