@@ -1,31 +1,24 @@
 """Anthropic provider adapter.
 
-One class, three configured auth modes:
+One class, two configured auth modes:
 
 - ``api_key`` — the ``anthropic`` SDK with an API key (+ optional ``base_url``)
   pointed at a local endpoint that speaks the Anthropic Messages API.
 - ``oauth`` — an ``ant``-managed profile under ``~/.config/anthropic``; the SDK
   refreshes and re-stores tokens and adds the ``oauth-2025-04-20`` beta header.
-- ``claude_code`` — reuse the OAuth token Claude Code stores in the macOS
-  Keychain (for enterprise accounts that allow Claude Code login but not API
-  keys). guru seeds its own copy under ``~/.guru`` and refreshes that copy
-  itself, so it does not depend on Claude Code running.
 
 Full tool parity: guru's tool directory is translated to Anthropic tool
 schema and the model's ``tool_use`` requests run through the shared
 ``guru.domain.tools.execute_tool``.
 """
-import json
 import os
 import pathlib
 import shutil
 import subprocess
-import time
 
-import requests
 from rich.markdown import Markdown
 
-from guru import config, session, ui
+from guru import session, ui
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
@@ -33,17 +26,6 @@ from guru.domain import tools
 # the SDK's non-streaming ceiling to avoid the large-output timeout guard.
 _MAX_TOKENS = 16000
 _DEFAULT_CONTEXT = 200000
-
-# --- claude_code auth mode ---------------------------------------------------
-# Reuse the OAuth token that Claude Code stores in the macOS Keychain. guru
-# seeds its own copy once, then refreshes that copy itself (Claude Code only
-# refreshes while running). The OAuth client identity below is not officially
-# documented — it is the well-known Claude Code client, validated empirically.
-_KEYCHAIN_SERVICE = "Claude Code-credentials"
-_CC_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-_CC_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
-_CC_BETA_HEADER = "oauth-2025-04-20"
-_REFRESH_MARGIN_MS = 60_000
 
 
 # --- pure translation helpers (unit-tested) ----------------------------------
@@ -121,7 +103,7 @@ def neutral_assistant(text: str, tool_calls: list) -> dict:
 # --- adapter -----------------------------------------------------------------
 
 class AnthropicAdapter(Adapter):
-    """Anthropic Messages API provider (api_key, oauth, or claude_code)."""
+    """Anthropic Messages API provider (api_key or oauth)."""
 
     def __init__(self, name: str = "Anthropic", auth: str = "api_key",
                  base_url=None, api_key_env=None, profile=None,
@@ -145,91 +127,8 @@ class AnthropicAdapter(Adapter):
                    or 'default')
         return pathlib.Path(base) / 'credentials' / f'{profile}.json'
 
-    # --- claude_code auth mode (reuse Claude Code's Keychain token) ----------
-
-    def _cc_store_path(self) -> pathlib.Path:
-        """guru's own copy of the Claude Code OAuth token."""
-        return config.GURU_HOME / 'claude_code_oauth.json'
-
-    def _cc_keychain_read(self):
-        """Read the claudeAiOauth blob from Claude Code's Keychain item."""
-        try:
-            out = subprocess.run(
-                ['security', 'find-generic-password',
-                 '-s', _KEYCHAIN_SERVICE, '-w'],
-                capture_output=True, text=True, timeout=10)
-            if out.returncode != 0:
-                return None
-            return json.loads(out.stdout).get('claudeAiOauth')
-        except Exception:
-            return None
-
-    def _cc_load(self):
-        """Load guru's token copy, seeding it from the Keychain if missing."""
-        path = self._cc_store_path()
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding='utf-8'))
-            except (OSError, json.JSONDecodeError):
-                pass
-        oauth = self._cc_keychain_read()
-        if oauth:
-            self._cc_save(oauth)
-        return oauth
-
-    def _cc_save(self, oauth: dict) -> None:
-        path = self._cc_store_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(oauth, indent=2), encoding='utf-8')
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-
-    def _cc_refresh(self, oauth: dict) -> dict:
-        """Refresh guru's copy of the token; never touches the Keychain."""
-        resp = requests.post(
-            _CC_TOKEN_URL,
-            json={
-                'grant_type': 'refresh_token',
-                'refresh_token': oauth.get('refreshToken'),
-                'client_id': _CC_CLIENT_ID,
-            },
-            headers={'Content-Type': 'application/json'},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        updated = dict(oauth)
-        updated['accessToken'] = data['access_token']
-        if data.get('refresh_token'):
-            updated['refreshToken'] = data['refresh_token']
-        if data.get('expires_in'):
-            updated['expiresAt'] = (
-                int(time.time() * 1000) + int(data['expires_in']) * 1000)
-        self._cc_save(updated)
-        return updated
-
-    def _cc_access_token(self) -> str:
-        oauth = self._cc_load()
-        if not oauth:
-            raise RuntimeError(
-                "no Claude Code credentials found — log in with Claude Code")
-        expires_at = oauth.get('expiresAt', 0) or 0
-        if expires_at - int(time.time() * 1000) < _REFRESH_MARGIN_MS:
-            oauth = self._cc_refresh(oauth)
-        return oauth['accessToken']
-
     def _client(self):
         import anthropic
-        if self.auth == 'claude_code':
-            kwargs = {
-                'auth_token': self._cc_access_token(),
-                'default_headers': {'anthropic-beta': _CC_BETA_HEADER},
-            }
-            if self.base_url:
-                kwargs['base_url'] = self.base_url
-            return anthropic.Anthropic(**kwargs)
         if self.auth == 'oauth':
             # The SDK reads the profile, refreshes tokens (persisting rotated
             # refresh tokens back to the credentials file), and adds the
@@ -257,8 +156,6 @@ class AnthropicAdapter(Adapter):
         if self.auth == 'oauth':
             # A profile must have been created by a one-time `ant auth login`.
             return self._oauth_credentials_path().exists()
-        if self.auth == 'claude_code':
-            return self._cc_load() is not None
         return True
 
     def _run_ant_login(self) -> tuple:
@@ -289,11 +186,6 @@ class AnthropicAdapter(Adapter):
             ok, msg = self._run_ant_login()
             if not ok:
                 return (False, msg)
-        if self.auth == 'claude_code':
-            try:
-                self._cc_access_token()
-            except Exception as e:
-                return (False, str(e))
         if self.static_models:
             return (True, "configured")
         try:
