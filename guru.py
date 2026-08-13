@@ -572,7 +572,7 @@ while True:
     if not question:
         continue
 
-    if question == '/models':
+    if question in ('/models', '/model'):
         _models_command()
         continue
 
