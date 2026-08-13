@@ -35,7 +35,7 @@ _ctrl_c_times: list = []
 
 
 def _sigint_handler(signum: int, frame: object) -> None:
-    """Exit on double Ctrl+C within 1 s; otherwise cancel the current operation."""
+    """Exit on double Ctrl+C within 1 s; otherwise cancel current operation."""
     now = time.monotonic()
     _ctrl_c_times[:] = [t for t in _ctrl_c_times if now - t <= 1.0]
     _ctrl_c_times.append(now)
@@ -194,9 +194,9 @@ TOOL_REGISTRY: dict = {
     "web_fetch": {
         "fn": web_fetch,
         "description": (
-            "Fetch and read the full text content of any webpage given its URL. "
-            "Use to read a specific page, follow a link, retrieve an endpoint "
-            "response, or read content from a known URL."
+            "Fetch and read the full text content of any webpage given its"
+            " URL. Use to read a specific page, follow a link, retrieve an"
+            " endpoint response, or read content from a known URL."
         ),
         "tags": [
             "fetch", "read", "url", "webpage", "page", "html", "content",
@@ -210,9 +210,9 @@ TOOL_REGISTRY: dict = {
     "fetch_github_releases": {
         "fn": fetch_github_releases,
         "description": (
-            "Get the latest release version, tag, and release notes for any "
-            "GitHub repository. Use for software version questions on projects "
-            "hosted on GitHub."
+            "Get the latest release version, tag, and release notes for any"
+            " GitHub repository. Use for software version questions on"
+            " projects hosted on GitHub."
         ),
         "tags": [
             "github", "release", "version", "latest", "software", "package",
@@ -220,14 +220,17 @@ TOOL_REGISTRY: dict = {
             "binary", "open source", "project",
         ],
         "parameters": {
-            "repo": "Repository in 'owner/repo' format (e.g. 'kubernetes/kubernetes')",
+            "repo": (
+                "Repository in 'owner/repo' format"
+                " (e.g. 'kubernetes/kubernetes')"
+            ),
         },
     },
 }
 
 
 def _match_tools(query: str) -> list:
-    """Rank TOOL_REGISTRY entries by weighted match across all metadata fields."""
+    """Rank TOOL_REGISTRY entries by weighted match across metadata fields."""
     keywords = [
         w.lower() for w in query.replace('-', ' ').split()
         if len(w) > 2 and w.lower() not in _STOP_WORDS
@@ -316,7 +319,7 @@ Guidelines:
 - Never use tools for math, logic, coding, or stable facts from training data.
 - If the first search returns poor results, refine the query and search again.
 - Always cite sources. Report only what tool results explicitly state.
-- If a question requires a location or name the user has not provided, ask first.
+- If a question requires a location or name not provided, ask first.
 """
 
 
@@ -383,17 +386,25 @@ console.print(f"Using model: [bold]{MODEL}[/bold]")
 console.print("[bold]Qwen Web Agent[/bold]")
 console.print("Type [italic]'exit'[/italic] to quit.")
 console.print("Shift+Enter (or Escape+Enter) for a new line, Enter to submit.")
-console.print("Type [italic]'/search <query>'[/italic] to test search + fetch directly.\n")
+console.print(
+    "Type [italic]'/search <query>'[/italic]"
+    " to test search + fetch directly.\n"
+)
 
 
 def _handle_slash_search(query: str) -> None:
     """Directly invoke web_search and optionally web_fetch for testing."""
-    results_text = web_search(query)
+    web_search(query)
 
     # Collect URLs from the raw DDGS results for the fetch menu
     raw = list(DDGS().text(query, max_results=10))
-    scored = sorted(raw, key=lambda r: _relevance_score(query, r), reverse=True)
-    relevant = [r for r in scored if _relevance_score(query, r) > 0][:5] or scored[:3]
+    scored = sorted(
+        raw, key=lambda r: _relevance_score(query, r), reverse=True
+    )
+    relevant = (
+        [r for r in scored if _relevance_score(query, r) > 0][:5]
+        or scored[:3]
+    )
     urls = [r.get('href') for r in relevant if r.get('href')]
 
     if not urls:
@@ -402,21 +413,28 @@ def _handle_slash_search(query: str) -> None:
     console.print("\n[bold]Fetch one of these URLs?[/bold]")
     for i, url in enumerate(urls, 1):
         console.print(f"  [cyan]{i}[/cyan] {url}")
-    console.print("  [dim]Enter a number to fetch, or press Enter to skip[/dim]")
+    console.print(
+        "  [dim]Enter a number to fetch, or press Enter to skip[/dim]"
+    )
 
     choice = input("> ").strip()
     if choice.isdigit():
         idx = int(choice) - 1
         if 0 <= idx < len(urls):
             content = web_fetch(urls[idx])
-            console.print("\n[bold green]--- Page content (first 2000 chars) ---[/bold green]")
+            console.print(
+                "\n[bold green]--- Page content (first 2000 chars) ---"
+                "[/bold green]"
+            )
             console.print(content[:2000])
             console.print("[bold green]--- End ---[/bold green]")
 
 
 while True:
     try:
-        question = _session.prompt('\nYou> ', pre_run=_enable_modify_other_keys).strip()
+        question = _session.prompt(
+            '\nYou> ', pre_run=_enable_modify_other_keys
+        ).strip()
     except KeyboardInterrupt:
         continue   # Ctrl+C clears the current input
     except EOFError:
@@ -569,3 +587,5 @@ while True:
     except KeyboardInterrupt:
         console.print("\n[yellow]\\[CANCELLED][/yellow] Response cancelled.")
         del messages[msg_checkpoint:]
+        sys.stdout.write('\x1b[>4;0m')
+        sys.stdout.flush()
