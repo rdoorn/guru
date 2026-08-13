@@ -1,9 +1,14 @@
 import argparse
 import atexit
+import json
 import os
 import signal
 import sys
 import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 import ollama
 import requests
 from bs4 import BeautifulSoup
@@ -24,7 +29,9 @@ from rich.markdown import Markdown
 
 _parser = argparse.ArgumentParser(description="guru — local Ollama agent")
 _parser.add_argument("--model", default="qwen3-abliterated-32k:latest")
-_args = _parser.parse_args()
+# parse_known_args (not parse_args) so importing the module under a test
+# runner — which passes its own argv — does not trigger a SystemExit.
+_args, _ = _parser.parse_known_args()
 
 # Teach prompt_toolkit to recognise Shift+Enter.
 # iTerm2 (and other modern terminals) already send these sequences natively —
@@ -62,9 +69,100 @@ def _sigint_handler(signum: int, frame: object) -> None:
     raise KeyboardInterrupt
 
 
-signal.signal(signal.SIGINT, _sigint_handler)
-
 MODEL = _args.model
+
+# --- Config, setup, and domain safeguards ------------------------------------
+
+GURU_HOME = Path(os.path.expanduser('~/.guru'))
+GURU_MD_PATH = GURU_HOME / 'GURU.md'
+DOMAINS_ALLOW_PATH = GURU_HOME / 'domains_allow.txt'
+LOCAL_GURU_MD = Path.cwd() / '.GURU.md'
+
+# Search-engine backend host. web_search gates on this so "allow internet
+# access at least once" maps to approving the engine. Structured as a
+# constant so additional engines can each declare their own backend host.
+SEARCH_BACKEND_DOMAIN = 'duckduckgo.com'
+
+DEFAULT_GURU_MD = """# GURU.md
+
+Instructions for the guru assistant. Edit this file to change guru's
+behaviour globally. Add a `.GURU.md` in a project directory to append
+project-specific instructions.
+
+## Persona
+
+- Be concise and direct.
+- Cite sources when you use a tool result.
+
+## Rules
+
+- Do not invent facts. If a tool did not return something, say so.
+"""
+
+
+def _ensure_setup() -> None:
+    """Create ~/.guru, a default GURU.md, and the domains file if missing."""
+    GURU_HOME.mkdir(parents=True, exist_ok=True)
+    if not GURU_MD_PATH.exists():
+        GURU_MD_PATH.write_text(DEFAULT_GURU_MD, encoding='utf-8')
+    if not DOMAINS_ALLOW_PATH.exists():
+        DOMAINS_ALLOW_PATH.touch()
+
+
+def _load_allowed_domains() -> set:
+    """Read the allow-list file into a set of lowercased domains."""
+    try:
+        lines = DOMAINS_ALLOW_PATH.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return set()
+    return {ln.strip().lower() for ln in lines if ln.strip()}
+
+
+def _domain_of(url: str) -> str:
+    """Return the lowercased hostname of a URL, port stripped."""
+    host = urlparse(url).hostname
+    if not host:
+        # Bare host without a scheme (e.g. "example.com/path").
+        host = urlparse('//' + url).hostname
+    return (host or url).lower()
+
+
+def _persist_domain(domain: str) -> None:
+    """Append a newly approved domain to the allow-list file."""
+    with DOMAINS_ALLOW_PATH.open('a', encoding='utf-8') as fh:
+        fh.write(domain + '\n')
+
+
+def _ensure_domain_allowed(domain: str) -> bool:
+    """Return True if the domain is allowed, prompting the user if unknown.
+
+    On approval the domain is added to the in-memory set and persisted.
+    Denial (no / empty / Ctrl+C) returns False and asks again next time.
+    """
+    domain = domain.lower()
+    if domain in _ALLOWED_DOMAINS:
+        return True
+    console.print(
+        f"\n[yellow]\\[ACCESS][/yellow] Request to access"
+        f" [bold]{domain}[/bold]."
+    )
+    try:
+        answer = input(f"Allow access to '{domain}'? [y/N] ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        answer = ''
+    if answer in ('y', 'yes'):
+        _ALLOWED_DOMAINS.add(domain)
+        _persist_domain(domain)
+        console.print(
+            f"[green]Allowed[/green] {domain} (saved to allow-list)."
+        )
+        return True
+    console.print(f"[red]Denied[/red] {domain}.")
+    return False
+
+
+_ensure_setup()
+_ALLOWED_DOMAINS: set = _load_allowed_domains()
 
 _STOP_WORDS = {
     'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for',
@@ -93,6 +191,11 @@ def web_search(query: str) -> str:
     information that changes over time, or topics likely after your training
     cutoff. Do NOT use for math, logic, coding, or stable well-known facts.
     """
+    if not _ensure_domain_allowed(SEARCH_BACKEND_DOMAIN):
+        return (
+            f"Access to the search engine '{SEARCH_BACKEND_DOMAIN}' was"
+            " denied by the user. The search was not performed."
+        )
     console.print(f"\n[cyan]\\[SEARCH][/cyan] {query}")
 
     results = list(DDGS().text(query, max_results=10))
@@ -126,6 +229,9 @@ def web_fetch(url: str) -> str:
     Fetch and read the text content of a webpage.
     Use this after web_search when you need more information from a result.
     """
+    domain = _domain_of(url)
+    if not _ensure_domain_allowed(domain):
+        return f"Access to domain '{domain}' was denied by the user."
     console.print(f"\n[cyan]\\[FETCH][/cyan] {url}")
 
     headers = {
@@ -340,10 +446,27 @@ Guidelines:
 """
 
 
+def _build_system_prompt() -> str:
+    """Assemble the system prompt: built-in + global GURU.md + local .GURU.md.
+
+    The built-in prompt is always first so the search_tools mechanism is
+    never lost. The local .GURU.md extends (appends to) the global one.
+    """
+    parts = [SYSTEM_PROMPT.strip()]
+    for path in (GURU_MD_PATH, LOCAL_GURU_MD):
+        try:
+            text = path.read_text(encoding='utf-8').strip()
+        except OSError:
+            continue
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
 messages = [
     {
         "role": "system",
-        "content": SYSTEM_PROMPT,
+        "content": _build_system_prompt(),
     }
 ]
 
@@ -431,21 +554,72 @@ def _enable_terminal_modes() -> None:
 
 _RESET_TERMINAL = '\x1b[>4;0m\x1b[?2004l'
 
-atexit.register(
-    lambda: (sys.stdout.write(_RESET_TERMINAL), sys.stdout.flush())
-)
+_SELECT_STYLE = Style.from_dict({
+    'cursor': 'bold ansicyan',
+    'cursor-active': 'bold ansigreen',
+    'active': 'ansigreen',
+})
 
-console.print(f"Using model: [bold]{MODEL}[/bold]")
-console.print("[bold]Qwen Web Agent[/bold]")
-console.print("Type [italic]'exit'[/italic] to quit.")
-console.print(
-    "Enter to submit · Shift+Enter for newline"
-    " · pasted newlines are safe.\n"
-)
-console.print(
-    "Type [italic]'/search <query>'[/italic] to search"
-    " · [italic]'/models'[/italic] to switch model.\n"
-)
+
+def _pick(title: str, options: list, active_idx: int = -1):
+    """Arrow-key selector. Returns the chosen index, or None if cancelled.
+
+    The option at active_idx is marked with a check and highlighted.
+    """
+    if not options:
+        return None
+    state = {'idx': active_idx if active_idx >= 0 else 0}
+
+    def _text() -> FormattedText:
+        lines: list = [('bold', f' {title}\n\n')]
+        for i, opt in enumerate(options):
+            cursor = i == state['idx']
+            is_active = i == active_idx
+            prefix = '▶ ' if cursor else '  '
+            suffix = ' ✓' if is_active else ''
+            if cursor and is_active:
+                style = 'class:cursor-active'
+            elif cursor:
+                style = 'class:cursor'
+            elif is_active:
+                style = 'class:active'
+            else:
+                style = ''
+            lines.append((style, f'  {prefix}{opt}{suffix}\n'))
+        return FormattedText(lines)
+
+    kb = KeyBindings()
+
+    @kb.add('up')
+    def _up(event: object) -> None:
+        state['idx'] = (state['idx'] - 1) % len(options)
+
+    @kb.add('down')
+    def _down(event: object) -> None:
+        state['idx'] = (state['idx'] + 1) % len(options)
+
+    @kb.add('enter')
+    def _select(event: object) -> None:
+        event.app.exit(result=state['idx'])
+
+    @kb.add('escape')
+    @kb.add('c-c')
+    def _cancel(event: object) -> None:
+        event.app.exit(result=None)
+
+    app = Application(
+        layout=Layout(
+            Window(
+                FormattedTextControl(_text, focusable=True),
+                height=len(options) + 2,
+            )
+        ),
+        key_bindings=kb,
+        style=_SELECT_STYLE,
+        full_screen=False,
+        mouse_support=False,
+    )
+    return app.run()
 
 
 def _models_command() -> None:
@@ -463,75 +637,15 @@ def _models_command() -> None:
         console.print("[yellow]No Ollama models found.[/yellow]")
         return
 
-    state = {
-        'idx': next(
-            (i for i, n in enumerate(names) if n == MODEL), 0
-        ),
-    }
-
-    def _get_text() -> FormattedText:
-        lines: list = [
-            ('bold', ' Models  ↑/↓ navigate · Enter select · Esc cancel\n\n'),
-        ]
-        for i, name in enumerate(names):
-            cursor = i == state['idx']
-            active = name == MODEL
-            prefix = '▶ ' if cursor else '  '
-            suffix = ' ✓' if active else ''
-            if cursor and active:
-                style = 'class:cursor-active'
-            elif cursor:
-                style = 'class:cursor'
-            elif active:
-                style = 'class:active'
-            else:
-                style = ''
-            lines.append((style, f'  {prefix}{name}{suffix}\n'))
-        return FormattedText(lines)
-
-    kb = KeyBindings()
-
-    @kb.add('up')
-    def _up(event: object) -> None:
-        state['idx'] = (state['idx'] - 1) % len(names)
-
-    @kb.add('down')
-    def _down(event: object) -> None:
-        state['idx'] = (state['idx'] + 1) % len(names)
-
-    @kb.add('enter')
-    def _select(event: object) -> None:
-        event.app.exit(result=names[state['idx']])
-
-    @kb.add('escape')
-    @kb.add('c-c')
-    def _cancel(event: object) -> None:
-        event.app.exit(result=None)
-
-    model_style = Style.from_dict({
-        'cursor': 'bold ansicyan',
-        'cursor-active': 'bold ansigreen',
-        'active': 'ansigreen',
-    })
-
-    app = Application(
-        layout=Layout(
-            Window(
-                FormattedTextControl(_get_text, focusable=True),
-                height=len(names) + 2,
-            )
-        ),
-        key_bindings=kb,
-        style=model_style,
-        full_screen=False,
-        mouse_support=False,
+    active_idx = next((i for i, n in enumerate(names) if n == MODEL), -1)
+    idx = _pick(
+        'Models  ↑/↓ navigate · Enter select · Esc cancel',
+        names,
+        active_idx,
     )
-
-    selected: str | None = app.run()
-
-    if selected is None:
+    if idx is None:
         return
-    MODEL = selected
+    MODEL = names[idx]
     try:
         info = ollama.show(MODEL)
         _ctx_size = getattr(info.details, 'context_length', 0) or 0
@@ -540,8 +654,135 @@ def _models_command() -> None:
     console.print(f"\n[green]Model:[/green] [bold]{MODEL}[/bold]")
 
 
+# --- Conversation memory: /save and /resume ---------------------------------
+
+def _project_memory_dir() -> Path:
+    """Return ~/.guru/<encoded-cwd>/ for the current working directory."""
+    encoded = str(Path.cwd()).replace(os.sep, '-')
+    return GURU_HOME / encoded
+
+
+def _message_to_dict(msg: object) -> dict:
+    """Normalise a message (dict or ollama Message) to a clean JSON dict."""
+    if not isinstance(msg, dict):
+        msg = msg.model_dump() if hasattr(msg, 'model_dump') else dict(msg)
+    out: dict = {
+        'role': msg.get('role', 'user'),
+        'content': msg.get('content') or '',
+    }
+    if msg.get('tool_name'):
+        out['tool_name'] = msg['tool_name']
+    if msg.get('tool_calls'):
+        out['tool_calls'] = msg['tool_calls']
+    return out
+
+
+def _first_user_message(path: Path) -> str:
+    """Return a short title from the first user message in a memory file."""
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return '(unreadable)'
+    for m in data:
+        if m.get('role') == 'user' and m.get('content'):
+            text = ' '.join(m['content'].split())
+            return text[:60] + ('…' if len(text) > 60 else '')
+    return '(no user message)'
+
+
+def _save_conversation() -> None:
+    """Write the current conversation (minus the system prompt) to disk."""
+    if len(messages) <= 1:
+        console.print("[yellow]Nothing to save yet.[/yellow]")
+        return
+    directory = _project_memory_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = [_message_to_dict(m) for m in messages[1:]]
+    path = directory / f"{uuid.uuid4()}.memory"
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+    console.print(f"[green]Saved[/green] conversation to {path}")
+
+
+def _reactivate_tools(msgs: list) -> None:
+    """Re-activate tools referenced by a restored conversation.
+
+    Prevents the empty-response bug where the model tries to call a tool it
+    used earlier that is no longer in the active tool set.
+    """
+    for m in msgs:
+        candidates = []
+        if m.get('tool_name'):
+            candidates.append(m['tool_name'])
+        for call in (m.get('tool_calls') or []):
+            fn = call.get('function') if isinstance(call, dict) else None
+            if fn and fn.get('name'):
+                candidates.append(fn['name'])
+        for name in candidates:
+            if name in TOOL_REGISTRY and name not in active_tool_names:
+                active_tool_names.add(name)
+                active_tools.append(TOOL_REGISTRY[name]['fn'])
+
+
+def _resume_command() -> None:
+    """Interactive selector to restore a saved conversation."""
+    global messages
+    directory = _project_memory_dir()
+    files = (
+        sorted(
+            directory.glob('*.memory'),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if directory.exists()
+        else []
+    )
+    if not files:
+        console.print(
+            "[yellow]No saved conversations for this project.[/yellow]"
+        )
+        return
+
+    labels = []
+    for p in files:
+        stamp = datetime.fromtimestamp(p.stat().st_mtime).strftime(
+            '%Y-%m-%d %H:%M'
+        )
+        labels.append(f"{stamp}  {_first_user_message(p)}")
+
+    idx = _pick(
+        'Resume  ↑/↓ navigate · Enter select · Esc cancel',
+        labels,
+    )
+    if idx is None:
+        return
+
+    path = files[idx]
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as e:
+        console.print(f"[red]Could not load {path.name}: {e}[/red]")
+        return
+
+    messages = [{"role": "system", "content": _build_system_prompt()}] + data
+    active_tool_names.clear()
+    active_tools[:] = [search_tools]
+    _reactivate_tools(data)
+    console.print(
+        f"[green]Resumed[/green] {path.name} ({len(data)} messages)."
+    )
+
+
 def _handle_slash_search(query: str) -> None:
     """Directly invoke web_search and optionally web_fetch for testing."""
+    if not _ensure_domain_allowed(SEARCH_BACKEND_DOMAIN):
+        console.print(
+            f"[red]Denied[/red] access to '{SEARCH_BACKEND_DOMAIN}';"
+            " cannot search."
+        )
+        return
     web_search(query)
 
     # Collect URLs from the raw DDGS results for the fetch menu
@@ -578,174 +819,211 @@ def _handle_slash_search(query: str) -> None:
             console.print("[bold green]--- End ---[/bold green]")
 
 
-while True:
-    try:
-        question = _session.prompt(
-            '\nYou> ', pre_run=_enable_terminal_modes
-        ).strip()
-    except KeyboardInterrupt:
-        # modifyOtherKeys Ctrl+C reaches here via prompt_toolkit (not SIGINT),
-        # so track the press manually for double-Ctrl+C exit.
-        now = time.monotonic()
-        _ctrl_c_times[:] = [t for t in _ctrl_c_times if now - t <= 1.0]
-        _ctrl_c_times.append(now)
-        if len(_ctrl_c_times) >= 2:
-            console.print("\n[bold red]Exiting.[/bold red]")
-            sys.exit(0)
-        continue
-    except EOFError:
-        break      # Ctrl+D exits
+def _print_banner() -> None:
+    """Print the startup banner and command hints."""
+    console.print(f"Using model: [bold]{MODEL}[/bold]")
+    console.print("[bold]Qwen Web Agent[/bold]")
+    console.print("Type [italic]'exit'[/italic] to quit.")
+    console.print(
+        "Enter to submit · Shift+Enter for newline"
+        " · pasted newlines are safe.\n"
+    )
+    console.print(
+        "[italic]/search <query>[/italic] search · [italic]/models[/italic]"
+        " switch model · [italic]/save[/italic] save chat ·"
+        " [italic]/resume[/italic] restore chat.\n"
+    )
 
-    # Restore normal mode so Ctrl+C delivers SIGINT during the agent loop.
-    # pre_run=_enable_terminal_modes re-enables both before the next prompt.
-    sys.stdout.write(_RESET_TERMINAL)
-    sys.stdout.flush()
 
-    if question.lower() in ["exit", "quit"]:
-        break
+def _main() -> None:
+    """Run the interactive prompt loop."""
+    signal.signal(signal.SIGINT, _sigint_handler)
+    atexit.register(
+        lambda: (sys.stdout.write(_RESET_TERMINAL), sys.stdout.flush())
+    )
+    _print_banner()
+    while True:
+        try:
+            question = _session.prompt(
+                '\nYou> ', pre_run=_enable_terminal_modes
+            ).strip()
+        except KeyboardInterrupt:
+            # modifyOtherKeys Ctrl+C reaches here via prompt_toolkit (not
+            # SIGINT), so track the press manually for double-Ctrl+C exit.
+            now = time.monotonic()
+            _ctrl_c_times[:] = [t for t in _ctrl_c_times if now - t <= 1.0]
+            _ctrl_c_times.append(now)
+            if len(_ctrl_c_times) >= 2:
+                console.print("\n[bold red]Exiting.[/bold red]")
+                sys.exit(0)
+            continue
+        except EOFError:
+            break      # Ctrl+D exits
 
-    if not question:
-        continue
+        # Restore normal mode so Ctrl+C delivers SIGINT during the agent
+        # loop. pre_run=_enable_terminal_modes re-enables it next prompt.
+        sys.stdout.write(_RESET_TERMINAL)
+        sys.stdout.flush()
 
-    if question in ('/models', '/model'):
-        _models_command()
-        continue
+        if question.lower() in ["exit", "quit"]:
+            break
 
-    if question.startswith("/search "):
-        _handle_slash_search(question[8:].strip())
-        continue
+        if not question:
+            continue
 
-    # Display the user question with a styled background.
-    console.print()
-    console.print(f" {question} ", style="bold white on grey23")
-    console.print()
+        if question in ('/models', '/model'):
+            _models_command()
+            continue
 
-    msg_checkpoint = len(messages)
-    messages.append({
-        "role": "user",
-        "content": question,
-    })
+        if question == '/save':
+            _save_conversation()
+            continue
 
-    called: set = set()
-    nudged: int = 0
-    total_prompt_tokens: int = 0
-    total_eval_tokens: int = 0
+        if question == '/resume':
+            _resume_command()
+            continue
 
-    try:
-        while True:
-            # Non-streaming for tool-call rounds: more reliable tool-call
-            # detection; streaming is reserved for the final text answer.
-            response = ollama.chat(
-                model=MODEL,
-                messages=messages,
-                think=True,
-                tools=active_tools,
-            )
+        if question.startswith("/search "):
+            _handle_slash_search(question[8:].strip())
+            continue
 
-            total_prompt_tokens += (
-                getattr(response, 'prompt_eval_count', 0) or 0)
-            total_eval_tokens += (
-                getattr(response, 'eval_count', 0) or 0)
+        # Display the user question with a styled background.
+        console.print()
+        console.print(f" {question} ", style="bold white on grey23")
+        console.print()
 
-            msg = response.message
+        msg_checkpoint = len(messages)
+        messages.append({
+            "role": "user",
+            "content": question,
+        })
 
-            if msg.thinking:
-                console.print("\n[dim]\\[THINKING][/dim]")
-                console.print(f"[dim italic]{msg.thinking}[/dim italic]")
+        called: set = set()
+        nudged: int = 0
+        total_prompt_tokens: int = 0
+        total_eval_tokens: int = 0
 
-            console.print(
-                f"[dim yellow]\\[DEBUG][/dim yellow]"
-                f" content={repr(msg.content)}"
-                f" tool_calls={msg.tool_calls}",
-            )
-
-            messages.append(msg)
-
-            if not msg.tool_calls:
-                content = (msg.content or '').strip()
-                if not content and nudged < 1:
-                    nudged += 1
-                    console.print(
-                        "[dim yellow]\\[NUDGE][/dim yellow]"
-                        " empty response — retrying"
-                    )
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "Please continue — use search_tools"
-                            " to find what you need, then call it."
-                        ),
-                    })
-                    continue
-                console.print("\n[bold green]Qwen>[/bold green]")
-                console.print(Markdown(content))
-                console.print()
-                ctx_str = (
-                    f"{total_prompt_tokens:,} / {_ctx_size:,}"
-                    if _ctx_size else
-                    f"{total_prompt_tokens:,}"
+        try:
+            while True:
+                # Non-streaming for tool-call rounds: more reliable tool-call
+                # detection; streaming is reserved for the final text answer.
+                response = ollama.chat(
+                    model=MODEL,
+                    messages=messages,
+                    think=True,
+                    tools=active_tools,
                 )
-                console.rule(
-                    f"[dim]{MODEL}  ·  ctx {ctx_str}  ·  "
-                    f"in {total_prompt_tokens:,}"
-                    f"  ·  out {total_eval_tokens:,}[/dim]",
-                    style="dim",
+
+                total_prompt_tokens += (
+                    getattr(response, 'prompt_eval_count', 0) or 0)
+                total_eval_tokens += (
+                    getattr(response, 'eval_count', 0) or 0)
+
+                msg = response.message
+
+                if msg.thinking:
+                    console.print("\n[dim]\\[THINKING][/dim]")
+                    console.print(f"[dim italic]{msg.thinking}[/dim italic]")
+
+                console.print(
+                    f"[dim yellow]\\[DEBUG][/dim yellow]"
+                    f" content={repr(msg.content)}"
+                    f" tool_calls={msg.tool_calls}",
                 )
-                break
 
-            # Execute requested tools
-            for call in msg.tool_calls:
+                messages.append(msg)
 
-                name = call.function.name
-                arguments = call.function.arguments
-
-                # Skip exact duplicates — do not retry identical calls.
-                call_key = (name, tuple(sorted(arguments.items())))
-                if call_key in called:
-                    console.print(
-                        f"[yellow]\\[SKIP][/yellow]"
-                        f" duplicate: {name}({arguments})"
+                if not msg.tool_calls:
+                    content = (msg.content or '').strip()
+                    if not content and nudged < 1:
+                        nudged += 1
+                        console.print(
+                            "[dim yellow]\\[NUDGE][/dim yellow]"
+                            " empty response — retrying"
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Please continue — use search_tools"
+                                " to find what you need, then call it."
+                            ),
+                        })
+                        continue
+                    console.print("\n[bold green]Qwen>[/bold green]")
+                    console.print(Markdown(content))
+                    console.print()
+                    ctx_str = (
+                        f"{total_prompt_tokens:,} / {_ctx_size:,}"
+                        if _ctx_size else
+                        f"{total_prompt_tokens:,}"
                     )
+                    console.rule(
+                        f"[dim]{MODEL}  ·  ctx {ctx_str}  ·  "
+                        f"in {total_prompt_tokens:,}"
+                        f"  ·  out {total_eval_tokens:,}[/dim]",
+                        style="dim",
+                    )
+                    break
+
+                # Execute requested tools
+                for call in msg.tool_calls:
+
+                    name = call.function.name
+                    arguments = call.function.arguments
+
+                    # Skip exact duplicates — do not retry identical calls.
+                    call_key = (name, tuple(sorted(arguments.items())))
+                    if call_key in called:
+                        console.print(
+                            f"[yellow]\\[SKIP][/yellow]"
+                            f" duplicate: {name}({arguments})"
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_name": name,
+                            "content": (
+                                f"Already called {name} with these"
+                                " arguments. Use the previous result."
+                            ),
+                        })
+                        continue
+                    called.add(call_key)
+
+                    console.print(
+                        f"[cyan]\\[TOOL][/cyan] [bold]{name}[/bold]:"
+                        f" {arguments}"
+                    )
+
+                    if name == "search_tools":
+                        result = search_tools(**arguments)
+                        for tn in _match_tools(arguments.get("query", "")):
+                            if tn not in active_tool_names:
+                                active_tool_names.add(tn)
+                                active_tools.append(TOOL_REGISTRY[tn]["fn"])
+                                console.print(
+                                    f"[green]\\[ACTIVATED][/green] {tn}"
+                                )
+                    elif name in TOOL_REGISTRY:
+                        try:
+                            result = TOOL_REGISTRY[name]["fn"](**arguments)
+                        except Exception as e:
+                            result = f"Tool error: {e}"
+                    else:
+                        result = f"Unknown tool: {name}"
+
                     messages.append({
                         "role": "tool",
                         "tool_name": name,
-                        "content": (
-                            f"Already called {name} with these arguments. "
-                            "Use the result from the previous call."
-                        ),
+                        "content": result,
                     })
-                    continue
-                called.add(call_key)
+        except KeyboardInterrupt:
+            console.print(
+                "\n[yellow]\\[CANCELLED][/yellow] Response cancelled."
+            )
+            del messages[msg_checkpoint:]
+            sys.stdout.write(_RESET_TERMINAL)
+            sys.stdout.flush()
 
-                console.print(
-                    f"[cyan]\\[TOOL][/cyan] [bold]{name}[/bold]: {arguments}"
-                )
 
-                if name == "search_tools":
-                    result = search_tools(**arguments)
-                    for tool_name in _match_tools(arguments.get("query", "")):
-                        if tool_name not in active_tool_names:
-                            active_tool_names.add(tool_name)
-                            active_tools.append(TOOL_REGISTRY[tool_name]["fn"])
-                            console.print(
-                                f"[green]\\[ACTIVATED][/green]"
-                                f" {tool_name}"
-                            )
-                elif name in TOOL_REGISTRY:
-                    try:
-                        result = TOOL_REGISTRY[name]["fn"](**arguments)
-                    except Exception as e:
-                        result = f"Tool error: {e}"
-                else:
-                    result = f"Unknown tool: {name}"
-
-                messages.append({
-                    "role": "tool",
-                    "tool_name": name,
-                    "content": result,
-                })
-    except KeyboardInterrupt:
-        console.print("\n[yellow]\\[CANCELLED][/yellow] Response cancelled.")
-        del messages[msg_checkpoint:]
-        sys.stdout.write(_RESET_TERMINAL)
-        sys.stdout.flush()
+if __name__ == '__main__':
+    _main()
