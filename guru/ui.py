@@ -3,6 +3,7 @@
 Rendering and terminal control live here so the domain and adapters stay
 free of prompt_toolkit / rich / escape-sequence concerns.
 """
+import contextvars
 import os
 import shutil
 import subprocess
@@ -37,14 +38,49 @@ ANSI_SEQUENCES['\x1b[27;0;13~'] = Keys.F14   # keyboard Enter, modifier=0
 ANSI_SEQUENCES['\x1b[13;1u'] = Keys.F14      # CSI u keyboard Enter
 ANSI_SEQUENCES['\x1b[13u'] = Keys.F14        # CSI u short form
 
-# Override Rich's markdown link styles: bright blue, no underline.
-console = Console(
+# Override Rich's markdown link styles: bright blue, no underline. This base
+# console is used by the REPL and is the default for any context that hasn't
+# bound its own (see the console routing below).
+_base_console = Console(
     highlight=False,
     theme=Theme({
         'markdown.link': 'bright_blue',
         'markdown.link_url': 'bright_blue',
     }),
 )
+
+# Output is routed per context: the TUI binds each agent's own Console for the
+# duration of its background turn (``ui.use_console(agent.console)``) so tool
+# output and '* thinking…' lines land in the right viewport, even with several
+# turns running at once. ``console`` is a thin proxy delegating to whichever
+# Console is bound; the REPL never binds one, so it uses ``_base_console``.
+_console_cv: "contextvars.ContextVar[Console]" = contextvars.ContextVar(
+    "guru_console", default=_base_console)
+
+
+def current_console() -> Console:
+    """Return the Console bound to the current context."""
+    return _console_cv.get()
+
+
+def use_console(console_obj: Console):
+    """Bind ``console_obj`` to the current context; returns a reset token."""
+    return _console_cv.set(console_obj)
+
+
+def reset_console(token) -> None:
+    """Restore the console bound before the matching :func:`use_console`."""
+    _console_cv.reset(token)
+
+
+class _ConsoleProxy:
+    """Delegates every attribute (``.print`` etc.) to the current console."""
+
+    def __getattr__(self, name: str):
+        return getattr(_console_cv.get(), name)
+
+
+console = _ConsoleProxy()
 
 _RESET_TERMINAL = '\x1b[>4;0m\x1b[?2004l'
 _ctrl_c_times: list = []

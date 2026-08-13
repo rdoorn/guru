@@ -29,6 +29,50 @@ def set_domain_asker(fn) -> None:
     _domain_asker = fn
 
 
+# Pluggable sub-agent spawner — installed by the TUI. Signature: (task) -> str.
+# Absent in the REPL, where there are no viewports to delegate into.
+_spawn_handler = None
+
+
+def set_spawn_handler(fn) -> None:
+    """Install the sub-agent spawner (used by the TUI)."""
+    global _spawn_handler
+    _spawn_handler = fn
+
+
+def spawn(task: str) -> str:
+    """
+    Delegate a self-contained task to a new sub-agent that runs in parallel.
+
+    Use this to work on independent subtasks concurrently — e.g. researching
+    several topics, or fetching several sources at once. The sub-agent has the
+    same tools and model and works in its own viewport; it cannot spawn
+    further agents. Returns immediately; the sub-agent's results appear in its
+    own tab, not in your reply.
+    """
+    if _spawn_handler is None:
+        return (
+            "Spawning sub-agents is only available in the TUI (--tui)."
+            " Handle this task yourself instead."
+        )
+    return _spawn_handler(task)
+
+
+_SPAWN_SPEC = {
+    'name': 'spawn',
+    'description': (
+        'Delegate a self-contained task to a new sub-agent that runs in'
+        ' parallel in its own viewport. Use for independent subtasks you want'
+        ' worked on concurrently. The sub-agent shares your tools and model'
+        ' and cannot spawn further agents. Returns immediately — its results'
+        ' appear in its own tab, not in your reply.'
+    ),
+    'parameters': {
+        'task': 'A clear, self-contained instruction for the sub-agent',
+    },
+}
+
+
 def _ask_domain(domain: str) -> bool:
     """Default terminal approval prompt (REPL)."""
     ui.console.print(
@@ -298,6 +342,8 @@ def active_specs() -> list:
     registry tools are added as they are activated.
     """
     specs = [_SEARCH_TOOLS_SPEC]
+    if session.can_spawn:
+        specs.append(_SPAWN_SPEC)
     for name in TOOL_REGISTRY:
         if name in session.active_tool_names:
             info = TOOL_REGISTRY[name]
@@ -310,9 +356,16 @@ def active_specs() -> list:
 
 
 def reset_active_tools() -> None:
-    """Reset the active tool set to just the search_tools meta-tool."""
+    """Reset the active tool set to the always-on tools for this agent.
+
+    search_tools is always present; spawn is added for delegation-capable
+    agents (so the Ollama adapter, which introspects the callables, sees it).
+    """
     session.active_tool_names.clear()
-    session.active_tools[:] = [search_tools]
+    base = [search_tools]
+    if session.can_spawn:
+        base.append(spawn)
+    session.active_tools[:] = base
 
 
 def activate(name: str) -> None:
@@ -335,6 +388,8 @@ def execute_tool(name: str, arguments: dict) -> str:
         for tn in _match_tools(arguments.get("query", "")):
             activate(tn)
         return result
+    if name == "spawn":
+        return spawn(**arguments)
     if name in TOOL_REGISTRY:
         try:
             return TOOL_REGISTRY[name]["fn"](**arguments)

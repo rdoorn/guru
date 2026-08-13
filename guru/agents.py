@@ -9,6 +9,8 @@ built up before the full TUI wiring lands.
 """
 from dataclasses import dataclass, field
 
+from guru.session import SessionState
+
 
 @dataclass
 class Agent:
@@ -20,19 +22,14 @@ class Agent:
     queue: list = field(default_factory=list)   # pending user messages
     busy: bool = False          # a turn is running in the background
 
-    # Independent conversation state (mirrored to the global session while the
-    # agent's turn runs). Populated when the agent is created.
-    messages: list = field(default_factory=list)
-    active_tools: list = field(default_factory=list)
-    active_tool_names: set = field(default_factory=set)
-    model: str = ""
-    adapter: object = None
-    num_ctx: int = 0
-    ctx_ceiling: int = 0
-    model_size: str = "?"
-    ctx_used: int = 0
-    session_in: int = 0
-    session_out: int = 0
+    # Fully independent runtime state (model, conversation, tools, token
+    # counts, cancel flag). The TUI binds this via ``session.use(agent.state)``
+    # for the duration of the agent's background turn, so turns run in parallel
+    # without sharing mutable session globals.
+    state: SessionState = field(default_factory=SessionState)
+    # Per-agent rich Console writing into this viewport's buffer; bound via
+    # ``ui.use_console(agent.console)`` while the turn runs.
+    console: object = None
 
     def append(self, text: str) -> None:
         """Append a line (or block) to the scrollback buffer."""

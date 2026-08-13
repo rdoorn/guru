@@ -322,6 +322,104 @@ class TestActiveSpecs:
         assert 'search_tools' in names and 'web_fetch' in names
 
 
+class TestSpawnTool:
+    """Tests for the spawn delegation tool and its handler injection."""
+
+    def test_spawn_without_handler_reports_repl(self) -> None:
+        tools.set_spawn_handler(None)
+        out = tools.spawn('do something')
+        assert 'only available in the TUI' in out
+
+    def test_spawn_with_handler_delegates(self) -> None:
+        seen: list = []
+        tools.set_spawn_handler(lambda t: seen.append(t) or f'ok:{t}')
+        try:
+            assert tools.spawn('research topic') == 'ok:research topic'
+            assert seen == ['research topic']
+        finally:
+            tools.set_spawn_handler(None)
+
+    def test_execute_tool_routes_spawn(self) -> None:
+        seen: list = []
+        tools.set_spawn_handler(lambda t: seen.append(t) or 'done')
+        try:
+            assert tools.execute_tool('spawn', {'task': 'go'}) == 'done'
+            assert seen == ['go']
+        finally:
+            tools.set_spawn_handler(None)
+
+    def test_spawn_spec_gated_by_can_spawn(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'active_tool_names', set())
+        monkeypatch.setattr(session, 'can_spawn', False)
+        assert 'spawn' not in [s['name'] for s in tools.active_specs()]
+        monkeypatch.setattr(session, 'can_spawn', True)
+        assert 'spawn' in [s['name'] for s in tools.active_specs()]
+
+    def test_reset_active_tools_honours_can_spawn(self) -> None:
+        capable = session.SessionState()
+        capable.can_spawn = True
+        token = session.use(capable)
+        try:
+            tools.reset_active_tools()
+            assert tools.spawn in capable.active_tools
+            assert tools.search_tools in capable.active_tools
+        finally:
+            session.reset(token)
+        plain = session.SessionState()
+        token = session.use(plain)
+        try:
+            tools.reset_active_tools()
+            assert tools.spawn not in plain.active_tools
+        finally:
+            session.reset(token)
+
+
+class TestSessionRouting:
+    """Tests for the per-context SessionState routing (parallel isolation)."""
+
+    def test_use_and_reset(self) -> None:
+        st = session.SessionState()
+        token = session.use(st)
+        session.model = 'bound-model'
+        session.session_in += 7
+        assert st.model == 'bound-model'
+        assert st.session_in == 7
+        session.reset(token)
+        assert session.model != 'bound-model'
+
+    def test_threads_are_isolated(self) -> None:
+        import threading
+
+        states = [session.SessionState() for _ in range(3)]
+        errors: list = []
+        start = threading.Barrier(len(states))
+
+        def worker(idx: int) -> None:
+            token = session.use(states[idx])
+            try:
+                start.wait()
+                for _ in range(1000):
+                    session.session_in += 1
+                    session.model = f'model-{idx}'
+                if (session.session_in != 1000
+                        or session.model != f'model-{idx}'):
+                    errors.append(idx)
+            finally:
+                session.reset(token)
+
+        threads = [
+            threading.Thread(target=worker, args=(i,))
+            for i in range(len(states))
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors
+        assert [s.session_in for s in states] == [1000, 1000, 1000]
+        assert [s.model for s in states] == ['model-0', 'model-1', 'model-2']
+
+
 class TestAdapterConfigRoundTrip:
     """Tests for config.save_adapter_configs / load_adapter_configs."""
 
