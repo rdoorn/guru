@@ -330,6 +330,8 @@ def main() -> None:
 
     while True:
         ui.refresh_git_branch()
+        # Full-width rule marks where each new message starts.
+        ui.console.rule(style="dim")
         try:
             question = ui.read_line()
         except KeyboardInterrupt:
@@ -370,10 +372,6 @@ def main() -> None:
         if question.startswith("/search "):
             _handle_slash_search(question[8:].strip())
             continue
-
-        ui.console.print()
-        ui.console.print(f" {question} ", style="bold white on grey23")
-        ui.console.print()
 
         checkpoint = len(session.messages)
         session.messages.append({"role": "user", "content": question})

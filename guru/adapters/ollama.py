@@ -176,7 +176,7 @@ class OllamaAdapter(Adapter):
                         ),
                     })
                     continue
-                ui.console.print("\n[bold green]Guru>[/bold green]")
+                ui.console.print("\n[bold green]answer>[/bold green]")
                 ui.console.print(Markdown(content))
                 ui.console.print()
                 break

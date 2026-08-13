@@ -309,7 +309,7 @@ class AnthropicAdapter(Adapter):
 
             if resp.stop_reason != 'tool_use':
                 final = ''.join(text_parts).strip()
-                ui.console.print("\n[bold green]Guru>[/bold green]")
+                ui.console.print("\n[bold green]answer>[/bold green]")
                 ui.console.print(Markdown(final))
                 ui.console.print()
                 return

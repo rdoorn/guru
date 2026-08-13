@@ -145,7 +145,7 @@ def reset_terminal() -> None:
     sys.stdout.flush()
 
 
-def read_line(prompt: str = '\nYou> ') -> str:
+def read_line(prompt: str = '> ') -> str:
     """Read one line, showing the status bar as the prompt toolbar."""
     return prompt_session.prompt(
         prompt,

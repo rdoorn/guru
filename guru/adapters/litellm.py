@@ -249,7 +249,7 @@ class LiteLLMAdapter(Adapter):
                 text, [(name, args) for _, name, args in parsed]))
 
             if not tool_calls:
-                ui.console.print("\n[bold green]Guru>[/bold green]")
+                ui.console.print("\n[bold green]answer>[/bold green]")
                 ui.console.print(Markdown(text.strip()))
                 ui.console.print()
                 return
