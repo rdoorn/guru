@@ -68,7 +68,7 @@ url  = "http://localhost:11434"
 # name = "Anthropic Enterprise"
 # type = "anthropic"
 # auth = "oauth"
-# profile = "default"
+# profile = "guru"   # one-time: `ant auth login --profile guru`
 """
 
 SYSTEM_PROMPT = """

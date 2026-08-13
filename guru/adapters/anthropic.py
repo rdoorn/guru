@@ -4,16 +4,20 @@ One class, two configured auth modes:
 
 - ``api_key`` — the ``anthropic`` SDK with an API key (+ optional ``base_url``)
   pointed at a local endpoint that speaks the Anthropic Messages API.
-- ``oauth`` — the enterprise account, which has no API key. A short-lived
-  token is fetched from the ``ant`` CLI profile and the request carries the
-  ``oauth-2025-04-20`` beta header.
+- ``oauth`` — the enterprise account, which has no API key. Authentication is
+  a one-time browser login done by the ``ant`` CLI (``ant auth login``), which
+  stores the access + refresh tokens in a profile under
+  ``~/.config/anthropic``.
+  guru passes ``profile=`` to the SDK, which refreshes tokens on expiry, writes
+  the renewed (possibly rotated) tokens back to that file, and adds the
+  ``oauth-2025-04-20`` beta header automatically — no per-call shelling out.
 
 Full tool parity: guru's tool directory is translated to Anthropic tool
 schema and the model's ``tool_use`` requests run through the shared
 ``guru.domain.tools.execute_tool``.
 """
 import os
-import subprocess
+import pathlib
 
 from rich.markdown import Markdown
 
@@ -118,27 +122,26 @@ class AnthropicAdapter(Adapter):
 
     # --- client construction -------------------------------------------------
 
-    def _oauth_token(self) -> str:
-        cmd = ['ant', 'auth', 'print-credentials', '--access-token']
-        if self.profile:
-            cmd += ['--profile', self.profile]
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=15)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                proc.stderr.strip() or 'ant auth print-credentials failed')
-        token = proc.stdout.strip()
-        if not token:
-            raise RuntimeError('ant returned an empty token')
-        return token
+    def _oauth_credentials_path(self) -> pathlib.Path:
+        """Path to the SDK/ant OAuth credentials file for this profile."""
+        base = (os.environ.get('ANTHROPIC_CONFIG_DIR')
+                or os.path.expanduser('~/.config/anthropic'))
+        profile = (self.profile or os.environ.get('ANTHROPIC_PROFILE')
+                   or 'default')
+        return pathlib.Path(base) / 'credentials' / f'{profile}.json'
 
     def _client(self):
         import anthropic
         if self.auth == 'oauth':
-            return anthropic.Anthropic(
-                auth_token=self._oauth_token(),
-                default_headers={'anthropic-beta': 'oauth-2025-04-20'},
-            )
+            # The SDK reads the profile, refreshes tokens (persisting rotated
+            # refresh tokens back to the credentials file), and adds the
+            # oauth-2025-04-20 beta header itself.
+            kwargs = {}
+            if self.profile:
+                kwargs['profile'] = self.profile
+            if self.base_url:
+                kwargs['base_url'] = self.base_url
+            return anthropic.Anthropic(**kwargs)
         env = self.api_key_env or 'ANTHROPIC_API_KEY'
         key = os.environ.get(env) or 'local'
         kwargs = {'api_key': key}
@@ -154,10 +157,8 @@ class AnthropicAdapter(Adapter):
         except Exception:
             return False
         if self.auth == 'oauth':
-            try:
-                self._oauth_token()
-            except Exception:
-                return False
+            # A profile must have been created by a one-time `ant auth login`.
+            return self._oauth_credentials_path().exists()
         return True
 
     def list_models(self) -> list:
