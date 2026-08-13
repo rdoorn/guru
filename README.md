@@ -27,7 +27,7 @@ Requires the Ollama app running in the menu bar.
 | `Escape` → `Enter` | New line (works in any terminal) |
 | `Ctrl+C` | Cancel current input |
 | `Ctrl+D` | Exit |
-| `↑` / `↓` | History (persisted to `~/.guru_history`) |
+| `↑` / `↓` | History (persisted to `~/.guru/history`) |
 
 ## Slash commands
 
@@ -134,8 +134,8 @@ per project.
 
 ## Tool directory
 
-See [`docs/ollama-wrapper.md`](docs/ollama-wrapper.md) for full details on how
-the tool directory works and how to add new tools.
+See [`docs/tools.md`](docs/tools.md) for full details on how the tool directory
+works and how to add new tools.
 
 Current tools: `web_search`, `web_fetch`, `fetch_github_releases`.
 
