@@ -67,6 +67,7 @@ class OllamaAdapter(Adapter):
         session.num_ctx, session.ctx_ceiling = (
             self._resolve_context_window(model_id))
         session.model_size = self._param_size(model_id)
+        self._preload_and_fit()
 
     # --- context / metadata --------------------------------------------------
 
@@ -133,17 +134,33 @@ class OllamaAdapter(Adapter):
             self._fitted.add(session.model)
 
     def _reload(self, num_ctx: int) -> bool:
-        """Reload the model at a given context to test the fit."""
+        """Load the model at a context (no generation); False on error."""
         try:
-            ollama.chat(
+            # Empty-prompt generate loads the model into memory and returns.
+            ollama.generate(
                 model=session.model,
-                messages=[{'role': 'user', 'content': 'hi'}],
+                prompt='',
                 options={'num_ctx': num_ctx},
-                keep_alive='5m',
+                keep_alive='30m',
             )
             return True
         except Exception:
             return False
+
+    def _preload_and_fit(self) -> None:
+        """Load the model now (so the first answer is fast) and fit context."""
+        if not self.available():
+            return
+        ui.console.print(
+            f"[dim]Loading {session.model} (context"
+            f" {session.num_ctx:,})…[/dim]")
+        if not self._reload(session.num_ctx):
+            ui.console.print(
+                f"[yellow]Could not preload {session.model}; it will load on"
+                f" the first question.[/yellow]")
+            return
+        self._fit_after_load()
+        ui.console.print(f"[dim]{session.model} ready.[/dim]")
 
     def _gpu_fits(self) -> bool:
         """True if the loaded model sits entirely in VRAM (no CPU spill)."""
