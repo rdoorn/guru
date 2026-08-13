@@ -380,17 +380,28 @@ _session = PromptSession(
 )
 
 
-def _enable_modify_other_keys() -> None:
-    """Enable modifyOtherKeys mode 2 (CSI u) so Shift+Enter is distinguishable.
+def _enable_terminal_modes() -> None:
+    """Enable modifyOtherKeys mode 2 and bracketed paste before each prompt.
 
-    This is what Claude Code does at startup — without it the terminal sends
-    the same byte (\r) for both Enter and Shift+Enter.
+    modifyOtherKeys (\x1b[>4;2m): makes Shift+Enter send a distinct sequence
+    so it can be bound to newline instead of submit.
+
+    Bracketed paste (\x1b[?2004h): wraps pasted text in \x1b[200~...\x1b[201~
+    so prompt_toolkit delivers it as a single BracketedPaste event — newlines
+    inside the paste are inserted literally instead of triggering submit.
+
+    prompt_toolkit also sends \x1b[?2004h on first render, but sending it here
+    too ensures it is active before the terminal processes any input.
     """
-    sys.stdout.write('\x1b[>4;2m')
+    sys.stdout.write('\x1b[>4;2m\x1b[?2004h')
     sys.stdout.flush()
 
 
-atexit.register(lambda: (sys.stdout.write('\x1b[>4;0m'), sys.stdout.flush()))
+_RESET_TERMINAL = '\x1b[>4;0m\x1b[?2004l'
+
+atexit.register(
+    lambda: (sys.stdout.write(_RESET_TERMINAL), sys.stdout.flush())
+)
 
 console.print(f"Using model: [bold]{MODEL}[/bold]")
 console.print("[bold]Qwen Web Agent[/bold]")
@@ -535,7 +546,7 @@ def _handle_slash_search(query: str) -> None:
 while True:
     try:
         question = _session.prompt(
-            '\nYou> ', pre_run=_enable_modify_other_keys
+            '\nYou> ', pre_run=_enable_terminal_modes
         ).strip()
     except KeyboardInterrupt:
         # modifyOtherKeys Ctrl+C reaches here via prompt_toolkit (not SIGINT),
@@ -551,8 +562,8 @@ while True:
         break      # Ctrl+D exits
 
     # Restore normal mode so Ctrl+C delivers SIGINT during the agent loop.
-    # pre_run=_enable_modify_other_keys re-enables it before the next prompt.
-    sys.stdout.write('\x1b[>4;0m')
+    # pre_run=_enable_terminal_modes re-enables both before the next prompt.
+    sys.stdout.write(_RESET_TERMINAL)
     sys.stdout.flush()
 
     if question.lower() in ["exit", "quit"]:
@@ -701,5 +712,5 @@ while True:
     except KeyboardInterrupt:
         console.print("\n[yellow]\\[CANCELLED][/yellow] Response cancelled.")
         del messages[msg_checkpoint:]
-        sys.stdout.write('\x1b[>4;0m')
+        sys.stdout.write(_RESET_TERMINAL)
         sys.stdout.flush()
