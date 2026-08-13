@@ -25,6 +25,7 @@ class OllamaAdapter(Adapter):
         self.name = name
         self.url = url
         self._fitted: set = set()   # models already fitted to memory
+        self._thinks: dict = {}     # model -> supports thinking
 
     # --- discovery -----------------------------------------------------------
 
@@ -96,6 +97,16 @@ class OllamaAdapter(Adapter):
         if ceiling:
             num_ctx = min(num_ctx, ceiling)
         return (num_ctx, ceiling)
+
+    def _supports_thinking(self, model: str) -> bool:
+        """Whether a model supports think mode (per its capabilities)."""
+        if model not in self._thinks:
+            try:
+                caps = ollama.show(model).capabilities or []
+                self._thinks[model] = 'thinking' in caps
+            except Exception:
+                self._thinks[model] = False
+        return self._thinks[model]
 
     def _param_size(self, model: str) -> str:
         try:
@@ -215,7 +226,7 @@ class OllamaAdapter(Adapter):
             response = ollama.chat(
                 model=session.model,
                 messages=session.messages,
-                think=True,
+                think=self._supports_thinking(session.model),
                 tools=session.active_tools,
                 options={'num_ctx': session.num_ctx},
             )
