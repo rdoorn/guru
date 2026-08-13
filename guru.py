@@ -361,10 +361,17 @@ active_tools: list = [search_tools]
 
 
 # Key bindings.
-# Keyboard Enter sends \r (c-m); pasted newlines from macOS arrive as \n
-# (c-j). By binding c-j to insert-newline and keeping c-m as submit, paste
-# no longer triggers submission. F14 handles the rare terminals that do
-# re-encode Enter via modifyOtherKeys; Escape+Enter is the universal fallback.
+#
+# The terminal sends no bracketed-paste markers and encodes pasted newlines
+# as \r — byte-identical to keyboard Enter — so the two cannot be told apart
+# by value alone. They differ by CONTEXT: a paste feeds every byte into
+# prompt_toolkit's input queue at once, so when the handler for a paste's
+# first \r fires, the rest of the pasted keys are still queued. A deliberate
+# keyboard Enter is the last key, leaving the queue empty. The _enter handler
+# uses that: queued keys behind this \r → insert newline; empty queue → submit.
+#
+# F14 (keyboard Enter re-encoded by modifyOtherKeys, if the terminal does so)
+# and Escape+Enter always submit. Shift+Enter and c-j (\n) always insert.
 _kb = KeyBindings()
 
 
@@ -383,12 +390,17 @@ def _escape_enter(event: object) -> None:
     event.current_buffer.validate_and_handle()
 
 
-@_kb.add('enter')  # \r — keyboard Enter → submit
+@_kb.add('enter')  # \r — submit if deliberate, insert if part of a paste
 def _enter(event: object) -> None:
-    event.current_buffer.validate_and_handle()
+    if event.app.key_processor.input_queue:
+        # More keys are queued behind this \r: it is a paste-internal
+        # newline, not a deliberate Enter. Insert instead of submitting.
+        event.current_buffer.insert_text('\n')
+    else:
+        event.current_buffer.validate_and_handle()
 
 
-@_kb.add('c-j')  # \n — pasted newlines on macOS → insert, never submit
+@_kb.add('c-j')  # \n — some terminals paste newlines as \n → insert
 def _linefeed(event: object) -> None:
     event.current_buffer.insert_text('\n')
 
