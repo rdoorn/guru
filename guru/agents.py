@@ -12,13 +12,27 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Agent:
-    """One agent viewport: an id, a short title, and an output buffer."""
+    """One agent viewport with its own output buffer and conversation state."""
     id: str
     title: str = "main"
     lines: list = field(default_factory=list)
     status: str = "idle"        # idle | thinking | error
     queue: list = field(default_factory=list)   # pending user messages
     busy: bool = False          # a turn is running in the background
+
+    # Independent conversation state (mirrored to the global session while the
+    # agent's turn runs). Populated when the agent is created.
+    messages: list = field(default_factory=list)
+    active_tools: list = field(default_factory=list)
+    active_tool_names: set = field(default_factory=set)
+    model: str = ""
+    adapter: object = None
+    num_ctx: int = 0
+    ctx_ceiling: int = 0
+    model_size: str = "?"
+    ctx_used: int = 0
+    session_in: int = 0
+    session_out: int = 0
 
     def append(self, text: str) -> None:
         """Append a line (or block) to the scrollback buffer."""
