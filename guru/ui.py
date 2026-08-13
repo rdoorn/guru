@@ -379,48 +379,61 @@ def _status_parts() -> tuple:
     return left, ctx_segment, right, colour
 
 
+# The status bar is two pinned lines: a full-width rule, then the status.
+# The rule stays fixed above the status (and, at the prompt, just below the
+# input line), while the per-turn console.rule() above the prompt scrolls away.
+_STATUS_HEIGHT = 2
+
+
 def status_enable() -> None:
-    """Reserve the bottom line via a scroll region and draw the bar."""
+    """Reserve the bottom two lines via a scroll region and draw the bar."""
     global _status_active
     if not sys.stdout.isatty():
         return
     rows, _ = _term_size()
+    top = rows - _STATUS_HEIGHT
     sys.stdout.write(
         '\n'
-        f'\x1b[1;{rows - 1}r'
-        f'\x1b[{rows - 1};1H'
+        f'\x1b[1;{top}r'      # scroll region = rows 1..top
+        f'\x1b[{top};1H'      # cursor to the last line of the region
     )
     sys.stdout.flush()
     _status_active = True
     status_draw()
 
 
-def status_draw() -> None:
-    """Paint the status line at the bottom row without moving the cursor."""
-    if not _status_active:
-        return
-    rows, cols = _term_size()
+def _status_body(cols: int) -> str:
+    """ANSI-coloured status text truncated to the terminal width."""
     left, ctx_segment, right, colour = _status_parts()
     plain = left + ctx_segment + right
     if len(plain) > cols:
-        body = plain[:cols]
-    else:
-        body = (
-            f'\x1b[{_GRAY_SGR}m{left}\x1b[0m'
-            f'\x1b[{_SGR[colour]}m{ctx_segment}\x1b[0m'
-            f'\x1b[{_GRAY_SGR}m{right}\x1b[0m'
-        )
+        return plain[:cols]
+    return (
+        f'\x1b[{_GRAY_SGR}m{left}\x1b[0m'
+        f'\x1b[{_SGR[colour]}m{ctx_segment}\x1b[0m'
+        f'\x1b[{_GRAY_SGR}m{right}\x1b[0m'
+    )
+
+
+def status_draw() -> None:
+    """Paint the rule + status on the bottom two rows, keeping the cursor."""
+    if not _status_active:
+        return
+    rows, cols = _term_size()
+    rule = '─' * cols
+    body = _status_body(cols)
     sys.stdout.write(
-        '\x1b7'
-        f'\x1b[{rows};1H\x1b[2K'
-        f'{body}'
-        '\x1b8'
+        '\x1b7'                                       # save cursor
+        f'\x1b[{rows - 1};1H\x1b[2K'                  # rule row
+        f'\x1b[{_GRAY_SGR}m{rule}\x1b[0m'
+        f'\x1b[{rows};1H\x1b[2K{body}'                # status row
+        '\x1b8'                                        # restore cursor
     )
     sys.stdout.flush()
 
 
 def status_disable() -> None:
-    """Release the scroll region and clear the status line."""
+    """Release the scroll region and clear the status rows."""
     global _status_active
     if not _status_active:
         return
@@ -428,6 +441,7 @@ def status_disable() -> None:
     sys.stdout.write(
         '\x1b7'
         '\x1b[r'
+        f'\x1b[{rows - 1};1H\x1b[2K'
         f'\x1b[{rows};1H\x1b[2K'
         '\x1b8'
     )
@@ -439,7 +453,7 @@ def sigwinch_handler(signum: int, frame: object) -> None:
     """Re-apply the scroll region and redraw the bar after a resize."""
     if _status_active:
         rows, _ = _term_size()
-        sys.stdout.write(f'\x1b[1;{rows - 1}r')
+        sys.stdout.write(f'\x1b[1;{rows - _STATUS_HEIGHT}r')
         sys.stdout.flush()
         status_draw()
 
@@ -449,8 +463,12 @@ def _tb_escape(text: str) -> str:
 
 
 def _bottom_toolbar() -> HTML:
+    """Two-line prompt toolbar: a fixed rule, then the status line."""
+    _, cols = _term_size()
     left, ctx_segment, right, colour = _status_parts()
+    rule = '─' * cols
     return HTML(
+        f'<{_GRAY_TAG}>{rule}</{_GRAY_TAG}>\n'
         f'<{_GRAY_TAG}>{_tb_escape(left)}</{_GRAY_TAG}>'
         f'<{_TB_TAG[colour]}>{_tb_escape(ctx_segment)}</{_TB_TAG[colour]}>'
         f'<{_GRAY_TAG}>{_tb_escape(right)}</{_GRAY_TAG}>'
