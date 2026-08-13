@@ -13,6 +13,9 @@ from guru import config, session, ui
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
+# Smallest context to fall back to before giving up on fitting into memory.
+_CTX_FLOOR = 2048
+
 
 class OllamaAdapter(Adapter):
     """Local models served by the Ollama daemon."""
@@ -21,6 +24,7 @@ class OllamaAdapter(Adapter):
                  url: str = "http://localhost:11434") -> None:
         self.name = name
         self.url = url
+        self._fitted: set = set()   # models already fitted to memory
 
     # --- discovery -----------------------------------------------------------
 
@@ -121,9 +125,69 @@ class OllamaAdapter(Adapter):
         except Exception as e:
             ui.console.print(f"[red]Could not pull {model_id}: {e}[/red]")
 
+    # --- fit context to memory ----------------------------------------------
+
+    def _warm(self, num_ctx: int) -> bool:
+        """Load the model at a given context; return False if it won't load."""
+        try:
+            ollama.chat(
+                model=session.model,
+                messages=[{'role': 'user', 'content': 'hi'}],
+                options={'num_ctx': num_ctx},
+                keep_alive='5m',
+            )
+            return True
+        except Exception:
+            return False
+
+    def _gpu_fits(self) -> bool:
+        """True if the loaded model sits entirely in VRAM (no CPU spill)."""
+        try:
+            for m in ollama.ps().models:
+                if m.model == session.model:
+                    total = getattr(m, 'size', 0) or 0
+                    vram = getattr(m, 'size_vram', 0) or 0
+                    return total <= 0 or vram >= total
+        except Exception:
+            pass
+        return True
+
+    def _fit_context(self) -> None:
+        """Shrink num_ctx until the model fits in GPU memory (no CPU spill).
+
+        Ollama spills to CPU (slow) when weights + KV cache exceed VRAM. Halve
+        the context until it fits or we hit the floor, warning on each step.
+        """
+        if session.model in self._fitted:
+            return
+        self._fitted.add(session.model)
+        ceiling = session.ctx_ceiling or session.num_ctx
+        num_ctx = session.num_ctx or _CTX_FLOOR
+        while True:
+            loaded = self._warm(num_ctx)
+            if loaded and self._gpu_fits():
+                session.num_ctx = num_ctx
+                return
+            smaller = max(_CTX_FLOOR, num_ctx // 2)
+            if smaller == num_ctx:
+                ui.console.print(
+                    f"[red]{session.model} still spills to CPU at the minimum"
+                    f" context {num_ctx:,} — it is too large for this"
+                    f" machine's memory. Consider a smaller model or"
+                    f" quant.[/red]")
+                session.num_ctx = num_ctx
+                return
+            reason = "won't load" if not loaded else "spilled to CPU"
+            ui.console.print(
+                f"[yellow]{session.model} {reason} at context"
+                f" {num_ctx:,}; scaling down to {smaller:,}"
+                f" (model max: {ceiling:,}).[/yellow]")
+            num_ctx = smaller
+
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
+        self._fit_context()
         called: set = set()
         nudged = 0
         while True:
