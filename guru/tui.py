@@ -248,15 +248,17 @@ def run() -> None:
         else:
             event.current_buffer.text = ''
 
-    @kb.add('c-n')
+    # eager=True so these win over the input buffer's default word-motion /
+    # history bindings (Ctrl+Left/Right/N), which would otherwise consume them.
+    @kb.add('c-n', eager=True)
     def _spawn(event) -> None:
         _new_agent()
 
-    @kb.add('c-right')
+    @kb.add('c-right', eager=True)
     def _next(event) -> None:
         manager.switch(1)
 
-    @kb.add('c-left')
+    @kb.add('c-left', eager=True)
     def _prev(event) -> None:
         manager.switch(-1)
 
