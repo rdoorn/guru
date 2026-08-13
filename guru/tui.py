@@ -2,7 +2,7 @@
 
 Each agent viewport owns its own conversation, tools, model, and counters.
 Submitting runs that agent's turn in a background thread; the prompt stays
-live and you can queue more or switch viewports (Ctrl+] / Ctrl+\\). Ctrl+N
+live and you can queue more or switch viewports (Shift+Left/Right). Ctrl+N
 spawns a new agent (inherits the current model). A single Ctrl+C cancels the
 running turn (cooperatively); a double Ctrl+C exits.
 
@@ -106,7 +106,7 @@ def _status_from(agent) -> tuple:
 def run() -> None:
     ui.refresh_git_branch()
     manager = AgentManager()
-    manager.active.append("guru — Ctrl+N new agent · Ctrl+] / Ctrl+\\ switch"
+    manager.active.append("guru — Ctrl+N new agent · Shift+Left/Right switch"
                           " · Ctrl+C cancel · double Ctrl+C exit")
     _sync_out(manager.active)   # seed the main agent from the startup session
 
@@ -253,13 +253,14 @@ def run() -> None:
     def _spawn(event) -> None:
         _new_agent()
 
-    # Ctrl+] / Ctrl+\ cycle viewports. Ctrl+Left/Right can't be used: macOS
-    # grabs Ctrl+Arrow for Mission Control, so they never reach the terminal.
-    @kb.add('c-]', eager=True)
+    # Shift+Left/Right cycle viewports. Plain Ctrl+Left/Right can't be used:
+    # macOS grabs Ctrl+Arrow for Mission Control, so they never reach the
+    # terminal (Shift+Arrow sends a distinct CSI 1;2 sequence that does).
+    @kb.add('s-right', eager=True)
     def _next(event) -> None:
         manager.switch(1)
 
-    @kb.add('c-\\', eager=True)
+    @kb.add('s-left', eager=True)
     def _prev(event) -> None:
         manager.switch(-1)
 
