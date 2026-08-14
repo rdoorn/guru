@@ -389,6 +389,23 @@ def _write_detail(target: Path, old: str, new: str) -> str:
     return header + "\n" + ("\n".join(lines) if lines else "(no changes)")
 
 
+def _will_prompt_write(target: Path) -> bool:
+    """Whether an approval prompt (with the diff) will be shown for a write."""
+    return (config.MODE != config.MODE_AUTO
+            and not _within_allowed(target, config.ALLOWED_WRITE_DIRS))
+
+
+def _show_change(diff: str) -> None:
+    """Print the applied diff to the console — the persistent record of a
+    write that did not prompt (whitelisted dir / auto mode), so the change is
+    always visible, not only when access is being asked for."""
+    try:
+        from rich.text import Text
+        ui.console.print(Text.from_ansi(diff))
+    except Exception:                                    # noqa: BLE001
+        ui.console.print(diff)
+
+
 def write_file(path: str, content: str) -> str:
     """
     Create or overwrite a file with the given content. Needs write access to
@@ -406,14 +423,17 @@ def write_file(path: str, content: str) -> str:
             old_content = target.read_text(encoding='utf-8', errors='replace')
         except OSError:
             old_content = ''
-    detail = "write_file " + _write_detail(target, old_content, content)
-    if not ensure_write_path_allowed(target, detail):
+    body = "write_file " + _write_detail(target, old_content, content)
+    silent = not _will_prompt_write(target)
+    if not ensure_write_path_allowed(target, body):
         return f"Write access to '{target}' was denied."
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding='utf-8')
     except OSError as e:
         return f"Cannot write {target}: {e}"
+    if silent:
+        _show_change(body)
     return f"Wrote {len(content)} bytes to {target}."
 
 
@@ -442,11 +462,14 @@ def edit_file(path: str, old: str, new: str) -> str:
         return (f"'old' text appears {count} times in {target}; add context"
                 " to make it unique.")
     new_text = text.replace(old, new, 1)
-    detail = "edit_file " + _write_detail(target, text, new_text)
-    if not ensure_write_path_allowed(target, detail):
+    body = "edit_file " + _write_detail(target, text, new_text)
+    silent = not _will_prompt_write(target)
+    if not ensure_write_path_allowed(target, body):
         return f"Write access to '{target}' was denied."
     try:
         target.write_text(new_text, encoding='utf-8')
     except OSError as e:
         return f"Cannot write {target}: {e}"
+    if silent:
+        _show_change(body)
     return f"Edited {target} (replaced 1 occurrence)."
