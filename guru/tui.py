@@ -40,7 +40,7 @@ from rich.console import Console
 
 from guru import config, session, ui
 from guru.agents import Agent, AgentManager
-from guru.domain import files, tools
+from guru.domain import conversation, files, tools
 
 _CTX_COLOUR = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 _CHROME_ROWS = 5   # 2 rules + prompt + status + tabs
@@ -101,6 +101,9 @@ def run() -> None:
     main = manager.active
     main.state = session.current()
     main.state.can_spawn = True
+    if (main.state.messages
+            and main.state.messages[0].get('role') == 'system'):
+        main.state.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
     for fn in (tools.spawn, tools.check, tools.join):
         if fn not in main.state.active_tools:
             main.state.active_tools.append(fn)
@@ -185,6 +188,9 @@ def run() -> None:
                 agent.state.messages.append(
                     {'role': 'user', 'content': message})
                 session.adapter.run_turn()
+                # Prune tool output and compact if needed, so context does
+                # not grow unbounded across turns (the TUI had no compaction).
+                conversation.after_turn()
         except Exception as e:                           # noqa: BLE001
             agent.append(f"[error] {e}")
         finally:
@@ -289,6 +295,7 @@ def run() -> None:
             {'role': 'system', 'content': config.build_system_prompt()}]
         st.active_tools = [tools.search_tools]
         if can_spawn:
+            st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
             st.active_tools.extend([tools.spawn, tools.check, tools.join])
         st.active_tool_names = set()
         st.model = base.model

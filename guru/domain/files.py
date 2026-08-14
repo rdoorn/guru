@@ -80,7 +80,7 @@ def ensure_path_allowed(path: Path) -> bool:
 # --- formatting helpers ------------------------------------------------------
 
 def _octal(mode: int) -> str:
-    return format(stat.S_IMODE(mode), '04o')
+    return format(stat.S_IMODE(mode), 'o')
 
 
 def _human(size: int) -> str:
@@ -94,11 +94,11 @@ def _human(size: int) -> str:
     return f"{value:.1f}T"
 
 
-def _entry_line(p: Path, indent: int, st) -> str:
+def _row(st, name: str) -> str:
+    """Compact 'perm size name' row (no padding); size is '-' for dirs."""
     is_dir = stat.S_ISDIR(st.st_mode)
-    name = p.name + ('/' if is_dir else '')
     size = '-' if is_dir else _human(st.st_size)
-    return f"{_octal(st.st_mode)} {size:>7} {'  ' * indent}{name}"
+    return f"{_octal(st.st_mode)} {size} {name}"
 
 
 def _resolve(path: str) -> Path:
@@ -113,9 +113,9 @@ def _sorted_children(d: Path) -> list:
 
 def list_dir(path: str = '.') -> str:
     """
-    List the immediate contents of a directory (non-recursive) with octal
-    permissions and sizes. Directories are shown with a trailing slash. Use
-    list_tree for a recursive view, or read_file to read a file.
+    List the immediate contents of a directory (non-recursive) as compact
+    'perm size name' rows (octal perms, dirs end with '/', size '-' for dirs).
+    Use list_tree for a recursive view, or read_file to read a file.
     """
     target = _resolve(path)
     if not ensure_path_allowed(target):
@@ -131,9 +131,11 @@ def list_dir(path: str = '.') -> str:
     lines = [f"{target}:"]
     for p in children:
         try:
-            lines.append(_entry_line(p, 0, p.lstat()))
+            st = p.lstat()
         except OSError:
             continue
+        name = p.name + ('/' if stat.S_ISDIR(st.st_mode) else '')
+        lines.append(_row(st, name))
     if len(lines) == 1:
         lines.append("(empty)")
     return "\n".join(lines)
@@ -141,10 +143,12 @@ def list_dir(path: str = '.') -> str:
 
 def list_tree(path: str = '.', depth: str = '') -> str:
     """
-    List a directory tree recursively with octal permissions and sizes.
-    Noise directories (.git, node_modules, __pycache__, .venv, …) are shown
-    but not expanded — to look inside one, call this with its full path.
-    ``depth`` limits how many levels to recurse (default 3).
+    List a directory tree recursively as compact 'perm size relpath' rows.
+    Paths are relative to the root and flat (not indented), so the structure
+    is unambiguous and cheap. Noise directories (.git, node_modules,
+    __pycache__, .venv, …) are shown with '*skip' but not expanded — to look
+    inside one, call this with its full path. ``depth`` limits how many levels
+    to recurse (default 3).
     """
     target = _resolve(path)
     if not ensure_path_allowed(target):
@@ -158,10 +162,10 @@ def list_tree(path: str = '.', depth: str = '') -> str:
     except (TypeError, ValueError):
         max_depth = _DEFAULT_TREE_DEPTH
 
-    lines = [f"{target}:"]
+    lines = [f"{target} (tree):"]
     state = {'count': 0, 'truncated': False}
 
-    def walk(d: Path, level: int) -> None:
+    def walk(d: Path, prefix: str, level: int) -> None:
         try:
             children = _sorted_children(d)
         except OSError:
@@ -175,17 +179,17 @@ def list_tree(path: str = '.', depth: str = '') -> str:
             except OSError:
                 continue
             is_dir = stat.S_ISDIR(st.st_mode)
+            rel = prefix + p.name + ('/' if is_dir else '')
             skip = is_dir and p.name in _NOISE_DIRS
-            lines.append(
-                _entry_line(p, level, st) + ('  (skipped)' if skip else ''))
+            lines.append(_row(st, rel) + (' *skip' if skip else ''))
             state['count'] += 1
             if is_dir and not skip and level + 1 < max_depth:
-                walk(p, level + 1)
+                walk(p, rel, level + 1)
 
-    walk(target, 0)
+    walk(target, '', 0)
     if state['truncated']:
         lines.append(
-            f"… truncated at {_MAX_ENTRIES} entries — narrow with a subpath"
+            f"... truncated at {_MAX_ENTRIES} entries — narrow with a subpath"
             f" or a smaller depth.")
     if len(lines) == 1:
         lines.append("(empty)")

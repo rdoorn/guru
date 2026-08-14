@@ -123,6 +123,18 @@ Guidelines:
 - If a question requires a location or name not provided, ask first.
 """
 
+# Appended to the system prompt of delegation-capable agents (TUI only), to
+# steer heavy tool output out of the main context and into sub-agents.
+DELEGATION_HINT = (
+    "You can run work in parallel by delegating to sub-agents with the spawn"
+    " tool. Prefer this for any subtask that produces large tool output you"
+    " do not need in full — fetching web pages, reading big files, or broad"
+    " multi-step research. The sub-agent reads the bulk in its own context"
+    " and returns only its conclusion to you, keeping your own context small."
+    " Use check to poll a sub-agent and join to be resumed once a group"
+    " finishes."
+)
+
 # Domains approved for model-initiated web access, loaded at startup.
 ALLOWED_DOMAINS: set = set()
 # Directories approved for model-initiated file access (resolved absolute

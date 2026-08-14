@@ -334,7 +334,7 @@ class TestFileTools:
     def test_list_dir_shows_perms_and_size(self, monkeypatch) -> None:
         self._only(monkeypatch, Path.cwd())
         out = files.list_dir('guru')
-        assert 'session.py' in out and '0644' in out
+        assert 'session.py' in out and '644' in out
 
     def test_read_file_range_is_line_numbered(self, monkeypatch) -> None:
         self._only(monkeypatch, Path.cwd())
@@ -367,9 +367,9 @@ class TestFileTools:
         (tmp_path / 'src').mkdir()
         (tmp_path / 'src' / 'a.py').write_text('z')
         out = files.list_tree(str(tmp_path), '3')
-        assert '(skipped)' in out
+        assert '*skip' in out
         assert 'INSIDE_GIT' not in out   # noise dir not descended
-        assert 'a.py' in out             # normal dir descended
+        assert 'src/a.py' in out         # normal dir descended, flat relpath
 
     def test_cwd_is_not_auto_allowed(self, monkeypatch) -> None:
         # A fresh project: nothing pre-allowed, so even cwd must be approved.
@@ -409,6 +409,34 @@ class TestFileTools:
         assert files._parse_range('bad', 10) == (None, None)
         assert files._parse_range('5-3', 10) == (None, None)
         assert files._parse_range('1-9999', 50) == (1, 50)
+
+
+class TestPruneToolExchanges:
+    """Tool output and text-less tool-call steps are dropped after a turn."""
+
+    def test_prunes_tool_and_textless_assistant(self) -> None:
+        msgs = [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{'x': 1}]},
+            {'role': 'tool', 'tool_name': 'web_fetch', 'content': 'BIGBLOB'},
+            {'role': 'assistant', 'content': 'the answer'},
+        ]
+        conversation.prune_tool_exchanges(msgs)
+        assert [m['role'] for m in msgs] == ['system', 'user', 'assistant']
+        assert msgs[-1]['content'] == 'the answer'
+        assert all('BIGBLOB' not in (m.get('content') or '') for m in msgs)
+
+    def test_keeps_assistant_with_text_and_tool_calls(self) -> None:
+        msgs = [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': 'thinking then',
+             'tool_calls': [{'x': 1}]},
+            {'role': 'tool', 'tool_name': 't', 'content': 'res'},
+            {'role': 'assistant', 'content': 'final'},
+        ]
+        conversation.prune_tool_exchanges(msgs)
+        assert [m['role'] for m in msgs] == ['user', 'assistant', 'assistant']
 
 
 class TestAccessPromptDefaults:

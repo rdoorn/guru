@@ -437,16 +437,9 @@ def main() -> None:
         finally:
             ui.status_disable()
 
-        # Proactive compaction once the turn's tool calls are all resolved.
-        if session.num_ctx and (
-                session.ctx_used > config.COMPACT_AT * session.num_ctx):
-            ui.console.print(
-                f"[dim]\\[COMPACT] context {session.ctx_used:,}"
-                f"/{session.num_ctx:,} over"
-                f" {int(config.COMPACT_AT * 100)}% — compacting[/dim]"
-            )
-            conversation.compact_messages()
-            session.ctx_used = conversation.estimate_tokens(session.messages)
+        # Prune tool output and compact if needed, once the turn's tool calls
+        # are all resolved (shared with the TUI).
+        conversation.after_turn()
 
 
 if __name__ == '__main__':

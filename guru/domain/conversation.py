@@ -170,6 +170,43 @@ def _summarise_groups(groups: list) -> str:
         return f'(summary failed: {e})'
 
 
+def prune_tool_exchanges(messages: list) -> None:
+    """Drop tool results and text-less tool-call steps from history in place.
+
+    Tool output (web pages, file dumps, directory listings) is the largest and
+    least reusable part of the context, and it is otherwise re-sent on every
+    subsequent turn. The assistant's text answer already captures the
+    conclusion; if the raw data is needed again the model can simply re-run
+    the tool. Called after each turn so the next one starts lean. The system
+    prompt, user messages, and every assistant message with text are kept.
+    """
+    kept = []
+    for m in messages:
+        role = msg_role(m)
+        if role == 'tool':
+            continue
+        if role == 'assistant' and not msg_content(m).strip():
+            continue
+        kept.append(m)
+    messages[:] = kept
+
+
+def after_turn() -> None:
+    """Post-turn context maintenance shared by the TUI and the REPL.
+
+    Prune tool output, refresh the token estimate, then summarise-compact if
+    the lean history still exceeds the threshold. Using the post-prune
+    estimate to decide avoids compacting just because a turn fetched a large
+    (now-discarded) tool result.
+    """
+    prune_tool_exchanges(session.messages)
+    session.ctx_used = estimate_tokens(session.messages)
+    if session.num_ctx and session.ctx_used > config.COMPACT_AT \
+            * session.num_ctx:
+        compact_messages()
+        session.ctx_used = estimate_tokens(session.messages)
+
+
 def compact_messages(force: bool = False) -> None:
     """Compact the conversation: trim thinking, evict tool output, summarise.
 
