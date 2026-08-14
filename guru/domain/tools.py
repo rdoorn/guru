@@ -143,17 +143,16 @@ _JOIN_SPEC = {
 
 
 def _ask_domain(domain: str) -> bool:
-    """Default terminal approval prompt (REPL)."""
+    """Default terminal approval prompt (REPL). Enter approves; errors deny."""
     ui.console.print(
         f"\n[yellow]\\[ACCESS][/yellow] Request to access"
         f" [bold]{domain}[/bold]."
     )
     try:
-        return input(
-            f"Allow access to '{domain}'? [y/N] ").strip().lower() \
-            in ('y', 'yes')
+        answer = input(f"Allow access to '{domain}'? [Y/n] ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return False
+    return not answer.startswith('n')
 
 
 def ensure_domain_allowed(domain: str) -> bool:

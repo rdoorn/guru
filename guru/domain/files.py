@@ -36,17 +36,17 @@ def set_path_asker(fn) -> None:
 
 
 def _ask_path(directory: str) -> bool:
-    """Default terminal approval prompt (REPL)."""
+    """Default terminal approval prompt (REPL). Enter approves; errors deny."""
     ui.console.print(
         f"\n[yellow]\\[ACCESS][/yellow] Request to read files under"
         f" [bold]{directory}[/bold]."
     )
     try:
-        return input(
-            f"Allow file access to '{directory}'? [y/N] ").strip().lower() \
-            in ('y', 'yes')
+        answer = input(
+            f"Allow file access to '{directory}'? [Y/n] ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return False
+    return not answer.startswith('n')
 
 
 def _within_allowed(resolved: Path) -> bool:

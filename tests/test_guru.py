@@ -411,6 +411,38 @@ class TestFileTools:
         assert files._parse_range('1-9999', 50) == (1, 50)
 
 
+class TestAccessPromptDefaults:
+    """Access prompts default to allow on Enter but deny on any error."""
+
+    def test_path_enter_allows(self, monkeypatch) -> None:
+        monkeypatch.setattr('builtins.input', lambda *a: '')
+        assert files._ask_path('/x') is True
+
+    def test_path_explicit_no_denies(self, monkeypatch) -> None:
+        monkeypatch.setattr('builtins.input', lambda *a: 'no')
+        assert files._ask_path('/x') is False
+
+    def test_path_error_denies(self, monkeypatch) -> None:
+        def boom(*a):
+            raise EOFError
+        monkeypatch.setattr('builtins.input', boom)
+        assert files._ask_path('/x') is False
+
+    def test_domain_enter_allows(self, monkeypatch) -> None:
+        monkeypatch.setattr('builtins.input', lambda *a: '  ')
+        assert tools._ask_domain('x.com') is True
+
+    def test_domain_no_denies(self, monkeypatch) -> None:
+        monkeypatch.setattr('builtins.input', lambda *a: 'n')
+        assert tools._ask_domain('x.com') is False
+
+    def test_domain_error_denies(self, monkeypatch) -> None:
+        def boom(*a):
+            raise KeyboardInterrupt
+        monkeypatch.setattr('builtins.input', boom)
+        assert tools._ask_domain('x.com') is False
+
+
 class TestOptionalToolParams:
     """Optional params are excluded from adapter 'required' schemas."""
 

@@ -111,28 +111,40 @@ def run() -> None:
     state = {'loop': None}
     cols = shutil.get_terminal_size((100, 30)).columns
     barriers: dict = {}   # parent Agent -> {'remaining': set, 'results': dict}
+    # One serialized permission prompt at a time: every agent's access
+    # question funnels through this lock and is shown on the loop (main)
+    # thread, so sub-agents never pop competing prompts.
+    ask_lock = threading.Lock()
 
-    def _ask_terminal(domain: str) -> bool:
-        sys.stdout.write(f"\nAllow access to '{domain}'? [y/N] ")
+    def _ask_terminal(target: str) -> bool:
+        # Default is Yes: pressing Enter (an empty answer) approves; only an
+        # explicit 'n'/'no' denies. An EOF/interrupt is NOT an answer, so it
+        # fails closed (deny) — see _domain_asker for the same rule on errors.
+        sys.stdout.write(f"\nAllow access to '{target}'? [Y/n] ")
         sys.stdout.flush()
         try:
-            return input().strip().lower() in ('y', 'yes')
+            answer = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
+        return not answer.startswith('n')
 
-    def _domain_asker(domain: str) -> bool:
+    def _domain_asker(target: str) -> bool:
         # run_in_terminal touches the app/event loop when first called, which
         # fails in a worker thread ("no current event loop in thread …"). So
         # build the coroutine inside an async wrapper that is *run on the loop
         # thread* via run_coroutine_threadsafe — never call run_in_terminal
-        # directly from the worker.
-        async def _prompt() -> bool:
-            return await run_in_terminal(lambda: _ask_terminal(domain))
-        try:
-            fut = asyncio.run_coroutine_threadsafe(_prompt(), state['loop'])
-            return bool(fut.result())
-        except Exception:
-            return False
+        # directly from the worker. The lock serializes prompts across agents.
+        with ask_lock:
+            async def _prompt() -> bool:
+                return await run_in_terminal(lambda: _ask_terminal(target))
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _prompt(), state['loop'])
+                return bool(fut.result())
+            except Exception:
+                # Any failure to obtain an answer denies — never allow on
+                # error, so a broken prompt can't silently grant access.
+                return False
 
     tools.set_domain_asker(_domain_asker)
     files.set_path_asker(_domain_asker)
