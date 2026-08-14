@@ -325,62 +325,63 @@ class TestActiveSpecs:
 class TestFileTools:
     """Tests for the filesystem tools and the directory allow-list gate."""
 
-    def _allow(self, tmp_path):
-        config.ALLOWED_DIRS.add(str(tmp_path.resolve()))
+    def _only(self, monkeypatch, *dirs) -> None:
+        """Make ALLOWED_DIRS contain exactly ``dirs`` for this test."""
+        monkeypatch.setattr(
+            config, 'ALLOWED_DIRS',
+            {str(Path(d).resolve()) for d in dirs})
 
-    def _forget(self, tmp_path):
-        config.ALLOWED_DIRS.discard(str(tmp_path.resolve()))
-
-    def test_cwd_allowed_by_default(self) -> None:
-        assert files._within_allowed(Path.cwd().resolve())
-
-    def test_list_dir_shows_perms_and_size(self) -> None:
+    def test_list_dir_shows_perms_and_size(self, monkeypatch) -> None:
+        self._only(monkeypatch, Path.cwd())
         out = files.list_dir('guru')
         assert 'session.py' in out and '0644' in out
 
-    def test_read_file_range_is_line_numbered(self) -> None:
+    def test_read_file_range_is_line_numbered(self, monkeypatch) -> None:
+        self._only(monkeypatch, Path.cwd())
         out = files.read_file('guru/session.py', '1-3')
         assert 'lines 1-3 of' in out
         assert '\n     1\t' in out
 
-    def test_read_file_bad_range(self) -> None:
+    def test_read_file_bad_range(self, monkeypatch) -> None:
+        self._only(monkeypatch, Path.cwd())
         assert 'Invalid line range' in files.read_file('guru/session.py', 'x')
 
-    def test_read_file_caps_large_files(self, tmp_path) -> None:
+    def test_read_file_caps_large_files(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
         big = tmp_path / 'big.txt'
         big.write_text('\n'.join(str(i) for i in range(1, 501)) + '\n')
-        self._allow(tmp_path)
-        try:
-            out = files.read_file(str(big))
-            assert 'lines 1-400 of 500' in out
-            assert 'showing first 400 of 500' in out
-        finally:
-            self._forget(tmp_path)
+        out = files.read_file(str(big))
+        assert 'lines 1-400 of 500' in out
+        assert 'showing first 400 of 500' in out
 
-    def test_read_file_refuses_binary(self, tmp_path) -> None:
+    def test_read_file_refuses_binary(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
         b = tmp_path / 'b.bin'
         b.write_bytes(b'\x00\x01\x02data')
-        self._allow(tmp_path)
-        try:
-            assert 'binary' in files.read_file(str(b))
-        finally:
-            self._forget(tmp_path)
+        assert 'binary' in files.read_file(str(b))
 
-    def test_list_tree_skips_noise_dirs(self, tmp_path) -> None:
+    def test_list_tree_skips_noise_dirs(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
         (tmp_path / '.git').mkdir()
         (tmp_path / '.git' / 'INSIDE_GIT').write_text('y')
         (tmp_path / 'src').mkdir()
         (tmp_path / 'src' / 'a.py').write_text('z')
-        self._allow(tmp_path)
-        try:
-            out = files.list_tree(str(tmp_path), '3')
-            assert '(skipped)' in out
-            assert 'INSIDE_GIT' not in out   # noise dir not descended
-            assert 'a.py' in out             # normal dir descended
-        finally:
-            self._forget(tmp_path)
+        out = files.list_tree(str(tmp_path), '3')
+        assert '(skipped)' in out
+        assert 'INSIDE_GIT' not in out   # noise dir not descended
+        assert 'a.py' in out             # normal dir descended
 
-    def test_gate_denies_outside_cwd(self, tmp_path) -> None:
+    def test_cwd_is_not_auto_allowed(self, monkeypatch) -> None:
+        # A fresh project: nothing pre-allowed, so even cwd must be approved.
+        self._only(monkeypatch)                       # empty allow-list
+        files.set_path_asker(lambda d: False)
+        try:
+            assert 'denied' in files.list_dir('.').lower()
+        finally:
+            files.set_path_asker(None)
+
+    def test_gate_denies_outside(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch)
         files.set_path_asker(lambda d: False)
         try:
             assert 'denied' in files.list_dir(str(tmp_path)).lower()
@@ -388,6 +389,7 @@ class TestFileTools:
             files.set_path_asker(None)
 
     def test_gate_approves_and_persists(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch)
         saved: list = []
         monkeypatch.setattr(config, 'persist_dir', saved.append)
         files.set_path_asker(lambda d: True)
@@ -400,7 +402,6 @@ class TestFileTools:
             assert saved == [resolved]
         finally:
             files.set_path_asker(None)
-            self._forget(tmp_path)
 
     def test_parse_range(self) -> None:
         assert files._parse_range('', 500) == (1, 400)

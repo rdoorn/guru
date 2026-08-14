@@ -126,7 +126,8 @@ Guidelines:
 # Domains approved for model-initiated web access, loaded at startup.
 ALLOWED_DOMAINS: set = set()
 # Directories approved for model-initiated file access (resolved absolute
-# paths). The current working directory is always allowed; see load below.
+# paths). Loaded from the per-project allow-list; new ones (including the
+# working directory) are approved once and persisted. See load below.
 ALLOWED_DIRS: set = set()
 
 
@@ -274,7 +275,7 @@ def save_adapter_configs(configs: list) -> None:
 # Create global config on import; project state stays lazy.
 ensure_setup()
 ALLOWED_DOMAINS = load_allowed_domains()
-# The working directory is allowed by default (not persisted); approved
-# extra directories are loaded from the per-project allow-list.
+# Directories previously approved for this project. Nothing is allowed by
+# default — the first file access (including the working directory) prompts
+# once, then the approval is persisted here.
 ALLOWED_DIRS = load_allowed_dirs()
-ALLOWED_DIRS.add(str(Path.cwd().resolve()))

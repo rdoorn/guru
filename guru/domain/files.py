@@ -1,11 +1,11 @@
 """Filesystem tools: directory listing and file reading, gated by a
 per-project directory allow-list.
 
-Access is restricted to allow-listed directory subtrees. The working directory
-is allowed by default; any other location must be approved once, and the
-approval is persisted to ``.guru/dirs_allow.txt`` so it is not asked again.
-Paths are resolved to real absolute paths before the check, so ``..`` and
-symlink escapes cannot leave an allowed subtree.
+Access is restricted to allow-listed directory subtrees. Nothing is allowed by
+default: the first access to a directory (including the working directory) is
+approved once, and the approval is persisted to ``.guru/dirs_allow.txt`` so it
+is not asked again. Paths are resolved to real absolute paths before the check,
+so ``..`` and symlink escapes cannot leave an allowed subtree.
 """
 import stat
 from pathlib import Path
