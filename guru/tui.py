@@ -595,13 +595,6 @@ def run() -> None:
         parts.extend(_tab_parts(0))       # [main] highlighted in main view
         return FormattedText(parts)
 
-    def _main_message():
-        # A rule above the '> ' input, mirroring the TUI's rule-above-prompt.
-        return FormattedText([
-            ('', '─' * _app_cols() + '\n'),
-            ('', '> '),
-        ])
-
     async def _in_terminal(fn, *args) -> None:
         """Run a blocking, terminal-controlling command (picker/input) in a
         worker thread, awaited so the main prompt does not restart under it.
@@ -654,7 +647,7 @@ def run() -> None:
                 main_writer.drain()
                 try:
                     res = await ps.prompt_async(
-                        _main_message, bottom_toolbar=_main_toolbar,
+                        '> ', bottom_toolbar=_main_toolbar,
                         style=ui._TOOLBAR_STYLE)
                 except EOFError:
                     state['quit'] = True
