@@ -121,9 +121,15 @@ def run() -> None:
             return False
 
     def _domain_asker(domain: str) -> bool:
-        fut = asyncio.run_coroutine_threadsafe(
-            run_in_terminal(lambda: _ask_terminal(domain)), state['loop'])
+        # run_in_terminal touches the app/event loop when first called, which
+        # fails in a worker thread ("no current event loop in thread …"). So
+        # build the coroutine inside an async wrapper that is *run on the loop
+        # thread* via run_coroutine_threadsafe — never call run_in_terminal
+        # directly from the worker.
+        async def _prompt() -> bool:
+            return await run_in_terminal(lambda: _ask_terminal(domain))
         try:
+            fut = asyncio.run_coroutine_threadsafe(_prompt(), state['loop'])
             return bool(fut.result())
         except Exception:
             return False
