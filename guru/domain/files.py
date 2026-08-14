@@ -10,6 +10,7 @@ paths before the check, so ``..``/symlink escapes cannot leave an allowed tree.
 """
 import difflib
 import re
+import shutil
 import stat
 from pathlib import Path
 
@@ -358,42 +359,72 @@ def search_code(pattern: str, path: str = '.') -> str:
 # --- write tools (gated by the WRITE allow-list + access mode) ---------------
 
 _MAX_DIFF_LINES = 200       # cap diff lines shown in the write prompt
-_G, _R, _D, _Z = '\x1b[32m', '\x1b[31m', '\x1b[2m', '\x1b[0m'   # ANSI colours
+_BG_G = '\x1b[48;5;22m'     # dark green background — additions
+_BG_R = '\x1b[48;5;52m'     # dark red background — removals
+_D = '\x1b[2m'              # dim — context lines
+_Z = '\x1b[0m'
+_HUNK = re.compile(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 
 
 def _plural(n: int) -> str:
     return f"{n} line{'' if n == 1 else 's'}"
 
 
+def _diff_row(lineno: int, sign: str, content: str, bg: str) -> str:
+    """One diff row: '<n> <sign> <content>' as a full-width coloured block
+    (one column short of the terminal to avoid cursor wrap)."""
+    width = max(20, shutil.get_terminal_size(fallback=(100, 30)).columns - 1)
+    text = f" {lineno:>4} {sign} {content}"[:width].ljust(width)
+    return f"{bg or _D}{text}{_Z}"
+
+
 def _write_detail(target: Path, old: str, new: str, verb: str) -> str:
-    """A compact coloured diff of the pending change, Claude-style:
+    """A Claude-style diff of the pending change:
 
-        ⏺ Update(name.py)  added 2 lines, removed 1 line
-        - old line
-        + new line
+        ⏺ Update(name.py) added 2 lines, removed 1 line
+           41 - old line
+           41 + new line
 
-    green '+' additions, red '-' removals, dim context, no hunk headers.
+    line-numbered, '+'/'-' as full-width green/red background blocks, dim
+    context, no hunk headers, and zero counts omitted from the summary.
     """
     added = removed = 0
-    lines: list = []
+    rows: list = []
+    truncated = False
+    old_ln = new_ln = 0
     for ln in difflib.unified_diff(
             old.splitlines(), new.splitlines(), lineterm='', n=3):
-        if ln.startswith(('+++', '---', '@@')):
+        m = _HUNK.match(ln)
+        if m:
+            old_ln, new_ln = int(m.group(1)), int(m.group(2))
+            continue
+        if ln.startswith(('+++', '---')):
             continue
         if ln.startswith('+'):
             added += 1
-            lines.append(f"{_G}{ln}{_Z}")
+            row = _diff_row(new_ln, '+', ln[1:], _BG_G)
+            new_ln += 1
         elif ln.startswith('-'):
             removed += 1
-            lines.append(f"{_R}{ln}{_Z}")
+            row = _diff_row(old_ln, '-', ln[1:], _BG_R)
+            old_ln += 1
         else:
-            lines.append(f"{_D}{ln}{_Z}")
-    if len(lines) > _MAX_DIFF_LINES:
-        extra = len(lines) - _MAX_DIFF_LINES
-        lines = lines[:_MAX_DIFF_LINES] + [f"… (+{extra} more diff lines)"]
-    header = (f"⏺ {verb}({target.name})  added {_plural(added)},"
-              f" removed {_plural(removed)}")
-    return header + ("\n" + "\n".join(lines) if lines else "")
+            row = _diff_row(new_ln, ' ', ln[1:], '')
+            old_ln += 1
+            new_ln += 1
+        if len(rows) < _MAX_DIFF_LINES:
+            rows.append(row)
+        else:
+            truncated = True
+    if truncated:
+        rows.append(f"{_D} … more lines{_Z}")
+    summary = ", ".join(
+        p for p in (
+            f"added {_plural(added)}" if added else '',
+            f"removed {_plural(removed)}" if removed else '') if p
+    ) or "no changes"
+    header = f"⏺ {verb}({target.name}) {summary}"
+    return header + ("\n" + "\n".join(rows) if rows else "")
 
 
 def _will_prompt_write(target: Path) -> bool:
