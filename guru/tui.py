@@ -581,12 +581,13 @@ def run() -> None:
 
     def _main_toolbar():
         # Match the TUI's bottom chrome: rule · status · tabs. The output
-        # "pane" for [main] is the terminal scrollback above this bar. Rules
-        # use the default foreground (like HorizontalLine), full render width.
+        # "pane" for [main] is the terminal scrollback above this bar. The
+        # rule is one column short of full width: a line exactly the terminal
+        # width auto-wraps the cursor and corrupts prompt_toolkit's redraw.
         columns = _app_cols()
         left, ctx, right, colour = _status_from(main.state)
         parts = [
-            ('', '─' * columns + '\n'),
+            ('', '─' * (columns - 1) + '\n'),
             ('ansibrightblack', left),
             (_CTX_COLOUR[colour], ctx),
             ('ansibrightblack', right),
