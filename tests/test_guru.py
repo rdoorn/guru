@@ -603,6 +603,41 @@ class TestWriteTools:
         assert 'not found' in files.edit_file(str(p), 'zzz', 'q')
         assert 'appears 2 times' in files.edit_file(str(p), 'x', 'y')
 
+    def test_delete_file_removes(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        self._write_allowed(monkeypatch, tmp_path)
+        p = tmp_path / 'd.txt'
+        p.write_text('bye')
+        out = files.delete_file(str(p))
+        assert not p.exists() and 'Deleted' in out
+
+    def test_delete_refused_in_read_only(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_READ_ONLY)
+        self._write_allowed(monkeypatch, tmp_path)
+        p = tmp_path / 'd.txt'
+        p.write_text('bye')
+        out = files.delete_file(str(p))
+        assert 'read-only' in out and p.exists()
+
+    def test_delete_refuses_directory_and_missing(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        self._write_allowed(monkeypatch, tmp_path)
+        assert 'directory' in files.delete_file(str(tmp_path))
+        assert 'No such file' in files.delete_file(str(tmp_path / 'nope'))
+
+    def test_delete_uses_write_gate(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        p = tmp_path / 'd.txt'
+        p.write_text('bye')
+        files.set_path_asker(lambda q: False)         # deny
+        try:
+            out = files.delete_file(str(p))
+            assert 'denied' in out.lower() and p.exists()
+        finally:
+            files.set_path_asker(None)
+
 
 class TestAccessPromptDefaults:
     """Access prompts default to allow on Enter but deny on any error."""

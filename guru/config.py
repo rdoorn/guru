@@ -116,6 +116,9 @@ the results show. If a needed detail (a name, a location) is missing, ask.
 Before concluding code or a feature is missing, grep for its definition and
 read the file that defines it; when reviewing a file, follow its local
 imports. Never infer that something is absent from a single file.
+Only report an action as done if a tool actually performed it. If no tool
+exists for the request, say so and stop — never claim a change you did not
+make.
 """
 
 # Appended to the system prompt of delegation-capable agents (TUI only), to

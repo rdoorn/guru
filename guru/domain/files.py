@@ -473,3 +473,29 @@ def edit_file(path: str, old: str, new: str) -> str:
     if silent:
         _show_change(body)
     return f"Edited {target} (replaced 1 occurrence)."
+
+
+def delete_file(path: str) -> str:
+    """
+    Delete a single file. Destructive and write-gated: refused in read-only
+    mode, asked once per directory (showing which file), auto-approved in auto
+    mode. Refuses to delete directories.
+    """
+    target = _resolve(path)
+    if config.MODE == config.MODE_READ_ONLY:
+        return "Refused: read-only mode. Change mode to delete files."
+    if not target.exists():
+        return f"No such file: {target}"
+    if target.is_dir():
+        return f"{target} is a directory; refusing to delete directories."
+    detail = f"delete_file — remove {target}"
+    silent = not _will_prompt_write(target)
+    if not ensure_write_path_allowed(target, detail):
+        return f"Write access to '{target}' was denied."
+    try:
+        target.unlink()
+    except OSError as e:
+        return f"Cannot delete {target}: {e}"
+    if silent:
+        ui.console.print(f"[red]deleted[/red] {target}")
+    return f"Deleted {target}."

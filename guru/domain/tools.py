@@ -432,6 +432,21 @@ TOOL_REGISTRY: dict = {
             "new": "Replacement text",
         },
     },
+    "delete_file": {
+        "fn": files.delete_file,
+        "description": (
+            "Delete a single file. Destructive and write-gated: refused in"
+            " read-only mode, asked once per directory (showing which file)."
+            " Does not delete directories."
+        ),
+        "tags": [
+            "delete", "remove", "rm", "unlink", "erase", "file", "trash",
+            "destructive", "filesystem", "local",
+        ],
+        "parameters": {
+            "path": "File to delete",
+        },
+    },
 }
 
 
