@@ -646,16 +646,18 @@ def run() -> None:
 
     async def _run_main() -> None:
         while state['view'] == 'main' and not state['quit']:
-            # Arm modifyOtherKeys + bracketed paste so Shift+Enter is sent as a
-            # distinct key (F13), and flush any output held during the last
-            # prompt / the viewer so it appears above the fresh prompt.
-            ui.enable_terminal_modes()
+            # Flush output held during the last prompt / the viewer so it
+            # lands above the fresh prompt. modifyOtherKeys is armed via
+            # pre_run (after prompt_toolkit sets up the terminal and probes
+            # the cursor), matching the classic REPL — arming it manually
+            # beforehand corrupted the cursor-position detection.
             main_writer.drain()
             state['prompt_active'] = True
             try:
                 res = await ps.prompt_async(
                     '> ', bottom_toolbar=_main_toolbar,
-                    style=ui._TOOLBAR_STYLE)
+                    style=ui._TOOLBAR_STYLE,
+                    pre_run=ui.enable_terminal_modes)
             except EOFError:
                 state['quit'] = True
                 return
@@ -706,8 +708,8 @@ def run() -> None:
                 elif len(manager.agents) <= 1:
                     state['view'] = 'main'
                 else:
-                    ui.enable_terminal_modes()   # Shift+Enter in the viewer
-                    await tui_app.run_async()
+                    await tui_app.run_async(
+                        pre_run=ui.enable_terminal_modes)
         finally:
             state['closing'] = True
             ui.reset_terminal()
