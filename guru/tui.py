@@ -1,40 +1,36 @@
-"""Full-screen multi-viewport TUI (Phase B — parallel turns + delegation).
+"""Hybrid UI: the main agent lives in the normal terminal buffer, sub-agents
+live in a full-screen (alternate-screen) viewer you toggle into.
 
-Each agent viewport owns its own conversation, tools, model, counters, and
-output console. Submitting runs that agent's turn in a background thread; the
-prompt stays live and you can queue more or switch viewports
-(Shift+Left/Right). Ctrl+N spawns a new agent (inherits the current model). A
-single Ctrl+C cancels the active agent's running turn (cooperatively); a
-double Ctrl+C exits.
+- [main] is an async line prompt in the primary/normal screen buffer: prompts
+  go here, main's output streams above the live prompt (via patch_stdout), the
+  terminal scrolls back normally, and nothing is cleared on exit.
+- [agent1…N] are shown in a full-screen Application (the alternate screen),
+  entered with Shift+Right (or Ctrl+N to spawn+view); Shift+Left/Right cycle
+  sub-agents and Shift+Left off the first one drops back to [main].
 
-Turns run in parallel: each agent binds its own ``session.state`` and console
-via contextvars for the duration of its turn, so the adapters — which read and
-write ``session`` — operate on that agent's state without a shared lock. Local
-Ollama turns against the same model still serialize inside the daemon; remote
-adapters (Anthropic/LiteLLM) and mixed models parallelise fully.
+A small coordinator loop swaps between the two surfaces; entering/leaving the
+full-screen app performs the terminal buffer switch automatically.
 
-Delegation is a mailbox: a spawned sub-agent's final answer is delivered back
-into its parent's queue when it finishes, auto-waking the parent to synthesise
-— the parent never blocks, so it stays free to take new tasks or spawn more.
-``check`` inspects sub-agents without blocking; ``join`` resumes the parent
-once a named group all finish. All queue/busy/launch/deliver transitions run
-on the event-loop thread (workers only run the blocking turn), so there are no
-races on ``busy`` or on the agent list.
-
-Layout, top to bottom: output pane · rule · prompt · rule · status · tabs.
+Execution is unchanged from before: each agent owns its own ``SessionState``
+and console (bound per worker thread via contextvars), turns run in background
+threads, and delegation is a mailbox (spawn/check/join). All queue/busy/launch/
+deliver transitions happen on the event-loop thread.
 """
 import asyncio
 import shutil
+import sys
 import threading
 from pathlib import Path
 
-from prompt_toolkit import Application
-from prompt_toolkit.filters import Condition
+from prompt_toolkit import Application, PromptSession
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import ANSI, FormattedText
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
@@ -45,9 +41,14 @@ from guru.domain import conversation, files, tools
 _CTX_COLOUR = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 _CHROME_ROWS = 5   # 2 rules + prompt + status + tabs
 
+# Sentinels the main prompt's key bindings return to drive the coordinator.
+_ENTER_TUI = object()
+_NEW_AGENT = object()
+_QUIT = object()
+
 
 class _BufferWriter:
-    """File-like sink that routes rich output into an agent's buffer."""
+    """File-like sink that routes rich output into a sub-agent's buffer."""
 
     def __init__(self) -> None:
         self.target = None
@@ -70,6 +71,57 @@ class _BufferWriter:
             self.refresh()
 
 
+class _MainWriter:
+    """Routes the main agent's output to the normal terminal buffer.
+
+    Lines stream to stdout (above the live prompt via patch_stdout) while the
+    [main] view is on screen; while the sub-agent TUI is showing they are held
+    and flushed on return. Every line is also mirrored into the agent buffer.
+    """
+
+    def __init__(self, agent, state) -> None:
+        self.agent = agent
+        self.state = state
+        self._partial = ''
+        self._pending: list = []
+        self._lock = threading.Lock()
+
+    def _emit(self, line: str) -> None:
+        self.agent.append(line)
+        if self.state.get('view') == 'main':
+            try:
+                sys.stdout.write(line + '\n')
+                sys.stdout.flush()
+                return
+            except Exception:                            # noqa: BLE001
+                pass
+        self._pending.append(line)
+
+    def write(self, text: str) -> None:
+        with self._lock:
+            self._partial += text
+            while '\n' in self._partial:
+                line, self._partial = self._partial.split('\n', 1)
+                self._emit(line)
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._partial:
+                self._emit(self._partial)
+                self._partial = ''
+
+    def drain(self) -> None:
+        """Flush lines held while the TUI was showing (call in [main] view)."""
+        with self._lock:
+            for line in self._pending:
+                try:
+                    sys.stdout.write(line + '\n')
+                except Exception:                        # noqa: BLE001
+                    pass
+            sys.stdout.flush()
+            self._pending.clear()
+
+
 def _status_from(st) -> tuple:
     """Build the status tuple (left, ctx, right, colour) from state."""
     total = st.num_ctx or 1
@@ -86,9 +138,7 @@ def _status_from(st) -> tuple:
     model = (st.model or '?').split(':')[0]
     left = f"🤖 {model} | 💪 {st.model_size or '?'} | "
     ctx = f"🧠 {int(pct * 100)}% {bar}"
-    # Composition of the resident context in tokens (rough, ~4 chars/token):
-    # sys=system prompt+GURU.md, tl=tool schemas, in=prompts, out=responses,
-    # res=lingering tool output (usually 0 after pruning).
+    # Composition of the resident context in tokens (rough, ~4 chars/token).
     bd = conversation.context_breakdown(
         st.messages, st.active_tool_names, st.can_spawn)
 
@@ -110,8 +160,6 @@ def _status_from(st) -> tuple:
 def run() -> None:
     ui.refresh_git_branch()
     manager = AgentManager()
-    # The main agent adopts the startup session cli already populated (model,
-    # adapter, system prompt, context accounting) and may delegate via spawn.
     main = manager.active
     main.state = session.current()
     main.state.can_spawn = True
@@ -121,60 +169,45 @@ def run() -> None:
     for fn in (tools.spawn, tools.check, tools.join):
         if fn not in main.state.active_tools:
             main.state.active_tools.append(fn)
-    main.append("guru — Ctrl+N new agent · Shift+Left/Right switch"
-                " · Ctrl+C cancel · double Ctrl+C exit")
 
-    state = {'loop': None, 'prompt': None, 'closing': False}
+    state = {'loop': None, 'view': 'main', 'quit': False, 'closing': False}
     cols = shutil.get_terminal_size((100, 30)).columns
-    barriers: dict = {}   # parent Agent -> {'remaining': set, 'results': dict}
-    # One serialized permission prompt at a time: every agent's access
-    # question funnels through this lock and is shown in the [main] viewport
-    # on the loop thread, so sub-agents never pop competing prompts.
+    barriers: dict = {}
     ask_lock = threading.Lock()
 
-    def _open_prompt(req: dict) -> None:
-        """Show a permission question in the [main] viewport (loop thread)."""
-        state['prompt'] = req
-        manager.active_index = 0          # bring the main viewport forward
-        main_agent = manager.agents[0]
-        main_agent.append("")
-        main_agent.append(
-            f"[access] Allow access to '{req['target']}' ?"
-            "  Y = allow · N = deny  (Enter = allow)")
-        _invalidate()
+    main_writer = _MainWriter(main, state)
+    main.console = Console(
+        file=main_writer, force_terminal=True,
+        color_system='standard', width=cols)
 
-    def _resolve_prompt(result: bool) -> None:
-        """Answer the pending permission question (loop thread)."""
-        req = state['prompt']
-        if req is None:
-            return
-        state['prompt'] = None
-        manager.agents[0].append(
-            f"[access] → {'allowed' if result else 'denied'}.")
-        req['result'] = result
-        req['event'].set()
-        _invalidate()
+    # --- permission asker (run_in_terminal; works in either view) -----------
 
     def _domain_asker(target: str) -> bool:
-        # Ask in the [main] viewport, on the loop thread, one question at a
-        # time (ask_lock). The worker blocks here until answered. Default is
-        # allow (Enter); any failure to get an answer — including shutdown —
-        # denies, so a broken prompt can never silently grant access.
+        def _ask() -> bool:
+            try:
+                ans = input(
+                    f"Allow access to '{target}'? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return not ans.startswith('n')
+
+        async def _prompt() -> bool:
+            return await run_in_terminal(_ask)
+
         with ask_lock:
             if state['closing']:
                 return False
-            event = threading.Event()
-            req = {'target': target, 'event': event, 'result': False}
-            state['loop'].call_soon_threadsafe(_open_prompt, req)
-            while not event.wait(0.25):
-                if state['closing']:
-                    return False
-            return req['result']
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _prompt(), state['loop'])
+                return bool(fut.result())
+            except Exception:                            # noqa: BLE001
+                return False
 
     tools.set_domain_asker(_domain_asker)
     files.set_path_asker(_domain_asker)
 
-    # --- per-agent output ----------------------------------------------------
+    # --- per-agent output (sub-agents use buffer consoles) ------------------
 
     def _attach_console(agent) -> None:
         writer = _BufferWriter()
@@ -184,16 +217,9 @@ def run() -> None:
             file=writer, force_terminal=True,
             color_system='standard', width=cols)
 
-    # --- background execution ------------------------------------------------
-    #
-    # Workers only run the blocking turn; every queue/busy/launch/deliver/
-    # barrier transition happens on the loop thread (via call_soon_threadsafe
-    # or _on_loop), so there are no races on ``busy`` or the agent list.
+    # --- background execution (workers only run the blocking turn) ----------
 
     def _work(agent) -> None:
-        # Bind this agent's state + console to the worker thread's context, so
-        # the adapters (which touch ``session``) and tool output target this
-        # agent only. No lock: other agents run concurrently on their own.
         token = session.use(agent.state)
         ctoken = ui.use_console(agent.console)
         try:
@@ -202,8 +228,6 @@ def run() -> None:
                 agent.state.messages.append(
                     {'role': 'user', 'content': message})
                 session.adapter.run_turn()
-                # Prune tool output and compact if needed, so context does
-                # not grow unbounded across turns (the TUI had no compaction).
                 conversation.after_turn()
         except Exception as e:                           # noqa: BLE001
             agent.append(f"[error] {e}")
@@ -214,13 +238,11 @@ def run() -> None:
             state['loop'].call_soon_threadsafe(_on_done, agent)
 
     def _launch(agent) -> None:
-        """Mark busy and start a worker turn (loop thread only)."""
         agent.busy = True
         agent.status = 'thinking'
         state['loop'].run_in_executor(None, _work, agent)
 
-    def _submit(text: str) -> None:
-        agent = manager.active
+    def _submit(agent, text: str) -> None:
         agent.append(f"> {text}")
         agent.queue.append(text)
         if not agent.busy:
@@ -246,7 +268,6 @@ def run() -> None:
         return "\n".join(parts)
 
     def _deliver(parent, notice: str, payload: str) -> None:
-        """Drop a result into a parent's mailbox and wake it (loop thread)."""
         parent.append(notice)
         parent.queue.append(payload)
         if not parent.busy:
@@ -254,7 +275,6 @@ def run() -> None:
         _invalidate()
 
     def _report(child) -> None:
-        """Deliver a finished child's result to its parent (loop thread)."""
         parent = child.parent
         answer = _final_answer(child)
         bar = barriers.get(parent)
@@ -272,10 +292,9 @@ def run() -> None:
                 f"[result from {child.title} · task: {child.task}]\n{answer}")
 
     def _on_done(agent) -> None:
-        """A worker finished (loop thread): relaunch, report, or go idle."""
         agent.busy = False
         agent.status = 'idle'
-        if agent.queue:                 # more arrived during teardown
+        if agent.queue:
             _launch(agent)
             _invalidate()
             return
@@ -284,7 +303,6 @@ def run() -> None:
         _invalidate()
 
     def _on_loop(fn):
-        """Run fn() on the loop thread; block the caller for its result."""
         done = threading.Event()
         box: dict = {}
 
@@ -303,7 +321,6 @@ def run() -> None:
         return box['result']
 
     def _configure(agent, base, can_spawn: bool) -> None:
-        """Seed a child agent's state from ``base`` and attach its console."""
         st = agent.state
         st.messages = [
             {'role': 'system', 'content': config.build_system_prompt()}]
@@ -329,13 +346,7 @@ def run() -> None:
         manager.active_index = len(manager.agents) - 1
 
     def _spawn_agent(task: str) -> str:
-        """Spawn handler (worker thread): delegate a task in parallel.
-
-        Sub-agents can't spawn further agents. The manager mutation, parent
-        link, and turn launch are scheduled on the loop thread to avoid racing
-        the renderer and other orchestration.
-        """
-        base = session.current()   # the delegating agent's state
+        base = session.current()
         title = f"agent{len(manager.agents)}"
         child = Agent(id=title, title=title)
         _configure(child, base, can_spawn=False)
@@ -357,7 +368,6 @@ def run() -> None:
         )
 
     def _do_check(caller_state, target: str) -> str:
-        """Report sub-agent status/results for the caller (loop thread)."""
         caller = _agent_for_state(caller_state)
         children = [a for a in manager.agents if a.parent is caller]
         if not children:
@@ -378,7 +388,6 @@ def run() -> None:
                 f"{_final_answer(match)}")
 
     def _do_join(caller_state, titles: list) -> str:
-        """Register a join barrier for the caller (loop thread)."""
         caller = _agent_for_state(caller_state)
         children = {a.title: a for a in manager.agents if a.parent is caller}
         targets = [children[t] for t in titles if t in children]
@@ -413,7 +422,7 @@ def run() -> None:
     tools.set_check_handler(_check)
     tools.set_join_handler(_join)
 
-    # --- views ---------------------------------------------------------------
+    # --- sub-agent full-screen viewer (alternate screen) --------------------
 
     def _output():
         rows = shutil.get_terminal_size((100, 30)).lines
@@ -426,17 +435,17 @@ def run() -> None:
 
     def _tabs() -> FormattedText:
         parts: list = []
-        for active, title in manager.tabs():
+        for i, agent in enumerate(manager.agents):
+            active = i == manager.active_index
             parts.append(
-                ('reverse' if active else 'ansibrightblack', f'[{title}]'))
+                ('reverse' if active else 'ansibrightblack',
+                 f'[{agent.title}]'))
             parts.append(('', ' '))
         return FormattedText(parts)
 
     tabline = Window(FormattedTextControl(_tabs), height=1)
 
     def _status() -> FormattedText:
-        # Each agent's live state is mutated in place by its worker thread, so
-        # reading the active agent's state here always reflects current values.
         left, ctx, right, colour = _status_from(manager.active.state)
         return FormattedText([
             ('ansibrightblack', left),
@@ -445,66 +454,50 @@ def run() -> None:
         ])
 
     statusline = Window(FormattedTextControl(_status), height=1)
-
     input_area = TextArea(height=1, prompt='> ', multiline=False)
 
     def _accept(buff) -> bool:
         text = buff.text.strip()
         if text:
-            _submit(text)
+            _submit(manager.active, text)
         return False
 
     input_area.accept_handler = _accept
 
-    # --- keys ----------------------------------------------------------------
+    tui_kb = KeyBindings()
 
-    kb = KeyBindings()
-
-    @kb.add('c-d')
-    def _quit(event) -> None:
+    @tui_kb.add('c-d')
+    def _tui_quit(event) -> None:
+        state['quit'] = True
         event.app.exit()
 
-    @kb.add('c-c')
-    def _ctrl_c(event) -> None:
+    @tui_kb.add('c-c')
+    def _tui_ctrl_c(event) -> None:
         if ui.note_ctrl_c():
+            state['quit'] = True
             event.app.exit()
         elif manager.active.busy:
             manager.active.state.cancel_requested = True
         else:
             event.current_buffer.text = ''
 
-    # eager=True so these win over the input buffer's default bindings.
-    @kb.add('c-n', eager=True)
-    def _spawn(event) -> None:
+    @tui_kb.add('c-n', eager=True)
+    def _tui_spawn(event) -> None:
         _new_agent()
 
-    # Shift+Left/Right cycle viewports. Plain Ctrl+Left/Right can't be used:
-    # macOS grabs Ctrl+Arrow for Mission Control, so they never reach the
-    # terminal (Shift+Arrow sends a distinct CSI 1;2 sequence that does).
-    @kb.add('s-right', eager=True)
-    def _next(event) -> None:
-        manager.switch(1)
+    @tui_kb.add('s-right', eager=True)
+    def _tui_next(event) -> None:
+        if manager.active_index < len(manager.agents) - 1:
+            manager.active_index += 1
 
-    @kb.add('s-left', eager=True)
-    def _prev(event) -> None:
-        manager.switch(-1)
-
-    # Permission prompt answers — active only while a question is pending, so
-    # y/n type normally otherwise. Enter defaults to allow.
-    _has_prompt = Condition(lambda: state['prompt'] is not None)
-
-    @kb.add('y', filter=_has_prompt, eager=True)
-    @kb.add('Y', filter=_has_prompt, eager=True)
-    @kb.add('enter', filter=_has_prompt, eager=True)
-    def _prompt_allow(event) -> None:
-        _resolve_prompt(True)
-
-    @kb.add('n', filter=_has_prompt, eager=True)
-    @kb.add('N', filter=_has_prompt, eager=True)
-    def _prompt_deny(event) -> None:
-        _resolve_prompt(False)
-
-    # --- run -----------------------------------------------------------------
+    @tui_kb.add('s-left', eager=True)
+    def _tui_prev(event) -> None:
+        # Off the first sub-agent (index 1), drop back to the [main] view.
+        if manager.active_index > 1:
+            manager.active_index -= 1
+        else:
+            state['view'] = 'main'
+            event.app.exit()
 
     root = HSplit([
         output,
@@ -514,29 +507,153 @@ def run() -> None:
         statusline,
         tabline,
     ])
-    app = Application(
+    tui_app = Application(
         layout=Layout(root, focused_element=input_area),
-        key_bindings=kb,
+        key_bindings=tui_kb,
         full_screen=True,
         mouse_support=False,
     )
 
     def _invalidate() -> None:
-        app.invalidate()   # thread-safe in prompt_toolkit
+        if state['view'] == 'tui':
+            tui_app.invalidate()
 
-    _attach_console(manager.active)
+    # --- main prompt (normal buffer) ----------------------------------------
+
+    main_kb = KeyBindings()
+
+    @main_kb.add('c-d')
+    def _m_quit(event) -> None:
+        event.app.exit(result=_QUIT)
+
+    @main_kb.add('c-c')
+    def _m_ctrl_c(event) -> None:
+        if ui.note_ctrl_c():
+            event.app.exit(result=_QUIT)
+        elif main.busy:
+            main.state.cancel_requested = True
+        else:
+            event.current_buffer.text = ''
+
+    @main_kb.add('c-n', eager=True)
+    def _m_spawn(event) -> None:
+        event.app.exit(result=_NEW_AGENT)
+
+    @main_kb.add('s-right', eager=True)
+    def _m_enter_tui(event) -> None:
+        event.app.exit(result=_ENTER_TUI)
+
+    ps = PromptSession(
+        history=FileHistory(str(config.GURU_HOME / 'history')),
+        multiline=True,
+        key_bindings=merge_key_bindings([ui._kb, main_kb]),
+    )
+
+    def _main_toolbar():
+        left, ctx, right, colour = _status_from(main.state)
+        return FormattedText([
+            ('', left), (_CTX_COLOUR[colour], ctx), ('', right)])
+
+    async def _in_terminal(fn, *args) -> None:
+        """Run a blocking, terminal-controlling command (picker/input) in a
+        worker thread, awaited so the main prompt does not restart under it.
+        No patch_stdout / prompt is active here, so the terminal is free."""
+        await state['loop'].run_in_executor(None, lambda: fn(*args))
+
+    async def _handle_command(text: str) -> bool:
+        """Run a slash command; return True if it was a command."""
+        low = text.lower()
+        if low in ('exit', 'quit'):
+            state['quit'] = True
+            return True
+        if text in ('/models', '/model'):
+            import guru.cli as cli
+            await _in_terminal(cli._models_command)
+            return True
+        if text == '/adapters':
+            import guru.cli as cli
+            await _in_terminal(cli._adapters_command)
+            return True
+        if text == '/context':
+            import guru.cli as cli
+            await _in_terminal(cli._context_command)
+            return True
+        if text == '/resume':
+            await _in_terminal(conversation.resume_command)
+            return True
+        if text.startswith('/search '):
+            import guru.cli as cli
+            await _in_terminal(cli._handle_slash_search, text[8:].strip())
+            return True
+        if text == '/save':
+            conversation.save_conversation()
+            return True
+        if text == '/compact':
+            conversation.compact_messages(force=True)
+            session.ctx_used = conversation.estimate_tokens(session.messages)
+            main.console.print(
+                f"[green]Compacted[/green] · ~{session.ctx_used:,} tokens.")
+            return True
+        return False
+
+    async def _run_main() -> None:
+        while state['view'] == 'main' and not state['quit']:
+            with patch_stdout():
+                main_writer.drain()
+                try:
+                    res = await ps.prompt_async(
+                        "guru> ", bottom_toolbar=_main_toolbar,
+                        style=ui._TOOLBAR_STYLE)
+                except EOFError:
+                    state['quit'] = True
+                    return
+                except KeyboardInterrupt:
+                    continue
+            if res is _QUIT:
+                state['quit'] = True
+                return
+            if res is _NEW_AGENT:
+                _new_agent()
+                state['view'] = 'tui'
+                return
+            if res is _ENTER_TUI:
+                if len(manager.agents) > 1:
+                    if manager.active_index < 1:
+                        manager.active_index = 1
+                    state['view'] = 'tui'
+                    return
+                main.console.print(
+                    "[dim](no sub-agents yet — Ctrl+N to spawn one)[/dim]")
+                continue
+            text = (res or '').strip()
+            if not text:
+                continue
+            if await _handle_command(text):
+                continue
+            _submit(main, text)
+
+    def _greet() -> None:
+        main.console.print(
+            f"[bold]guru[/bold] · model [bold]{main.state.model}[/bold]")
+        main.console.print(
+            "Enter submits · Ctrl+N new agent · Shift+Right view agents"
+            " · double Ctrl+C exit")
+        main.console.print(
+            "[dim]/models /context /adapters /save /resume /compact"
+            " /search[/dim]\n")
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()
+        _greet()
         try:
-            await app.run_async()
+            while not state['quit']:
+                if state['view'] == 'main':
+                    await _run_main()
+                elif len(manager.agents) <= 1:
+                    state['view'] = 'main'
+                else:
+                    await tui_app.run_async()
         finally:
-            # Unblock any worker still waiting on a permission answer (deny).
             state['closing'] = True
-            req = state['prompt']
-            if req is not None:
-                state['prompt'] = None
-                req['result'] = False
-                req['event'].set()
 
     asyncio.run(_amain())

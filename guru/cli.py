@@ -1,13 +1,16 @@
-"""Command-line entry point: adapter wiring, prompt loop, slash commands."""
+"""Command-line entry point: adapter wiring, model selection, slash commands.
+
+The interactive UI lives in ``guru.tui`` (hybrid: main agent in the normal
+buffer, sub-agents in a full-screen viewer). The slash-command helpers here are
+reused by that UI.
+"""
 import argparse
-import atexit
-import signal
 
 from guru import config, session, ui
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
-from guru.domain import conversation, tools
+from guru.domain import tools
 
 # Configured provider adapters and their raw config dicts, kept parallel so
 # /adapters can persist enable flags back to ~/.guru/adapters.toml.
@@ -323,32 +326,12 @@ def _handle_slash_search(query: str) -> None:
             ui.console.print("[bold green]--- End ---[/bold green]")
 
 
-def _print_banner() -> None:
-    ui.console.print(f"Using model: [bold]{session.model}[/bold]")
-    ui.console.print("[bold]guru[/bold]")
-    ui.console.print("Type [italic]'exit'[/italic] to quit.")
-    ui.console.print(
-        "Enter to submit · Shift+Enter for newline"
-        " · pasted newlines are safe.\n"
-    )
-    ui.console.print(
-        "[italic]/search[/italic] search · [italic]/models[/italic] model ·"
-        " [italic]/context[/italic] size · [italic]/adapters[/italic]"
-        " providers · [italic]/save[/italic] save · [italic]/resume[/italic]"
-        " restore · [italic]/compact[/italic] shrink.\n"
-    )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="guru — local LLM agent")
     parser.add_argument("--model", default=None)
     parser.add_argument(
         "--num-ctx", type=int, default=0,
         help="Override the context window (0 = auto-detect from the model)",
-    )
-    parser.add_argument(
-        "--classic", action="store_true",
-        help="Use the classic line-based REPL instead of the full-screen TUI",
     )
     args, _ = parser.parse_known_args()
 
@@ -363,83 +346,8 @@ def main() -> None:
         {"role": "system", "content": config.build_system_prompt()}]
     tools.reset_active_tools()
 
-    if not args.classic:
-        from guru import tui
-        tui.run()
-        return
-
-    signal.signal(signal.SIGINT, ui.sigint_handler)
-    signal.signal(signal.SIGWINCH, ui.sigwinch_handler)
-    atexit.register(ui.reset_terminal)
-
-    _print_banner()
-
-    while True:
-        ui.refresh_git_branch()
-        # Full-width rule marks where each new message starts.
-        ui.console.rule(style="dim")
-        try:
-            question = ui.read_line()
-        except KeyboardInterrupt:
-            # modifyOtherKeys Ctrl+C arrives via prompt_toolkit, not SIGINT.
-            if ui.note_ctrl_c():
-                ui.console.print("\n[bold red]Exiting.[/bold red]")
-                break
-            continue
-        except EOFError:
-            break
-
-        ui.reset_terminal()
-
-        if question.lower() in ("exit", "quit"):
-            break
-        if not question:
-            continue
-        if question in ('/models', '/model'):
-            _models_command()
-            continue
-        if question == '/adapters':
-            _adapters_command()
-            continue
-        if question == '/context':
-            _context_command()
-            continue
-        if question == '/save':
-            conversation.save_conversation()
-            continue
-        if question == '/resume':
-            conversation.resume_command()
-            continue
-        if question == '/compact':
-            conversation.compact_messages(force=True)
-            session.ctx_used = conversation.estimate_tokens(session.messages)
-            ui.console.print(
-                f"[green]Compacted[/green] · ~{session.ctx_used:,} tokens"
-                f" of {session.num_ctx:,}."
-            )
-            continue
-        if question.startswith("/search "):
-            _handle_slash_search(question[8:].strip())
-            continue
-
-        checkpoint = len(session.messages)
-        session.messages.append({"role": "user", "content": question})
-
-        ui.status_enable()
-        try:
-            session.adapter.run_turn()
-        except KeyboardInterrupt:
-            ui.console.print(
-                "\n[yellow]\\[CANCELLED][/yellow] Response cancelled."
-            )
-            del session.messages[checkpoint:]
-            ui.reset_terminal()
-        finally:
-            ui.status_disable()
-
-        # Prune tool output and compact if needed, once the turn's tool calls
-        # are all resolved (shared with the TUI).
-        conversation.after_turn()
+    from guru import tui
+    tui.run()
 
 
 if __name__ == '__main__':
