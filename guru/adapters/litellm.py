@@ -85,7 +85,9 @@ def openai_tool_defs(specs: list) -> list:
                 'parameters': {
                     'type': 'object',
                     'properties': properties,
-                    'required': list(params.keys()),
+                    'required': [
+                        k for k in params
+                        if k not in spec.get('optional', ())],
                 },
             },
         })

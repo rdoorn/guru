@@ -6,7 +6,7 @@ from guru import cli, config, session, ui
 from guru.adapters import anthropic as anth
 from guru.adapters import litellm as lite
 from guru.adapters.ollama import OllamaAdapter
-from guru.domain import conversation, tools
+from guru.domain import conversation, files, tools
 
 
 class TestAgentManager:
@@ -320,6 +320,114 @@ class TestActiveSpecs:
         monkeypatch.setattr(session, 'active_tool_names', {'web_fetch'})
         names = [s['name'] for s in tools.active_specs()]
         assert 'search_tools' in names and 'web_fetch' in names
+
+
+class TestFileTools:
+    """Tests for the filesystem tools and the directory allow-list gate."""
+
+    def _allow(self, tmp_path):
+        config.ALLOWED_DIRS.add(str(tmp_path.resolve()))
+
+    def _forget(self, tmp_path):
+        config.ALLOWED_DIRS.discard(str(tmp_path.resolve()))
+
+    def test_cwd_allowed_by_default(self) -> None:
+        assert files._within_allowed(Path.cwd().resolve())
+
+    def test_list_dir_shows_perms_and_size(self) -> None:
+        out = files.list_dir('guru')
+        assert 'session.py' in out and '0644' in out
+
+    def test_read_file_range_is_line_numbered(self) -> None:
+        out = files.read_file('guru/session.py', '1-3')
+        assert 'lines 1-3 of' in out
+        assert '\n     1\t' in out
+
+    def test_read_file_bad_range(self) -> None:
+        assert 'Invalid line range' in files.read_file('guru/session.py', 'x')
+
+    def test_read_file_caps_large_files(self, tmp_path) -> None:
+        big = tmp_path / 'big.txt'
+        big.write_text('\n'.join(str(i) for i in range(1, 501)) + '\n')
+        self._allow(tmp_path)
+        try:
+            out = files.read_file(str(big))
+            assert 'lines 1-400 of 500' in out
+            assert 'showing first 400 of 500' in out
+        finally:
+            self._forget(tmp_path)
+
+    def test_read_file_refuses_binary(self, tmp_path) -> None:
+        b = tmp_path / 'b.bin'
+        b.write_bytes(b'\x00\x01\x02data')
+        self._allow(tmp_path)
+        try:
+            assert 'binary' in files.read_file(str(b))
+        finally:
+            self._forget(tmp_path)
+
+    def test_list_tree_skips_noise_dirs(self, tmp_path) -> None:
+        (tmp_path / '.git').mkdir()
+        (tmp_path / '.git' / 'INSIDE_GIT').write_text('y')
+        (tmp_path / 'src').mkdir()
+        (tmp_path / 'src' / 'a.py').write_text('z')
+        self._allow(tmp_path)
+        try:
+            out = files.list_tree(str(tmp_path), '3')
+            assert '(skipped)' in out
+            assert 'INSIDE_GIT' not in out   # noise dir not descended
+            assert 'a.py' in out             # normal dir descended
+        finally:
+            self._forget(tmp_path)
+
+    def test_gate_denies_outside_cwd(self, tmp_path) -> None:
+        files.set_path_asker(lambda d: False)
+        try:
+            assert 'denied' in files.list_dir(str(tmp_path)).lower()
+        finally:
+            files.set_path_asker(None)
+
+    def test_gate_approves_and_persists(self, tmp_path, monkeypatch) -> None:
+        saved: list = []
+        monkeypatch.setattr(config, 'persist_dir', saved.append)
+        files.set_path_asker(lambda d: True)
+        (tmp_path / 'f.txt').write_text('hello\n')
+        try:
+            out = files.list_dir(str(tmp_path))
+            resolved = str(tmp_path.resolve())
+            assert 'f.txt' in out
+            assert resolved in config.ALLOWED_DIRS
+            assert saved == [resolved]
+        finally:
+            files.set_path_asker(None)
+            self._forget(tmp_path)
+
+    def test_parse_range(self) -> None:
+        assert files._parse_range('', 500) == (1, 400)
+        assert files._parse_range('10-20', 500) == (10, 20)
+        assert files._parse_range('bad', 10) == (None, None)
+        assert files._parse_range('5-3', 10) == (None, None)
+        assert files._parse_range('1-9999', 50) == (1, 50)
+
+
+class TestOptionalToolParams:
+    """Optional params are excluded from adapter 'required' schemas."""
+
+    def test_anthropic_marks_optional_not_required(self) -> None:
+        spec = {'name': 'read_file', 'description': 'd',
+                'parameters': {'path': 'p', 'lines': 'l'},
+                'optional': ['lines']}
+        defn = anth.tool_defs([spec])[0]
+        req = defn['input_schema']['required']
+        assert req == ['path']
+
+    def test_litellm_marks_optional_not_required(self) -> None:
+        spec = {'name': 'read_file', 'description': 'd',
+                'parameters': {'path': 'p', 'lines': 'l'},
+                'optional': ['lines']}
+        defn = lite.openai_tool_defs([spec])[0]
+        req = defn['function']['parameters']['required']
+        assert req == ['path']
 
 
 class TestSpawnTool:

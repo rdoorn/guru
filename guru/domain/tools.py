@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 from guru import config, session, ui
+from guru.domain import files
 
 _STOP_WORDS = {
     'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for',
@@ -328,6 +329,58 @@ TOOL_REGISTRY: dict = {
             ),
         },
     },
+    "list_dir": {
+        "fn": files.list_dir,
+        "description": (
+            "List the immediate contents of a directory (non-recursive) with"
+            " octal permissions and sizes. Restricted to allowed directories"
+            " (the working directory by default; asks once for others)."
+        ),
+        "tags": [
+            "list", "ls", "dir", "directory", "folder", "files", "contents",
+            "browse", "filesystem", "path", "permissions", "stat", "local",
+        ],
+        "parameters": {
+            "path": "Directory to list (default: current directory)",
+        },
+        "optional": ["path"],
+    },
+    "list_tree": {
+        "fn": files.list_tree,
+        "description": (
+            "List a directory tree recursively with octal permissions and"
+            " sizes. Noise dirs (.git, node_modules, __pycache__, …) are"
+            " shown but not expanded — pass a noise dir's full path to look"
+            " inside. Restricted to allowed directories."
+        ),
+        "tags": [
+            "tree", "recursive", "list", "directory", "files", "find", "walk",
+            "structure", "filesystem", "browse", "depth", "local",
+        ],
+        "parameters": {
+            "path": "Directory to walk (default: current directory)",
+            "depth": "Max levels to recurse (default: 3)",
+        },
+        "optional": ["path", "depth"],
+    },
+    "read_file": {
+        "fn": files.read_file,
+        "description": (
+            "Read the text content of a file. For large files, pass 'lines'"
+            " as a 1-based inclusive range like '10-20' to read just that"
+            " span. Output is line-numbered. Restricted to allowed"
+            " directories."
+        ),
+        "tags": [
+            "read", "file", "open", "cat", "view", "content", "source",
+            "text", "lines", "show", "filesystem", "code", "local",
+        ],
+        "parameters": {
+            "path": "File to read",
+            "lines": "Optional line range 'start-end' (e.g. '10-20')",
+        },
+        "optional": ["lines"],
+    },
 }
 
 
@@ -419,6 +472,7 @@ def active_specs() -> list:
                 'name': name,
                 'description': info['description'],
                 'parameters': info['parameters'],
+                'optional': info.get('optional', []),
             })
     return specs
 

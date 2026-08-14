@@ -17,6 +17,7 @@ ADAPTERS_PATH = GURU_HOME / 'adapters.toml'          # adapter configuration
 PROJECT_GURU_DIR = Path.cwd() / '.guru'
 PROJECT_GURU_MD = PROJECT_GURU_DIR / 'GURU.md'       # appended to the global
 DOMAINS_ALLOW_PATH = PROJECT_GURU_DIR / 'domains_allow.txt'  # per-project
+DIRS_ALLOW_PATH = PROJECT_GURU_DIR / 'dirs_allow.txt'  # file-tool allow-list
 PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
 # Remembers the last-used adapter + model for this project.
 PROJECT_SETTINGS_PATH = PROJECT_GURU_DIR / 'settings.json'
@@ -102,6 +103,12 @@ Correct usage:
   User asks "query the /metrics endpoint on localhost"
     → search_tools("fetch url endpoint http")
 
+  User asks "what files are in this project?"
+    → search_tools("list directory files")
+
+  User asks "show me lines 40-60 of cli.py"
+    → search_tools("read file lines")
+
 After search_tools returns matching tools, call them directly by name.
 Do not try to call a tool that has not been returned by search_tools first.
 
@@ -118,6 +125,9 @@ Guidelines:
 
 # Domains approved for model-initiated web access, loaded at startup.
 ALLOWED_DOMAINS: set = set()
+# Directories approved for model-initiated file access (resolved absolute
+# paths). The current working directory is always allowed; see load below.
+ALLOWED_DIRS: set = set()
 
 
 def ensure_setup() -> None:
@@ -147,6 +157,22 @@ def persist_domain(domain: str) -> None:
     DOMAINS_ALLOW_PATH.parent.mkdir(parents=True, exist_ok=True)
     with DOMAINS_ALLOW_PATH.open('a', encoding='utf-8') as fh:
         fh.write(domain + '\n')
+
+
+def load_allowed_dirs() -> set:
+    """Read the file-access allow-list into a set of resolved path strings."""
+    try:
+        lines = DIRS_ALLOW_PATH.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return set()
+    return {ln.strip() for ln in lines if ln.strip()}
+
+
+def persist_dir(directory: str) -> None:
+    """Append a newly approved directory to the project allow-list file."""
+    DIRS_ALLOW_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with DIRS_ALLOW_PATH.open('a', encoding='utf-8') as fh:
+        fh.write(directory + '\n')
 
 
 def domain_of(url: str) -> str:
@@ -248,3 +274,7 @@ def save_adapter_configs(configs: list) -> None:
 # Create global config on import; project state stays lazy.
 ensure_setup()
 ALLOWED_DOMAINS = load_allowed_domains()
+# The working directory is allowed by default (not persisted); approved
+# extra directories are loaded from the per-project allow-list.
+ALLOWED_DIRS = load_allowed_dirs()
+ALLOWED_DIRS.add(str(Path.cwd().resolve()))

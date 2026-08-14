@@ -41,7 +41,7 @@ from rich.console import Console
 
 from guru import config, session, ui
 from guru.agents import Agent, AgentManager
-from guru.domain import tools
+from guru.domain import files, tools
 
 _CTX_COLOUR = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 _CHROME_ROWS = 5   # 2 rules + prompt + status + tabs
@@ -129,6 +129,7 @@ def run() -> None:
             return False
 
     tools.set_domain_asker(_domain_asker)
+    files.set_path_asker(_domain_asker)
 
     # --- per-agent output ----------------------------------------------------
 
