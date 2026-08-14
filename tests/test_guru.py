@@ -410,6 +410,47 @@ class TestFileTools:
         assert files._parse_range('5-3', 10) == (None, None)
         assert files._parse_range('1-9999', 50) == (1, 50)
 
+    def test_search_code_finds_matches(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'a.py').write_text('def foo():\n    return 1\n')
+        (tmp_path / 'b.py').write_text('x = foo()\n')
+        out = files.search_code('foo', str(tmp_path))
+        assert 'a.py:1:' in out and 'b.py:1:' in out
+
+    def test_search_code_regex(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'a.py').write_text('def   foo():\n')
+        assert 'a.py:1:' in files.search_code(r'def\s+foo', str(tmp_path))
+
+    def test_search_code_invalid_regex_falls_back(
+            self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'c.py').write_text('foo(bar)\n')
+        # '(' is not a valid regex -> literal search
+        assert 'c.py:1:' in files.search_code('(', str(tmp_path))
+
+    def test_search_code_no_match(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'd.py').write_text('hello\n')
+        assert 'No matches' in files.search_code('zzz', str(tmp_path))
+
+    def test_search_code_skips_noise_dirs(
+            self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / '.git').mkdir()
+        (tmp_path / '.git' / 'x.py').write_text('TOKEN\n')
+        (tmp_path / 'src.py').write_text('TOKEN\n')
+        out = files.search_code('TOKEN', str(tmp_path))
+        assert 'src.py:1:' in out and '.git' not in out
+
+    def test_search_code_gate_denies(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch)              # empty allow-list
+        files.set_path_asker(lambda d: False)
+        try:
+            assert 'denied' in files.search_code('x', str(tmp_path)).lower()
+        finally:
+            files.set_path_asker(None)
+
 
 class TestSpecsFor:
     """tools.specs_for builds tool specs without session routing."""

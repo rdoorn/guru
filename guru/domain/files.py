@@ -7,6 +7,7 @@ approved once, and the approval is persisted to ``.guru/dirs_allow.txt`` so it
 is not asked again. Paths are resolved to real absolute paths before the check,
 so ``..`` and symlink escapes cannot leave an allowed subtree.
 """
+import re
 import stat
 from pathlib import Path
 
@@ -22,6 +23,8 @@ _MAX_ENTRIES = 400          # cap on entries emitted by list_tree
 _DEFAULT_TREE_DEPTH = 3     # levels list_tree recurses when depth is unset
 _MAX_READ_LINES = 400       # cap when read_file is given no range
 _MAX_RANGE_SPAN = 2000      # cap on an explicit read_file range
+_MAX_MATCHES = 100          # cap on rows returned by search_code
+_MAX_FILE_BYTES = 1_000_000  # skip files larger than this in search_code
 
 
 # --- directory allow-list gate ----------------------------------------------
@@ -253,3 +256,72 @@ def read_file(path: str, lines: str = '') -> str:
                 f" request a range like '{_MAX_READ_LINES + 1}-{nxt}'"
                 f" for more.")
     return f"{header}\n{body}{note}"
+
+
+def _walk_files(root: Path):
+    """Yield files under root (breadth-ish), skipping noise directories."""
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            children = _sorted_children(d)
+        except OSError:
+            continue
+        for p in children:
+            if p.is_dir():
+                if p.name not in _NOISE_DIRS:
+                    stack.append(p)
+            else:
+                yield p
+
+
+def search_code(pattern: str, path: str = '.') -> str:
+    """
+    Search file contents for a string or regular expression under a directory
+    (like grep), returning matching 'relpath:line: text' rows. Use this to
+    find where something is defined or used — e.g. 'def compact_messages' or
+    'web_fetch' — before concluding code or a feature is missing. Noise dirs
+    (.git, node_modules, …) and binary/oversized files are skipped.
+    """
+    root = _resolve(path)
+    if not ensure_path_allowed(root):
+        return f"Access to '{root}' was denied by the user."
+    if not root.exists():
+        return f"No such path: {root}"
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        rx = re.compile(re.escape(pattern))
+
+    files = [root] if root.is_file() else _walk_files(root)
+    rows: list = []
+    truncated = False
+    for f in files:
+        if len(rows) >= _MAX_MATCHES:
+            truncated = True
+            break
+        try:
+            if f.stat().st_size > _MAX_FILE_BYTES:
+                continue
+            with f.open('rb') as fh:
+                if b'\x00' in fh.read(2048):
+                    continue
+            text = f.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        rel = f.name if root.is_file() else f.relative_to(root)
+        for i, line in enumerate(text.splitlines(), 1):
+            if rx.search(line):
+                rows.append(f"{rel}:{i}: {line.strip()[:200]}")
+                if len(rows) >= _MAX_MATCHES:
+                    truncated = True
+                    break
+
+    if not rows:
+        return f"No matches for {pattern!r} under {root}."
+    out = [f"{root} — matches for {pattern!r}:"] + rows
+    if truncated:
+        out.append(
+            f"... stopped at {_MAX_MATCHES} matches — narrow the pattern"
+            f" or path.")
+    return "\n".join(out)

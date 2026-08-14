@@ -380,6 +380,25 @@ TOOL_REGISTRY: dict = {
         },
         "optional": ["lines"],
     },
+    "search_code": {
+        "fn": files.search_code,
+        "description": (
+            "Search file contents for a string or regex under a directory"
+            " (like grep), returning 'relpath:line: text' rows. Use to find"
+            " where something is defined or used before concluding code is"
+            " missing. Skips noise dirs. Restricted to allowed directories."
+        ),
+        "tags": [
+            "grep", "search", "find", "code", "definition", "symbol",
+            "usage", "references", "locate", "where", "contents", "text",
+            "regex", "pattern", "audit", "filesystem", "local",
+        ],
+        "parameters": {
+            "pattern": "String or regex to search for (e.g. 'def my_func')",
+            "path": "Directory or file to search (default: current directory)",
+        },
+        "optional": ["path"],
+    },
 }
 
 

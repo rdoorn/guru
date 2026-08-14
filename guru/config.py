@@ -95,12 +95,16 @@ first, then use the tool it returns. Act rather than explaining how.
 Examples (question → search_tools phrase):
   list files here → "list directory files"
   read lines 40-60 of cli.py → "read file lines"
+  find where a function is defined → "grep search code"
   latest kubernetes version → "get latest github release"
   fetch this URL / query an endpoint → "fetch webpage url"
 
 Do not use tools for math, logic, coding, or stable facts from your training.
 If results are weak, refine and search again. Cite sources and state only what
 the results show. If a needed detail (a name, a location) is missing, ask.
+Before concluding code or a feature is missing, grep for its definition and
+read the file that defines it; when reviewing a file, follow its local
+imports. Never infer that something is absent from a single file.
 """
 
 # Appended to the system prompt of delegation-capable agents (TUI only), to
