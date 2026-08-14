@@ -25,12 +25,11 @@ Layout, top to bottom: output pane · rule · prompt · rule · status · tabs.
 """
 import asyncio
 import shutil
-import sys
 import threading
 from pathlib import Path
 
 from prompt_toolkit import Application
-from prompt_toolkit.application import run_in_terminal
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
@@ -108,43 +107,52 @@ def run() -> None:
     main.append("guru — Ctrl+N new agent · Shift+Left/Right switch"
                 " · Ctrl+C cancel · double Ctrl+C exit")
 
-    state = {'loop': None}
+    state = {'loop': None, 'prompt': None, 'closing': False}
     cols = shutil.get_terminal_size((100, 30)).columns
     barriers: dict = {}   # parent Agent -> {'remaining': set, 'results': dict}
     # One serialized permission prompt at a time: every agent's access
-    # question funnels through this lock and is shown on the loop (main)
-    # thread, so sub-agents never pop competing prompts.
+    # question funnels through this lock and is shown in the [main] viewport
+    # on the loop thread, so sub-agents never pop competing prompts.
     ask_lock = threading.Lock()
 
-    def _ask_terminal(target: str) -> bool:
-        # Default is Yes: pressing Enter (an empty answer) approves; only an
-        # explicit 'n'/'no' denies. An EOF/interrupt is NOT an answer, so it
-        # fails closed (deny) — see _domain_asker for the same rule on errors.
-        sys.stdout.write(f"\nAllow access to '{target}'? [Y/n] ")
-        sys.stdout.flush()
-        try:
-            answer = input().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return False
-        return not answer.startswith('n')
+    def _open_prompt(req: dict) -> None:
+        """Show a permission question in the [main] viewport (loop thread)."""
+        state['prompt'] = req
+        manager.active_index = 0          # bring the main viewport forward
+        main_agent = manager.agents[0]
+        main_agent.append("")
+        main_agent.append(
+            f"[access] Allow access to '{req['target']}' ?"
+            "  Y = allow · N = deny  (Enter = allow)")
+        _invalidate()
+
+    def _resolve_prompt(result: bool) -> None:
+        """Answer the pending permission question (loop thread)."""
+        req = state['prompt']
+        if req is None:
+            return
+        state['prompt'] = None
+        manager.agents[0].append(
+            f"[access] → {'allowed' if result else 'denied'}.")
+        req['result'] = result
+        req['event'].set()
+        _invalidate()
 
     def _domain_asker(target: str) -> bool:
-        # run_in_terminal touches the app/event loop when first called, which
-        # fails in a worker thread ("no current event loop in thread …"). So
-        # build the coroutine inside an async wrapper that is *run on the loop
-        # thread* via run_coroutine_threadsafe — never call run_in_terminal
-        # directly from the worker. The lock serializes prompts across agents.
+        # Ask in the [main] viewport, on the loop thread, one question at a
+        # time (ask_lock). The worker blocks here until answered. Default is
+        # allow (Enter); any failure to get an answer — including shutdown —
+        # denies, so a broken prompt can never silently grant access.
         with ask_lock:
-            async def _prompt() -> bool:
-                return await run_in_terminal(lambda: _ask_terminal(target))
-            try:
-                fut = asyncio.run_coroutine_threadsafe(
-                    _prompt(), state['loop'])
-                return bool(fut.result())
-            except Exception:
-                # Any failure to obtain an answer denies — never allow on
-                # error, so a broken prompt can't silently grant access.
+            if state['closing']:
                 return False
+            event = threading.Event()
+            req = {'target': target, 'event': event, 'result': False}
+            state['loop'].call_soon_threadsafe(_open_prompt, req)
+            while not event.wait(0.25):
+                if state['closing']:
+                    return False
+            return req['result']
 
     tools.set_domain_asker(_domain_asker)
     files.set_path_asker(_domain_asker)
@@ -460,6 +468,21 @@ def run() -> None:
     def _prev(event) -> None:
         manager.switch(-1)
 
+    # Permission prompt answers — active only while a question is pending, so
+    # y/n type normally otherwise. Enter defaults to allow.
+    _has_prompt = Condition(lambda: state['prompt'] is not None)
+
+    @kb.add('y', filter=_has_prompt, eager=True)
+    @kb.add('Y', filter=_has_prompt, eager=True)
+    @kb.add('enter', filter=_has_prompt, eager=True)
+    def _prompt_allow(event) -> None:
+        _resolve_prompt(True)
+
+    @kb.add('n', filter=_has_prompt, eager=True)
+    @kb.add('N', filter=_has_prompt, eager=True)
+    def _prompt_deny(event) -> None:
+        _resolve_prompt(False)
+
     # --- run -----------------------------------------------------------------
 
     root = HSplit([
@@ -484,6 +507,15 @@ def run() -> None:
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()
-        await app.run_async()
+        try:
+            await app.run_async()
+        finally:
+            # Unblock any worker still waiting on a permission answer (deny).
+            state['closing'] = True
+            req = state['prompt']
+            if req is not None:
+                state['prompt'] = None
+                req['result'] = False
+                req['event'].set()
 
     asyncio.run(_amain())
