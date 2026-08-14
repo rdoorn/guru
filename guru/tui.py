@@ -433,15 +433,16 @@ def run() -> None:
         FormattedTextControl(_output),
         wrap_lines=True, height=Dimension(weight=1))
 
-    def _tabs() -> FormattedText:
+    def _tab_parts(highlight: int) -> list:
         parts: list = []
         for i, agent in enumerate(manager.agents):
-            active = i == manager.active_index
-            parts.append(
-                ('reverse' if active else 'ansibrightblack',
-                 f'[{agent.title}]'))
+            style = 'reverse' if i == highlight else 'ansibrightblack'
+            parts.append((style, f'[{agent.title}]'))
             parts.append(('', ' '))
-        return FormattedText(parts)
+        return parts
+
+    def _tabs() -> FormattedText:
+        return FormattedText(_tab_parts(manager.active_index))
 
     tabline = Window(FormattedTextControl(_tabs), height=1)
 
@@ -550,9 +551,27 @@ def run() -> None:
     )
 
     def _main_toolbar():
+        # Match the TUI's bottom chrome: rule · status · tabs. The output
+        # "pane" for [main] is the terminal scrollback above this bar.
+        _, columns = shutil.get_terminal_size((100, 30))
         left, ctx, right, colour = _status_from(main.state)
+        parts = [
+            ('ansibrightblack', '─' * columns + '\n'),
+            ('ansibrightblack', left),
+            (_CTX_COLOUR[colour], ctx),
+            ('ansibrightblack', right),
+            ('', '\n'),
+        ]
+        parts.extend(_tab_parts(0))       # [main] highlighted in main view
+        return FormattedText(parts)
+
+    def _main_message():
+        # A rule above the '> ' input, mirroring the TUI's rule-above-prompt.
+        _, columns = shutil.get_terminal_size((100, 30))
         return FormattedText([
-            ('', left), (_CTX_COLOUR[colour], ctx), ('', right)])
+            ('ansibrightblack', '─' * columns + '\n'),
+            ('', '> '),
+        ])
 
     async def _in_terminal(fn, *args) -> None:
         """Run a blocking, terminal-controlling command (picker/input) in a
@@ -602,7 +621,7 @@ def run() -> None:
                 main_writer.drain()
                 try:
                     res = await ps.prompt_async(
-                        "guru> ", bottom_toolbar=_main_toolbar,
+                        _main_message, bottom_toolbar=_main_toolbar,
                         style=ui._TOOLBAR_STYLE)
                 except EOFError:
                     state['quit'] = True
