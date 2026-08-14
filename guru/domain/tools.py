@@ -579,7 +579,13 @@ def execute_tool(name: str, arguments: dict) -> str:
     Handles search_tools activation and unknown/error cases. The domain
     allow-list gate is applied inside the individual web tools.
     """
-    ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
+    # File-write tools render their own '⏺ Verb(file)' diff block, so the raw
+    # note (which would dump the whole content/old/new) is shown as just the
+    # path — or skipped for delete, which prints its own line.
+    if name in ('write_file', 'edit_file'):
+        ui.note_tool(name, str(arguments.get('path', '')))
+    elif name != 'delete_file':
+        ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
     if name == "search_tools":
         result = search_tools(**arguments)
         for tn in _match_tools(arguments.get("query", "")):

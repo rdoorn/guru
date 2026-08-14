@@ -107,7 +107,9 @@ Examples (question → search_tools phrase):
   list files here → "list directory files"
   read lines 40-60 of cli.py → "read file lines"
   find where a function is defined → "grep search code"
-  latest kubernetes version → "get latest github release"
+  create or write a file → "write file"
+  change or replace text in a file → "edit file"
+  delete or remove a file → "delete file"
   fetch this URL / query an endpoint → "fetch webpage url"
 
 Do not use tools for math, logic, coding, or stable facts from your training.
@@ -116,9 +118,12 @@ the results show. If a needed detail (a name, a location) is missing, ask.
 Before concluding code or a feature is missing, grep for its definition and
 read the file that defines it; when reviewing a file, follow its local
 imports. Never infer that something is absent from a single file.
-Only report an action as done if a tool actually performed it. If no tool
-exists for the request, say so and stop — never claim a change you did not
-make.
+
+To create, change, or delete a file you MUST call write_file, edit_file, or
+delete_file in this turn and wait for it to return success — never state that
+a file was written, changed, or deleted unless a tool call did it. Do not
+restate the file's contents afterwards; the change is shown to the user. If no
+tool exists for a request, say so and stop.
 """
 
 # Appended to the system prompt of delegation-capable agents (TUI only), to

@@ -103,8 +103,7 @@ def ensure_write_path_allowed(path: Path, detail: str) -> bool:
     if _within_allowed(path, config.ALLOWED_WRITE_DIRS):
         return True
     ask_dir = (path if path.is_dir() else path.parent).resolve()
-    question = (f"Allow WRITE access to '{ask_dir}'?\n"
-                f"  The model wants to: {detail}")
+    question = f"{detail}\nAllow WRITE access to '{ask_dir}'?"
     return _approve(ask_dir, config.ALLOWED_WRITE_DIRS,
                     config.persist_write_dir, question)
 
@@ -359,18 +358,27 @@ def search_code(pattern: str, path: str = '.') -> str:
 # --- write tools (gated by the WRITE allow-list + access mode) ---------------
 
 _MAX_DIFF_LINES = 200       # cap diff lines shown in the write prompt
-_G, _R, _C, _Z = '\x1b[32m', '\x1b[31m', '\x1b[36m', '\x1b[0m'   # ANSI colours
+_G, _R, _D, _Z = '\x1b[32m', '\x1b[31m', '\x1b[2m', '\x1b[0m'   # ANSI colours
 
 
-def _write_detail(target: Path, old: str, new: str) -> str:
-    """A coloured unified diff of the pending change, for the approval prompt:
-    green '+' additions, red '-' removals, cyan '@@' hunks, with a +N/-M
-    summary — so you see exactly what will change before granting write."""
+def _plural(n: int) -> str:
+    return f"{n} line{'' if n == 1 else 's'}"
+
+
+def _write_detail(target: Path, old: str, new: str, verb: str) -> str:
+    """A compact coloured diff of the pending change, Claude-style:
+
+        ⏺ Update(name.py)  added 2 lines, removed 1 line
+        - old line
+        + new line
+
+    green '+' additions, red '-' removals, dim context, no hunk headers.
+    """
     added = removed = 0
     lines: list = []
     for ln in difflib.unified_diff(
             old.splitlines(), new.splitlines(), lineterm='', n=3):
-        if ln.startswith(('+++', '---')):
+        if ln.startswith(('+++', '---', '@@')):
             continue
         if ln.startswith('+'):
             added += 1
@@ -378,15 +386,14 @@ def _write_detail(target: Path, old: str, new: str) -> str:
         elif ln.startswith('-'):
             removed += 1
             lines.append(f"{_R}{ln}{_Z}")
-        elif ln.startswith('@@'):
-            lines.append(f"{_C}{ln}{_Z}")
         else:
-            lines.append(ln)
+            lines.append(f"{_D}{ln}{_Z}")
     if len(lines) > _MAX_DIFF_LINES:
         extra = len(lines) - _MAX_DIFF_LINES
         lines = lines[:_MAX_DIFF_LINES] + [f"… (+{extra} more diff lines)"]
-    header = f"{target}  (+{added} -{removed})"
-    return header + "\n" + ("\n".join(lines) if lines else "(no changes)")
+    header = (f"⏺ {verb}({target.name})  added {_plural(added)},"
+              f" removed {_plural(removed)}")
+    return header + ("\n" + "\n".join(lines) if lines else "")
 
 
 def _will_prompt_write(target: Path) -> bool:
@@ -423,9 +430,10 @@ def write_file(path: str, content: str) -> str:
             old_content = target.read_text(encoding='utf-8', errors='replace')
         except OSError:
             old_content = ''
-    body = "write_file " + _write_detail(target, old_content, content)
+    verb = 'Update' if target.exists() else 'Create'
+    block = _write_detail(target, old_content, content, verb)
     silent = not _will_prompt_write(target)
-    if not ensure_write_path_allowed(target, body):
+    if not ensure_write_path_allowed(target, block):
         return f"Write access to '{target}' was denied."
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -433,7 +441,7 @@ def write_file(path: str, content: str) -> str:
     except OSError as e:
         return f"Cannot write {target}: {e}"
     if silent:
-        _show_change(body)
+        _show_change(block)
     return f"Wrote {len(content)} bytes to {target}."
 
 
@@ -462,16 +470,16 @@ def edit_file(path: str, old: str, new: str) -> str:
         return (f"'old' text appears {count} times in {target}; add context"
                 " to make it unique.")
     new_text = text.replace(old, new, 1)
-    body = "edit_file " + _write_detail(target, text, new_text)
+    block = _write_detail(target, text, new_text, 'Update')
     silent = not _will_prompt_write(target)
-    if not ensure_write_path_allowed(target, body):
+    if not ensure_write_path_allowed(target, block):
         return f"Write access to '{target}' was denied."
     try:
         target.write_text(new_text, encoding='utf-8')
     except OSError as e:
         return f"Cannot write {target}: {e}"
     if silent:
-        _show_change(body)
+        _show_change(block)
     return f"Edited {target} (replaced 1 occurrence)."
 
 
@@ -488,14 +496,14 @@ def delete_file(path: str) -> str:
         return f"No such file: {target}"
     if target.is_dir():
         return f"{target} is a directory; refusing to delete directories."
-    detail = f"delete_file — remove {target}"
+    block = f"⏺ Delete({target.name})  {target}"
     silent = not _will_prompt_write(target)
-    if not ensure_write_path_allowed(target, detail):
+    if not ensure_write_path_allowed(target, block):
         return f"Write access to '{target}' was denied."
     try:
         target.unlink()
     except OSError as e:
         return f"Cannot delete {target}: {e}"
     if silent:
-        ui.console.print(f"[red]deleted[/red] {target}")
+        ui.console.print(f"[red]{block}[/red]")
     return f"Deleted {target}."
