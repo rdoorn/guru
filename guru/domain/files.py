@@ -1,12 +1,14 @@
-"""Filesystem tools: directory listing and file reading, gated by a
-per-project directory allow-list.
+"""Filesystem tools: list, read, grep, and write/edit, gated by per-project
+directory allow-lists with SEPARATE read and write lists.
 
-Access is restricted to allow-listed directory subtrees. Nothing is allowed by
-default: the first access to a directory (including the working directory) is
-approved once, and the approval is persisted to ``.guru/dirs_allow.txt`` so it
-is not asked again. Paths are resolved to real absolute paths before the check,
-so ``..`` and symlink escapes cannot leave an allowed subtree.
+Nothing is allowed by default. Reads are approved against ``read_dirs_allow``,
+writes against ``write_dirs_allow`` (under ``.guru/``) — approving a directory
+for reading never grants writing. The access mode decides how a not-yet-allowed
+directory is handled: read-only refuses writes, ask prompts (writes show the
+exact operation), auto approves silently. Paths are resolved to real absolute
+paths before the check, so ``..``/symlink escapes cannot leave an allowed tree.
 """
+import difflib
 import re
 import stat
 from pathlib import Path
@@ -28,56 +30,83 @@ _MAX_FILE_BYTES = 1_000_000  # skip files larger than this in search_code
 
 
 # --- directory allow-list gate ----------------------------------------------
+#
+# Reads and writes have SEPARATE allow-lists (config.ALLOWED_READ_DIRS /
+# ALLOWED_WRITE_DIRS): approving a directory for reading never grants writing.
+# The access MODE decides how a not-yet-allowed directory is handled —
+# read-only refuses writes, ask prompts, auto approves silently. Every mode
+# resolves paths first, so ``..``/symlink escapes are always blocked.
 
 _path_asker = None
 
 
 def set_path_asker(fn) -> None:
-    """Install a custom directory-approval prompt (used by the TUI)."""
+    """Install a custom approval prompt (used by the TUI).
+
+    Signature: ``(question: str) -> bool``.
+    """
     global _path_asker
     _path_asker = fn
 
 
-def _ask_path(directory: str) -> bool:
-    """Default terminal approval prompt (REPL). Enter approves; errors deny."""
-    ui.console.print(
-        f"\n[yellow]\\[ACCESS][/yellow] Request to read files under"
-        f" [bold]{directory}[/bold]."
-    )
+def _ask_path(question: str) -> bool:
+    """Default terminal approval prompt. Enter approves; errors deny."""
     try:
-        answer = input(
-            f"Allow file access to '{directory}'? [Y/n] ").strip().lower()
+        answer = input(f"{question}\n[Y/n] ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return False
     return not answer.startswith('n')
 
 
-def _within_allowed(resolved: Path) -> bool:
-    for d in config.ALLOWED_DIRS:
-        allowed = Path(d)
-        if resolved == allowed or allowed in resolved.parents:
+def _within_allowed(resolved: Path, allowed=None) -> bool:
+    allowed = config.ALLOWED_READ_DIRS if allowed is None else allowed
+    for d in allowed:
+        base = Path(d)
+        if resolved == base or base in resolved.parents:
             return True
     return False
 
 
-def ensure_path_allowed(path: Path) -> bool:
-    """Return True if ``path`` sits in an allowed subtree, else prompt.
-
-    On approval the containing directory is added to the allow-list and
-    persisted so it is not asked about again.
-    """
-    if _within_allowed(path):
+def _approve(ask_dir: Path, allowed: set, persist, question: str) -> bool:
+    """Grant access to ``ask_dir`` per the current mode; on grant add it to
+    ``allowed`` and persist. auto approves silently, ask prompts."""
+    key = str(ask_dir)
+    if config.MODE == config.MODE_AUTO:
+        allowed.add(key)
+        persist(key)
         return True
-    ask_dir = (path if path.is_dir() else path.parent).resolve()
     asker = _path_asker or _ask_path
-    if asker(str(ask_dir)):
-        config.ALLOWED_DIRS.add(str(ask_dir))
-        config.persist_dir(str(ask_dir))
-        ui.console.print(
-            f"[green]Allowed[/green] {ask_dir} (saved to allow-list).")
+    if asker(question):
+        allowed.add(key)
+        persist(key)
+        ui.console.print(f"[green]Allowed[/green] {ask_dir}.")
         return True
     ui.console.print(f"[red]Denied[/red] {ask_dir}.")
     return False
+
+
+def ensure_path_allowed(path: Path) -> bool:
+    """Gate a READ of ``path`` against the read allow-list (mode-aware)."""
+    if _within_allowed(path):
+        return True
+    ask_dir = (path if path.is_dir() else path.parent).resolve()
+    question = f"Allow READ access to '{ask_dir}'?"
+    return _approve(ask_dir, config.ALLOWED_READ_DIRS,
+                    config.persist_read_dir, question)
+
+
+def ensure_write_path_allowed(path: Path, detail: str) -> bool:
+    """Gate a WRITE of ``path`` against the write allow-list. Refuses in
+    read-only mode; the prompt states the exact write (``detail``)."""
+    if config.MODE == config.MODE_READ_ONLY:
+        return False
+    if _within_allowed(path, config.ALLOWED_WRITE_DIRS):
+        return True
+    ask_dir = (path if path.is_dir() else path.parent).resolve()
+    question = (f"Allow WRITE access to '{ask_dir}'?\n"
+                f"  The model wants to: {detail}")
+    return _approve(ask_dir, config.ALLOWED_WRITE_DIRS,
+                    config.persist_write_dir, question)
 
 
 # --- formatting helpers ------------------------------------------------------
@@ -325,3 +354,99 @@ def search_code(pattern: str, path: str = '.') -> str:
             f"... stopped at {_MAX_MATCHES} matches — narrow the pattern"
             f" or path.")
     return "\n".join(out)
+
+
+# --- write tools (gated by the WRITE allow-list + access mode) ---------------
+
+_MAX_DIFF_LINES = 200       # cap diff lines shown in the write prompt
+_G, _R, _C, _Z = '\x1b[32m', '\x1b[31m', '\x1b[36m', '\x1b[0m'   # ANSI colours
+
+
+def _write_detail(target: Path, old: str, new: str) -> str:
+    """A coloured unified diff of the pending change, for the approval prompt:
+    green '+' additions, red '-' removals, cyan '@@' hunks, with a +N/-M
+    summary — so you see exactly what will change before granting write."""
+    added = removed = 0
+    lines: list = []
+    for ln in difflib.unified_diff(
+            old.splitlines(), new.splitlines(), lineterm='', n=3):
+        if ln.startswith(('+++', '---')):
+            continue
+        if ln.startswith('+'):
+            added += 1
+            lines.append(f"{_G}{ln}{_Z}")
+        elif ln.startswith('-'):
+            removed += 1
+            lines.append(f"{_R}{ln}{_Z}")
+        elif ln.startswith('@@'):
+            lines.append(f"{_C}{ln}{_Z}")
+        else:
+            lines.append(ln)
+    if len(lines) > _MAX_DIFF_LINES:
+        extra = len(lines) - _MAX_DIFF_LINES
+        lines = lines[:_MAX_DIFF_LINES] + [f"… (+{extra} more diff lines)"]
+    header = f"{target}  (+{added} -{removed})"
+    return header + "\n" + ("\n".join(lines) if lines else "(no changes)")
+
+
+def write_file(path: str, content: str) -> str:
+    """
+    Create or overwrite a file with the given content. Needs write access to
+    the target directory (asked once, shown with the exact write); refused in
+    read-only mode. Prefer edit_file for changing part of an existing file.
+    """
+    target = _resolve(path)
+    if config.MODE == config.MODE_READ_ONLY:
+        return "Refused: read-only mode. Change mode to write files."
+    if target.is_dir():
+        return f"{target} is a directory."
+    old_content = ''
+    if target.exists():
+        try:
+            old_content = target.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            old_content = ''
+    detail = "write_file " + _write_detail(target, old_content, content)
+    if not ensure_write_path_allowed(target, detail):
+        return f"Write access to '{target}' was denied."
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding='utf-8')
+    except OSError as e:
+        return f"Cannot write {target}: {e}"
+    return f"Wrote {len(content)} bytes to {target}."
+
+
+def edit_file(path: str, old: str, new: str) -> str:
+    """
+    Replace a single unique occurrence of ``old`` with ``new`` in a file.
+    ``old`` must appear exactly once (include enough surrounding context to be
+    unique). Needs write access (asked once, shown with the exact diff);
+    refused in read-only mode.
+    """
+    target = _resolve(path)
+    if config.MODE == config.MODE_READ_ONLY:
+        return "Refused: read-only mode. Change mode to write files."
+    if not target.exists():
+        return f"No such file: {target}"
+    if target.is_dir():
+        return f"{target} is a directory."
+    try:
+        text = target.read_text(encoding='utf-8')
+    except OSError as e:
+        return f"Cannot read {target}: {e}"
+    count = text.count(old)
+    if count == 0:
+        return f"'old' text not found in {target}; nothing changed."
+    if count > 1:
+        return (f"'old' text appears {count} times in {target}; add context"
+                " to make it unique.")
+    new_text = text.replace(old, new, 1)
+    detail = "edit_file " + _write_detail(target, text, new_text)
+    if not ensure_write_path_allowed(target, detail):
+        return f"Write access to '{target}' was denied."
+    try:
+        target.write_text(new_text, encoding='utf-8')
+    except OSError as e:
+        return f"Cannot write {target}: {e}"
+    return f"Edited {target} (replaced 1 occurrence)."

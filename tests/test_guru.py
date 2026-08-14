@@ -333,9 +333,9 @@ class TestFileTools:
     """Tests for the filesystem tools and the directory allow-list gate."""
 
     def _only(self, monkeypatch, *dirs) -> None:
-        """Make ALLOWED_DIRS contain exactly ``dirs`` for this test."""
+        """Make ALLOWED_READ_DIRS contain exactly ``dirs`` for this test."""
         monkeypatch.setattr(
-            config, 'ALLOWED_DIRS',
+            config, 'ALLOWED_READ_DIRS',
             {str(Path(d).resolve()) for d in dirs})
 
     def test_list_dir_shows_perms_and_size(self, monkeypatch) -> None:
@@ -398,14 +398,14 @@ class TestFileTools:
     def test_gate_approves_and_persists(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch)
         saved: list = []
-        monkeypatch.setattr(config, 'persist_dir', saved.append)
+        monkeypatch.setattr(config, 'persist_read_dir', saved.append)
         files.set_path_asker(lambda d: True)
         (tmp_path / 'f.txt').write_text('hello\n')
         try:
             out = files.list_dir(str(tmp_path))
             resolved = str(tmp_path.resolve())
             assert 'f.txt' in out
-            assert resolved in config.ALLOWED_DIRS
+            assert resolved in config.ALLOWED_READ_DIRS
             assert saved == [resolved]
         finally:
             files.set_path_asker(None)
@@ -518,6 +518,90 @@ class TestPruneToolExchanges:
         ]
         conversation.prune_tool_exchanges(msgs)
         assert [m['role'] for m in msgs] == ['user', 'assistant', 'assistant']
+
+
+class TestWriteTools:
+    """Write gate + write_file/edit_file + access modes."""
+
+    def _write_allowed(self, monkeypatch, *dirs):
+        monkeypatch.setattr(
+            config, 'ALLOWED_WRITE_DIRS',
+            {str(Path(d).resolve()) for d in dirs})
+        monkeypatch.setattr(config, 'persist_write_dir', lambda d: None)
+
+    def test_write_file_creates(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        self._write_allowed(monkeypatch, tmp_path)
+        p = tmp_path / 'x.txt'
+        out = files.write_file(str(p), 'hello')
+        assert p.read_text() == 'hello' and 'Wrote' in out
+
+    def test_write_refused_in_read_only(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_READ_ONLY)
+        self._write_allowed(monkeypatch, tmp_path)
+        out = files.write_file(str(tmp_path / 'x.txt'), 'hi')
+        assert 'read-only' in out and not (tmp_path / 'x.txt').exists()
+
+    def test_read_allow_does_not_grant_write(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(
+            config, 'ALLOWED_READ_DIRS', {str(tmp_path.resolve())})
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        files.set_path_asker(lambda q: False)     # deny the write prompt
+        try:
+            out = files.write_file(str(tmp_path / 'z.txt'), 'hi')
+            assert 'denied' in out.lower()
+            assert not (tmp_path / 'z.txt').exists()
+        finally:
+            files.set_path_asker(None)
+
+    def test_write_gate_uses_write_list_and_persists(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        saved: list = []
+        monkeypatch.setattr(config, 'persist_write_dir', saved.append)
+        files.set_path_asker(lambda q: True)
+        try:
+            files.write_file(str(tmp_path / 'y.txt'), 'hi')
+            resolved = str(tmp_path.resolve())
+            assert resolved in config.ALLOWED_WRITE_DIRS
+            assert saved == [resolved]
+        finally:
+            files.set_path_asker(None)
+
+    def test_auto_mode_writes_without_prompt(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_AUTO)
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        monkeypatch.setattr(config, 'persist_write_dir', lambda d: None)
+
+        def boom(q):
+            raise AssertionError('should not prompt in auto mode')
+        files.set_path_asker(boom)
+        try:
+            files.write_file(str(tmp_path / 'a.txt'), 'hi')
+            assert (tmp_path / 'a.txt').read_text() == 'hi'
+        finally:
+            files.set_path_asker(None)
+
+    def test_edit_file_unique_replace(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        self._write_allowed(monkeypatch, tmp_path)
+        p = tmp_path / 'c.py'
+        p.write_text('a = 1\nb = 2\n')
+        out = files.edit_file(str(p), 'b = 2', 'b = 3')
+        assert p.read_text() == 'a = 1\nb = 3\n' and 'Edited' in out
+
+    def test_edit_file_not_found_and_ambiguous(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        self._write_allowed(monkeypatch, tmp_path)
+        p = tmp_path / 'c.py'
+        p.write_text('x\nx\n')
+        assert 'not found' in files.edit_file(str(p), 'zzz', 'q')
+        assert 'appears 2 times' in files.edit_file(str(p), 'x', 'y')
 
 
 class TestAccessPromptDefaults:

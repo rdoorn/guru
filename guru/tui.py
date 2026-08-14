@@ -149,7 +149,10 @@ def _status_from(st) -> tuple:
     else:
         colour = 'green'
     model = (st.model or '?').split(':')[0]
-    left = f"🤖 {model} | 💪 {st.model_size or '?'} | "
+    mode = {config.MODE_READ_ONLY: 'read-only',
+            config.MODE_ASK: 'ask', config.MODE_AUTO: 'auto'}.get(
+        config.MODE, config.MODE)
+    left = f"🤖 {model} | 💪 {st.model_size or '?'} | 🔐 {mode} | "
     ctx = f"🧠 {int(pct * 100)}% {bar}"
     # Composition of the resident context in tokens (rough, ~4 chars/token).
     bd = conversation.context_breakdown(
@@ -195,11 +198,13 @@ def run() -> None:
 
     # --- permission asker (run_in_terminal; works in either view) -----------
 
-    def _domain_asker(target: str) -> bool:
+    def _access_asker(question: str) -> bool:
+        # question is the full, possibly multi-line prompt (write asks include
+        # the exact operation). Shown via run_in_terminal so it works in both
+        # the [main] prompt and the viewer; serialized so agents don't collide.
         def _ask() -> bool:
             try:
-                ans = input(
-                    f"Allow access to '{target}'? [Y/n] ").strip().lower()
+                ans = input(f"{question}\n[Y/n] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 return False
             return not ans.startswith('n')
@@ -217,8 +222,8 @@ def run() -> None:
             except Exception:                            # noqa: BLE001
                 return False
 
-    tools.set_domain_asker(_domain_asker)
-    files.set_path_asker(_domain_asker)
+    tools.set_domain_asker(_access_asker)
+    files.set_path_asker(_access_asker)
 
     # --- per-agent output (sub-agents use buffer consoles) ------------------
 
@@ -513,6 +518,11 @@ def run() -> None:
             state['view'] = 'main'
             event.app.exit()
 
+    @tui_kb.add('s-tab', eager=True)
+    def _tui_cycle_mode(event) -> None:
+        _cycle_mode()
+        event.app.invalidate()
+
     # Multiline input: Shift+Enter (F13 via modifyOtherKeys) and Ctrl+J insert
     # a newline; Enter submits unless keys are still queued (a paste). Mirrors
     # the REPL's ui._kb; eager so it beats the TextArea's default Enter.
@@ -586,6 +596,11 @@ def run() -> None:
             event.app.erase_when_done = True
             event.app.exit(result=_ENTER_TUI)
 
+    @main_kb.add('s-tab', eager=True)
+    def _m_cycle_mode(event) -> None:
+        _cycle_mode()
+        event.app.invalidate()   # refresh the mode shown in the status bar
+
     ps = PromptSession(
         history=FileHistory(str(config.GURU_HOME / 'history')),
         multiline=True,
@@ -624,11 +639,33 @@ def run() -> None:
         No patch_stdout / prompt is active here, so the terminal is free."""
         await state['loop'].run_in_executor(None, lambda: fn(*args))
 
+    def _cycle_mode() -> None:
+        i = config.MODES.index(config.MODE)
+        config.MODE = config.MODES[(i + 1) % len(config.MODES)]
+
+    def _set_mode(arg: str) -> None:
+        """Set the access mode by name (prefix match) or cycle if no arg."""
+        if arg:
+            match = next(
+                (m for m in config.MODES if m.startswith(arg)), None)
+            if match is None:
+                main.console.print(
+                    f"[red]Unknown mode '{arg}'.[/red] Modes: "
+                    + ', '.join(config.MODES))
+                return
+            config.MODE = match
+        else:
+            _cycle_mode()
+        main.console.print(f"[green]Mode:[/green] {config.MODE}")
+
     async def _handle_command(text: str) -> bool:
         """Run a slash command; return True if it was a command."""
         low = text.lower()
         if low in ('exit', 'quit'):
             state['quit'] = True
+            return True
+        if text == '/mode' or text.startswith('/mode '):
+            _set_mode(text[6:].strip())
             return True
         if text in ('/models', '/model'):
             import guru.cli as cli
@@ -712,9 +749,9 @@ def run() -> None:
             f"[bold]guru[/bold] · model [bold]{main.state.model}[/bold]")
         main.console.print(
             "Enter submits · Ctrl+N new agent · Shift+Right view agents"
-            " · double Ctrl+C exit")
+            " · Shift+Tab cycle access mode · double Ctrl+C exit")
         main.console.print(
-            "[dim]/models /context /adapters /save /resume /compact"
+            "[dim]/mode /models /context /adapters /save /resume /compact"
             " /search[/dim]\n")
 
     async def _amain() -> None:

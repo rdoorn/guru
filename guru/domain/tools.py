@@ -142,35 +142,33 @@ _JOIN_SPEC = {
 }
 
 
-def _ask_domain(domain: str) -> bool:
-    """Default terminal approval prompt (REPL). Enter approves; errors deny."""
-    ui.console.print(
-        f"\n[yellow]\\[ACCESS][/yellow] Request to access"
-        f" [bold]{domain}[/bold]."
-    )
+def _ask_domain(question: str) -> bool:
+    """Default terminal approval prompt. Enter approves; errors deny."""
     try:
-        answer = input(f"Allow access to '{domain}'? [Y/n] ").strip().lower()
+        answer = input(f"{question}\n[Y/n] ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return False
     return not answer.startswith('n')
 
 
 def ensure_domain_allowed(domain: str) -> bool:
-    """Return True if the domain is allowed, prompting the user if unknown.
+    """Return True if the domain is allowed, prompting per the access mode.
 
-    On approval the domain is added to the in-memory set and persisted.
-    Denial (no / empty / Ctrl+C) returns False and asks again next time.
+    Web fetches/searches are reads, so this uses the read domain list. auto
+    mode approves silently; ask prompts; approvals are persisted.
     """
     domain = domain.lower()
     if domain in config.ALLOWED_DOMAINS:
         return True
-    asker = _domain_asker or _ask_domain
-    if asker(domain):
+    if config.MODE == config.MODE_AUTO:
         config.ALLOWED_DOMAINS.add(domain)
         config.persist_domain(domain)
-        ui.console.print(
-            f"[green]Allowed[/green] {domain} (saved to allow-list)."
-        )
+        return True
+    asker = _domain_asker or _ask_domain
+    if asker(f"Allow web access to '{domain}'?"):
+        config.ALLOWED_DOMAINS.add(domain)
+        config.persist_domain(domain)
+        ui.console.print(f"[green]Allowed[/green] {domain}.")
         return True
     ui.console.print(f"[red]Denied[/red] {domain}.")
     return False
@@ -398,6 +396,41 @@ TOOL_REGISTRY: dict = {
             "path": "Directory or file to search (default: current directory)",
         },
         "optional": ["path"],
+    },
+    "write_file": {
+        "fn": files.write_file,
+        "description": (
+            "Create or overwrite a file with the given content. Requires"
+            " write access to the directory (asked once, showing the exact"
+            " write); refused in read-only mode. Prefer edit_file to change"
+            " part of an existing file."
+        ),
+        "tags": [
+            "write", "create", "save", "file", "overwrite", "new", "output",
+            "generate", "filesystem", "local", "change", "modify",
+        ],
+        "parameters": {
+            "path": "File to write",
+            "content": "Full text content to write to the file",
+        },
+    },
+    "edit_file": {
+        "fn": files.edit_file,
+        "description": (
+            "Replace a single unique occurrence of 'old' with 'new' in a"
+            " file ('old' must appear exactly once; include surrounding"
+            " context). Requires write access (asked once, showing the exact"
+            " diff); refused in read-only mode."
+        ),
+        "tags": [
+            "edit", "change", "modify", "replace", "patch", "file", "update",
+            "fix", "refactor", "filesystem", "local", "code", "write",
+        ],
+        "parameters": {
+            "path": "File to edit",
+            "old": "Exact text to replace (must be unique in the file)",
+            "new": "Replacement text",
+        },
     },
 }
 

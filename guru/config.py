@@ -17,8 +17,19 @@ ADAPTERS_PATH = GURU_HOME / 'adapters.toml'          # adapter configuration
 PROJECT_GURU_DIR = Path.cwd() / '.guru'
 PROJECT_GURU_MD = PROJECT_GURU_DIR / 'GURU.md'       # appended to the global
 DOMAINS_ALLOW_PATH = PROJECT_GURU_DIR / 'domains_allow.txt'  # per-project
-DIRS_ALLOW_PATH = PROJECT_GURU_DIR / 'dirs_allow.txt'  # file-tool allow-list
+READ_DIRS_ALLOW_PATH = PROJECT_GURU_DIR / 'read_dirs_allow.txt'   # read list
+WRITE_DIRS_ALLOW_PATH = PROJECT_GURU_DIR / 'write_dirs_allow.txt'  # write list
 PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
+
+# Access mode (session-level policy). Separate from the allow-lists: it decides
+# whether we prompt, auto-approve, or refuse. read-only refuses writes; ask
+# prompts per not-yet-allowed target; auto approves silently (filling the
+# lists). Path resolution / escape checks apply in every mode.
+MODE_READ_ONLY = 'read-only'
+MODE_ASK = 'ask-for-changes'
+MODE_AUTO = 'auto'
+MODES = (MODE_READ_ONLY, MODE_ASK, MODE_AUTO)
+MODE = MODE_ASK
 # Remembers the last-used adapter + model for this project.
 PROJECT_SETTINGS_PATH = PROJECT_GURU_DIR / 'settings.json'
 
@@ -121,10 +132,13 @@ DELEGATION_HINT = (
 
 # Domains approved for model-initiated web access, loaded at startup.
 ALLOWED_DOMAINS: set = set()
-# Directories approved for model-initiated file access (resolved absolute
+# Directories approved for model-initiated file READS (resolved absolute
 # paths). Loaded from the per-project allow-list; new ones (including the
 # working directory) are approved once and persisted. See load below.
-ALLOWED_DIRS: set = set()
+ALLOWED_READ_DIRS: set = set()
+# Directories approved for model-initiated file WRITES — a separate list, so
+# read access never implies write access.
+ALLOWED_WRITE_DIRS: set = set()
 
 
 def ensure_setup() -> None:
@@ -156,20 +170,38 @@ def persist_domain(domain: str) -> None:
         fh.write(domain + '\n')
 
 
-def load_allowed_dirs() -> set:
-    """Read the file-access allow-list into a set of resolved path strings."""
+def _load_dir_list(path) -> set:
     try:
-        lines = DIRS_ALLOW_PATH.read_text(encoding='utf-8').splitlines()
+        lines = path.read_text(encoding='utf-8').splitlines()
     except OSError:
         return set()
     return {ln.strip() for ln in lines if ln.strip()}
 
 
-def persist_dir(directory: str) -> None:
-    """Append a newly approved directory to the project allow-list file."""
-    DIRS_ALLOW_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with DIRS_ALLOW_PATH.open('a', encoding='utf-8') as fh:
+def _append_dir(path, directory: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as fh:
         fh.write(directory + '\n')
+
+
+def load_allowed_read_dirs() -> set:
+    """Read the read-access allow-list into a set of resolved path strings."""
+    return _load_dir_list(READ_DIRS_ALLOW_PATH)
+
+
+def persist_read_dir(directory: str) -> None:
+    """Append a newly approved read directory to the project allow-list."""
+    _append_dir(READ_DIRS_ALLOW_PATH, directory)
+
+
+def load_allowed_write_dirs() -> set:
+    """Read the write-access allow-list into a set of resolved path strings."""
+    return _load_dir_list(WRITE_DIRS_ALLOW_PATH)
+
+
+def persist_write_dir(directory: str) -> None:
+    """Append a newly approved write directory to the project allow-list."""
+    _append_dir(WRITE_DIRS_ALLOW_PATH, directory)
 
 
 def domain_of(url: str) -> str:
@@ -274,4 +306,5 @@ ALLOWED_DOMAINS = load_allowed_domains()
 # Directories previously approved for this project. Nothing is allowed by
 # default — the first file access (including the working directory) prompts
 # once, then the approval is persisted here.
-ALLOWED_DIRS = load_allowed_dirs()
+ALLOWED_READ_DIRS = load_allowed_read_dirs()
+ALLOWED_WRITE_DIRS = load_allowed_write_dirs()
