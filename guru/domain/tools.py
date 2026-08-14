@@ -64,11 +64,79 @@ _SPAWN_SPEC = {
         'Delegate a self-contained task to a new sub-agent that runs in'
         ' parallel in its own viewport. Use for independent subtasks you want'
         ' worked on concurrently. The sub-agent shares your tools and model'
-        ' and cannot spawn further agents. Returns immediately — its results'
-        ' appear in its own tab, not in your reply.'
+        ' and cannot spawn further agents. Returns immediately — its result is'
+        ' delivered back to you automatically when it finishes.'
     ),
     'parameters': {
         'task': 'A clear, self-contained instruction for the sub-agent',
+    },
+}
+
+
+# Pluggable non-blocking sub-agent status query — installed by the TUI.
+_check_handler = None
+# Pluggable non-blocking join/barrier — installed by the TUI.
+_join_handler = None
+
+
+def set_check_handler(fn) -> None:
+    """Install the sub-agent status query (used by the TUI)."""
+    global _check_handler
+    _check_handler = fn
+
+
+def set_join_handler(fn) -> None:
+    """Install the sub-agent join/barrier (used by the TUI)."""
+    global _join_handler
+    _join_handler = fn
+
+
+def check(target: str) -> str:
+    """
+    Check the status and any finished results of your sub-agents, without
+    blocking. Pass a sub-agent name (e.g. "agent2") or "all". Returns
+    immediately, so you can keep working or delegate more while others run.
+    """
+    if _check_handler is None:
+        return "Checking sub-agents is only available in the TUI (--tui)."
+    return _check_handler(target)
+
+
+def join(targets: str) -> str:
+    """
+    Ask to be resumed automatically once the named sub-agents all finish,
+    then end your turn. Non-blocking: you stay free to take other work. Pass
+    one or more sub-agent names separated by spaces or commas. Their combined
+    results are delivered to you when the whole group is done.
+    """
+    if _join_handler is None:
+        return "Joining sub-agents is only available in the TUI (--tui)."
+    return _join_handler(targets)
+
+
+_CHECK_SPEC = {
+    'name': 'check',
+    'description': (
+        'Check the status and any finished results of your sub-agents without'
+        ' blocking. Pass a sub-agent name (e.g. "agent2") or "all". Returns'
+        ' immediately.'
+    ),
+    'parameters': {
+        'target': 'A sub-agent name, or "all" for every one',
+    },
+}
+
+_JOIN_SPEC = {
+    'name': 'join',
+    'description': (
+        'Ask to be automatically resumed once the named sub-agents all'
+        ' finish, then end your turn. Non-blocking — you stay free to take'
+        ' other work meanwhile. Pass one or more sub-agent names separated by'
+        ' spaces or commas; their combined results are delivered to you when'
+        ' the group completes.'
+    ),
+    'parameters': {
+        'targets': 'Sub-agent names, space- or comma-separated',
     },
 }
 
@@ -343,7 +411,7 @@ def active_specs() -> list:
     """
     specs = [_SEARCH_TOOLS_SPEC]
     if session.can_spawn:
-        specs.append(_SPAWN_SPEC)
+        specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
     for name in TOOL_REGISTRY:
         if name in session.active_tool_names:
             info = TOOL_REGISTRY[name]
@@ -364,7 +432,7 @@ def reset_active_tools() -> None:
     session.active_tool_names.clear()
     base = [search_tools]
     if session.can_spawn:
-        base.append(spawn)
+        base.extend([spawn, check, join])
     session.active_tools[:] = base
 
 
@@ -390,6 +458,10 @@ def execute_tool(name: str, arguments: dict) -> str:
         return result
     if name == "spawn":
         return spawn(**arguments)
+    if name == "check":
+        return check(**arguments)
+    if name == "join":
+        return join(**arguments)
     if name in TOOL_REGISTRY:
         try:
             return TOOL_REGISTRY[name]["fn"](**arguments)

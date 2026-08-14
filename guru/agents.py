@@ -30,6 +30,11 @@ class Agent:
     # Per-agent rich Console writing into this viewport's buffer; bound via
     # ``ui.use_console(agent.console)`` while the turn runs.
     console: object = None
+    # Delegation: the agent that spawned this one (None for main and
+    # user-created agents), and the task it was spawned to do. Used to deliver
+    # results back to the parent's mailbox when the turn finishes.
+    parent: object = None
+    task: str = ""
 
     def append(self, text: str) -> None:
         """Append a line (or block) to the scrollback buffer."""

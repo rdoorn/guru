@@ -1,4 +1,4 @@
-"""Full-screen multi-viewport TUI (Phase B increment 2a — parallel turns).
+"""Full-screen multi-viewport TUI (Phase B — parallel turns + delegation).
 
 Each agent viewport owns its own conversation, tools, model, counters, and
 output console. Submitting runs that agent's turn in a background thread; the
@@ -13,11 +13,20 @@ write ``session`` — operate on that agent's state without a shared lock. Local
 Ollama turns against the same model still serialize inside the daemon; remote
 adapters (Anthropic/LiteLLM) and mixed models parallelise fully.
 
+Delegation is a mailbox: a spawned sub-agent's final answer is delivered back
+into its parent's queue when it finishes, auto-waking the parent to synthesise
+— the parent never blocks, so it stays free to take new tasks or spawn more.
+``check`` inspects sub-agents without blocking; ``join`` resumes the parent
+once a named group all finish. All queue/busy/launch/deliver transitions run
+on the event-loop thread (workers only run the blocking turn), so there are no
+races on ``busy`` or on the agent list.
+
 Layout, top to bottom: output pane · rule · prompt · rule · status · tabs.
 """
 import asyncio
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 from prompt_toolkit import Application
@@ -93,13 +102,15 @@ def run() -> None:
     main = manager.active
     main.state = session.current()
     main.state.can_spawn = True
-    if tools.spawn not in main.state.active_tools:
-        main.state.active_tools.append(tools.spawn)
+    for fn in (tools.spawn, tools.check, tools.join):
+        if fn not in main.state.active_tools:
+            main.state.active_tools.append(fn)
     main.append("guru — Ctrl+N new agent · Shift+Left/Right switch"
                 " · Ctrl+C cancel · double Ctrl+C exit")
 
     state = {'loop': None}
     cols = shutil.get_terminal_size((100, 30)).columns
+    barriers: dict = {}   # parent Agent -> {'remaining': set, 'results': dict}
 
     def _ask_terminal(domain: str) -> bool:
         sys.stdout.write(f"\nAllow access to '{domain}'? [y/N] ")
@@ -130,6 +141,10 @@ def run() -> None:
             color_system='standard', width=cols)
 
     # --- background execution ------------------------------------------------
+    #
+    # Workers only run the blocking turn; every queue/busy/launch/deliver/
+    # barrier transition happens on the loop thread (via call_soon_threadsafe
+    # or _on_loop), so there are no races on ``busy`` or the agent list.
 
     def _work(agent) -> None:
         # Bind this agent's state + console to the worker thread's context, so
@@ -137,7 +152,6 @@ def run() -> None:
         # agent only. No lock: other agents run concurrently on their own.
         token = session.use(agent.state)
         ctoken = ui.use_console(agent.console)
-        agent.status = 'thinking'
         try:
             while agent.queue:
                 message = agent.queue.pop(0)
@@ -150,17 +164,96 @@ def run() -> None:
             agent.console.file.flush()
             ui.reset_console(ctoken)
             session.reset(token)
-            agent.status = 'idle'
-            agent.busy = False
-            _invalidate()
+            state['loop'].call_soon_threadsafe(_on_done, agent)
+
+    def _launch(agent) -> None:
+        """Mark busy and start a worker turn (loop thread only)."""
+        agent.busy = True
+        agent.status = 'thinking'
+        state['loop'].run_in_executor(None, _work, agent)
 
     def _submit(text: str) -> None:
         agent = manager.active
         agent.append(f"> {text}")
         agent.queue.append(text)
         if not agent.busy:
-            agent.busy = True
-            state['loop'].run_in_executor(None, _work, agent)
+            _launch(agent)
+
+    def _agent_for_state(st):
+        return next((a for a in manager.agents if a.state is st), None)
+
+    def _final_answer(agent) -> str:
+        for m in reversed(agent.state.messages):
+            role = (m.get('role') if isinstance(m, dict)
+                    else getattr(m, 'role', ''))
+            content = (m.get('content') if isinstance(m, dict)
+                       else getattr(m, 'content', '')) or ''
+            if role == 'assistant' and content.strip():
+                return content.strip()
+        return '(no answer produced)'
+
+    def _format_join(results: dict) -> str:
+        parts = ["[joined results]"]
+        for tid, (task, ans) in results.items():
+            parts.append(f"\n— {tid} · task: {task}\n{ans}")
+        return "\n".join(parts)
+
+    def _deliver(parent, notice: str, payload: str) -> None:
+        """Drop a result into a parent's mailbox and wake it (loop thread)."""
+        parent.append(notice)
+        parent.queue.append(payload)
+        if not parent.busy:
+            _launch(parent)
+        _invalidate()
+
+    def _report(child) -> None:
+        """Deliver a finished child's result to its parent (loop thread)."""
+        parent = child.parent
+        answer = _final_answer(child)
+        bar = barriers.get(parent)
+        if bar is not None and child.title in bar['remaining']:
+            bar['remaining'].discard(child.title)
+            bar['results'][child.title] = (child.task, answer)
+            if not bar['remaining']:
+                del barriers[parent]
+                _deliver(parent, "[inbox] join complete",
+                         _format_join(bar['results']))
+        else:
+            _deliver(
+                parent,
+                f"[inbox] result from {child.title}",
+                f"[result from {child.title} · task: {child.task}]\n{answer}")
+
+    def _on_done(agent) -> None:
+        """A worker finished (loop thread): relaunch, report, or go idle."""
+        agent.busy = False
+        agent.status = 'idle'
+        if agent.queue:                 # more arrived during teardown
+            _launch(agent)
+            _invalidate()
+            return
+        if agent.parent is not None:
+            _report(agent)
+        _invalidate()
+
+    def _on_loop(fn):
+        """Run fn() on the loop thread; block the caller for its result."""
+        done = threading.Event()
+        box: dict = {}
+
+        def _runner() -> None:
+            try:
+                box['result'] = fn()
+            except Exception as e:                       # noqa: BLE001
+                box['error'] = e
+            finally:
+                done.set()
+
+        state['loop'].call_soon_threadsafe(_runner)
+        done.wait()
+        if 'error' in box:
+            raise box['error']
+        return box['result']
 
     def _configure(agent, base, can_spawn: bool) -> None:
         """Seed a child agent's state from ``base`` and attach its console."""
@@ -169,7 +262,7 @@ def run() -> None:
             {'role': 'system', 'content': config.build_system_prompt()}]
         st.active_tools = [tools.search_tools]
         if can_spawn:
-            st.active_tools.append(tools.spawn)
+            st.active_tools.extend([tools.spawn, tools.check, tools.join])
         st.active_tool_names = set()
         st.model = base.model
         st.adapter = base.adapter
@@ -190,30 +283,87 @@ def run() -> None:
     def _spawn_agent(task: str) -> str:
         """Spawn handler (worker thread): delegate a task in parallel.
 
-        Sub-agents can't spawn further agents. The manager mutation and turn
-        launch are scheduled on the loop thread to avoid racing the renderer.
+        Sub-agents can't spawn further agents. The manager mutation, parent
+        link, and turn launch are scheduled on the loop thread to avoid racing
+        the renderer and other orchestration.
         """
         base = session.current()   # the delegating agent's state
         title = f"agent{len(manager.agents)}"
-        agent = Agent(id=title, title=title)
-        _configure(agent, base, can_spawn=False)
-        agent.append(f"[{title}] spawned · task: {task}")
-        agent.append(f"> {task}")
-        agent.queue.append(task)
-        agent.busy = True
+        child = Agent(id=title, title=title)
+        _configure(child, base, can_spawn=False)
+        child.task = task
+        child.append(f"[{title}] spawned · task: {task}")
+        child.append(f"> {task}")
+        child.queue.append(task)
 
         def _add_and_start() -> None:
-            manager.agents.append(agent)
-            state['loop'].run_in_executor(None, _work, agent)
+            child.parent = _agent_for_state(base)
+            manager.agents.append(child)
+            _launch(child)
             _invalidate()
 
         state['loop'].call_soon_threadsafe(_add_and_start)
         return (
-            f"Spawned {title} to work on this task in parallel. Its progress"
-            f" and result appear in the {title} tab, not in your reply."
+            f"Spawned {title} to work on this task in parallel. Its result"
+            f" will be delivered back to you automatically when it finishes."
         )
 
+    def _do_check(caller_state, target: str) -> str:
+        """Report sub-agent status/results for the caller (loop thread)."""
+        caller = _agent_for_state(caller_state)
+        children = [a for a in manager.agents if a.parent is caller]
+        if not children:
+            return "You have no sub-agents."
+        target = (target or 'all').strip()
+        if target in ('all', '*', ''):
+            lines = [
+                f"{a.title}: {'running' if a.busy else 'done'}"
+                for a in children]
+            return "Sub-agents:\n" + "\n".join(lines)
+        match = next((a for a in children if a.title == target), None)
+        if match is None:
+            names = ', '.join(a.title for a in children)
+            return f"No sub-agent named '{target}'. Yours: {names}."
+        if match.busy:
+            return f"{match.title}: running (task: {match.task})"
+        return (f"{match.title}: done\ntask: {match.task}\n"
+                f"{_final_answer(match)}")
+
+    def _do_join(caller_state, titles: list) -> str:
+        """Register a join barrier for the caller (loop thread)."""
+        caller = _agent_for_state(caller_state)
+        children = {a.title: a for a in manager.agents if a.parent is caller}
+        targets = [children[t] for t in titles if t in children]
+        if not targets:
+            have = ', '.join(children) or 'none'
+            return f"None of those are your sub-agents. Yours: {have}."
+        remaining: set = set()
+        results: dict = {}
+        for a in targets:
+            if a.busy:
+                remaining.add(a.title)
+            else:
+                results[a.title] = (a.task, _final_answer(a))
+        if remaining:
+            barriers[caller] = {'remaining': remaining, 'results': results}
+            waiting = ', '.join(sorted(remaining))
+            return (f"Waiting for {waiting} to finish; I'll be resumed"
+                    f" automatically with their combined results.")
+        _deliver(caller, "[inbox] join complete", _format_join(results))
+        return "Those sub-agents already finished; resuming with results now."
+
+    def _check(target: str) -> str:
+        st = session.current()
+        return _on_loop(lambda: _do_check(st, target))
+
+    def _join(targets: str) -> str:
+        st = session.current()
+        titles = [t for t in targets.replace(',', ' ').split() if t]
+        return _on_loop(lambda: _do_join(st, titles))
+
     tools.set_spawn_handler(_spawn_agent)
+    tools.set_check_handler(_check)
+    tools.set_join_handler(_join)
 
     # --- views ---------------------------------------------------------------
 

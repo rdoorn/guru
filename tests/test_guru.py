@@ -348,12 +348,14 @@ class TestSpawnTool:
         finally:
             tools.set_spawn_handler(None)
 
-    def test_spawn_spec_gated_by_can_spawn(self, monkeypatch) -> None:
+    def test_delegation_specs_gated_by_can_spawn(self, monkeypatch) -> None:
         monkeypatch.setattr(session, 'active_tool_names', set())
         monkeypatch.setattr(session, 'can_spawn', False)
-        assert 'spawn' not in [s['name'] for s in tools.active_specs()]
+        names = [s['name'] for s in tools.active_specs()]
+        assert not ({'spawn', 'check', 'join'} & set(names))
         monkeypatch.setattr(session, 'can_spawn', True)
-        assert 'spawn' in [s['name'] for s in tools.active_specs()]
+        names = [s['name'] for s in tools.active_specs()]
+        assert {'spawn', 'check', 'join'} <= set(names)
 
     def test_reset_active_tools_honours_can_spawn(self) -> None:
         capable = session.SessionState()
@@ -361,8 +363,9 @@ class TestSpawnTool:
         token = session.use(capable)
         try:
             tools.reset_active_tools()
-            assert tools.spawn in capable.active_tools
-            assert tools.search_tools in capable.active_tools
+            for fn in (tools.spawn, tools.check, tools.join,
+                       tools.search_tools):
+                assert fn in capable.active_tools
         finally:
             session.reset(token)
         plain = session.SessionState()
@@ -370,8 +373,34 @@ class TestSpawnTool:
         try:
             tools.reset_active_tools()
             assert tools.spawn not in plain.active_tools
+            assert tools.check not in plain.active_tools
+            assert tools.join not in plain.active_tools
         finally:
             session.reset(token)
+
+
+class TestCollectTools:
+    """Tests for the non-blocking check/join tools and their injection."""
+
+    def test_check_without_handler_reports_repl(self) -> None:
+        tools.set_check_handler(None)
+        assert 'only available in the TUI' in tools.check('all')
+
+    def test_join_without_handler_reports_repl(self) -> None:
+        tools.set_join_handler(None)
+        assert 'only available in the TUI' in tools.join('agent2')
+
+    def test_check_and_join_delegate_and_route(self) -> None:
+        seen: list = []
+        tools.set_check_handler(lambda t: seen.append(('check', t)) or 'c')
+        tools.set_join_handler(lambda t: seen.append(('join', t)) or 'j')
+        try:
+            assert tools.execute_tool('check', {'target': 'all'}) == 'c'
+            assert tools.execute_tool('join', {'targets': 'a b'}) == 'j'
+            assert seen == [('check', 'all'), ('join', 'a b')]
+        finally:
+            tools.set_check_handler(None)
+            tools.set_join_handler(None)
 
 
 class TestSessionRouting:
