@@ -53,7 +53,7 @@ def spawn(task: str) -> str:
     """
     if _spawn_handler is None:
         return (
-            "Spawning sub-agents is only available in the TUI (--tui)."
+            "Spawning sub-agents is not available in --classic (REPL) mode."
             " Handle this task yourself instead."
         )
     return _spawn_handler(task)
@@ -99,7 +99,7 @@ def check(target: str) -> str:
     immediately, so you can keep working or delegate more while others run.
     """
     if _check_handler is None:
-        return "Checking sub-agents is only available in the TUI (--tui)."
+        return "Checking sub-agents is not available in --classic (REPL) mode."
     return _check_handler(target)
 
 
@@ -111,7 +111,7 @@ def join(targets: str) -> str:
     results are delivered to you when the whole group is done.
     """
     if _join_handler is None:
-        return "Joining sub-agents is only available in the TUI (--tui)."
+        return "Joining sub-agents is not available in --classic (REPL) mode."
     return _join_handler(targets)
 
 

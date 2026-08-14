@@ -347,8 +347,8 @@ def main() -> None:
         help="Override the context window (0 = auto-detect from the model)",
     )
     parser.add_argument(
-        "--tui", action="store_true",
-        help="Launch the experimental full-screen multi-agent TUI",
+        "--classic", action="store_true",
+        help="Use the classic line-based REPL instead of the full-screen TUI",
     )
     args, _ = parser.parse_known_args()
 
@@ -363,7 +363,7 @@ def main() -> None:
         {"role": "system", "content": config.build_system_prompt()}]
     tools.reset_active_tools()
 
-    if args.tui:
+    if not args.classic:
         from guru import tui
         tui.run()
         return

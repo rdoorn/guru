@@ -436,7 +436,7 @@ class TestSpawnTool:
     def test_spawn_without_handler_reports_repl(self) -> None:
         tools.set_spawn_handler(None)
         out = tools.spawn('do something')
-        assert 'only available in the TUI' in out
+        assert '--classic' in out
 
     def test_spawn_with_handler_delegates(self) -> None:
         seen: list = []
@@ -492,11 +492,11 @@ class TestCollectTools:
 
     def test_check_without_handler_reports_repl(self) -> None:
         tools.set_check_handler(None)
-        assert 'only available in the TUI' in tools.check('all')
+        assert '--classic' in tools.check('all')
 
     def test_join_without_handler_reports_repl(self) -> None:
         tools.set_join_handler(None)
-        assert 'only available in the TUI' in tools.join('agent2')
+        assert '--classic' in tools.join('agent2')
 
     def test_check_and_join_delegate_and_route(self) -> None:
         seen: list = []
