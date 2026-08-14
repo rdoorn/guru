@@ -367,8 +367,10 @@ def search_code(pattern: str, path: str = '.') -> str:
 # --- write tools (gated by the WRITE allow-list + access mode) ---------------
 
 _MAX_DIFF_LINES = 200       # cap diff lines shown in the write prompt
-_BG_G = '\x1b[48;5;22m'     # dark green background — additions
-_BG_R = '\x1b[48;5;52m'     # dark red background — removals
+# Diff row colours: very dark green/red background with light text, so the
+# highlighted block reads clearly (the earlier 256-colour bg was too bright).
+_BG_G = '\x1b[48;2;0;28;0m\x1b[38;5;150m'
+_BG_R = '\x1b[48;2;38;0;0m\x1b[38;5;210m'
 _D = '\x1b[2m'              # dim — context lines
 _Z = '\x1b[0m'
 _HUNK = re.compile(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@')
