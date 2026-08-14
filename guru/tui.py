@@ -609,6 +609,15 @@ def run() -> None:
         parts.extend(_tab_parts(0))       # [main] highlighted in main view
         return FormattedText(parts)
 
+    def _main_message():
+        # A rule above the '> ' input frames the prompt (── / > / ── status),
+        # for the TUI feel. One column short of full width to avoid the cursor
+        # wrap that corrupts the redraw.
+        return FormattedText([
+            ('', '─' * (_app_cols() - 1) + '\n'),
+            ('', '> '),
+        ])
+
     async def _in_terminal(fn, *args) -> None:
         """Run a blocking, terminal-controlling command (picker/input) in a
         worker thread, awaited so the main prompt does not restart under it.
@@ -667,7 +676,7 @@ def run() -> None:
                 # pass through instead of being shown literally (?[1;32m…).
                 with patch_stdout(raw=True):
                     res = await ps.prompt_async(
-                        '> ', bottom_toolbar=_main_toolbar,
+                        _main_message, bottom_toolbar=_main_toolbar,
                         style=ui._TOOLBAR_STYLE,
                         pre_run=ui.enable_terminal_modes)
             except EOFError:
