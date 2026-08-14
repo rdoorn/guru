@@ -663,7 +663,9 @@ def run() -> None:
             # (Ctrl+N / Shift+Right) flip this to True to erase instead.
             ps.app.erase_when_done = False
             try:
-                with patch_stdout():
+                # raw=True so rich's ANSI colour codes (from main's console)
+                # pass through instead of being shown literally (?[1;32m…).
+                with patch_stdout(raw=True):
                     res = await ps.prompt_async(
                         '> ', bottom_toolbar=_main_toolbar,
                         style=ui._TOOLBAR_STYLE,
