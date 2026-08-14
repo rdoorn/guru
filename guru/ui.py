@@ -33,6 +33,15 @@ ANSI_SEQUENCES['\x1b[13;2u'] = Keys.F13      # CSI u Shift+Enter
 ANSI_SEQUENCES['\x1b[27;2;13~'] = Keys.F13   # xterm modifyOtherKeys
 ANSI_SEQUENCES['\x1b[99;5u'] = Keys.ControlC     # CSI u Ctrl+C
 ANSI_SEQUENCES['\x1b[27;5;99~'] = Keys.ControlC  # xterm modifyOtherKeys Ctrl+C
+# Under modifyOtherKeys mode 2 the terminal re-encodes every Ctrl+key as CSI u
+# (or the xterm ~ form) rather than a raw control byte, so the hybrid UI's
+# Ctrl+N (spawn), Ctrl+D (quit), Ctrl+J (newline) bindings need mapping too.
+ANSI_SEQUENCES['\x1b[110;5u'] = Keys.ControlN
+ANSI_SEQUENCES['\x1b[27;5;110~'] = Keys.ControlN
+ANSI_SEQUENCES['\x1b[100;5u'] = Keys.ControlD
+ANSI_SEQUENCES['\x1b[27;5;100~'] = Keys.ControlD
+ANSI_SEQUENCES['\x1b[106;5u'] = Keys.ControlJ
+ANSI_SEQUENCES['\x1b[27;5;106~'] = Keys.ControlJ
 ANSI_SEQUENCES['\x1b[27;1;13~'] = Keys.F14   # keyboard Enter, modifier=1
 ANSI_SEQUENCES['\x1b[27;0;13~'] = Keys.F14   # keyboard Enter, modifier=0
 ANSI_SEQUENCES['\x1b[13;1u'] = Keys.F14      # CSI u keyboard Enter
