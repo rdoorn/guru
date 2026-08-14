@@ -30,7 +30,6 @@ from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
@@ -88,7 +87,13 @@ class _MainWriter:
 
     def _emit(self, line: str) -> None:
         self.agent.append(line)
-        if self.state.get('view') == 'main':
+        # Write straight to the terminal only when [main] is on screen AND no
+        # prompt is being edited; otherwise hold the line (flushed before the
+        # next prompt). This keeps background output from corrupting the live
+        # prompt without needing patch_stdout, which mangled the redraw.
+        live = (self.state.get('view') == 'main'
+                and not self.state.get('prompt_active'))
+        if live:
             try:
                 sys.stdout.write(line + '\n')
                 sys.stdout.flush()
@@ -179,7 +184,8 @@ def run() -> None:
         if fn not in main.state.active_tools:
             main.state.active_tools.append(fn)
 
-    state = {'loop': None, 'view': 'main', 'quit': False, 'closing': False}
+    state = {'loop': None, 'view': 'main', 'quit': False, 'closing': False,
+             'prompt_active': False}
     cols = shutil.get_terminal_size((100, 30)).columns
     barriers: dict = {}
     ask_lock = threading.Lock()
@@ -641,20 +647,22 @@ def run() -> None:
     async def _run_main() -> None:
         while state['view'] == 'main' and not state['quit']:
             # Arm modifyOtherKeys + bracketed paste so Shift+Enter is sent as a
-            # distinct key (F13). Done before patch_stdout so the escape hits
-            # the real terminal, not the output-capture proxy.
+            # distinct key (F13), and flush any output held during the last
+            # prompt / the viewer so it appears above the fresh prompt.
             ui.enable_terminal_modes()
-            with patch_stdout():
-                main_writer.drain()
-                try:
-                    res = await ps.prompt_async(
-                        '> ', bottom_toolbar=_main_toolbar,
-                        style=ui._TOOLBAR_STYLE)
-                except EOFError:
-                    state['quit'] = True
-                    return
-                except KeyboardInterrupt:
-                    continue
+            main_writer.drain()
+            state['prompt_active'] = True
+            try:
+                res = await ps.prompt_async(
+                    '> ', bottom_toolbar=_main_toolbar,
+                    style=ui._TOOLBAR_STYLE)
+            except EOFError:
+                state['quit'] = True
+                return
+            except KeyboardInterrupt:
+                continue
+            finally:
+                state['prompt_active'] = False
             if res is _QUIT:
                 state['quit'] = True
                 return
