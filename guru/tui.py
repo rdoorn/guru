@@ -30,6 +30,7 @@ from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
@@ -87,13 +88,11 @@ class _MainWriter:
 
     def _emit(self, line: str) -> None:
         self.agent.append(line)
-        # Write straight to the terminal only when [main] is on screen AND no
-        # prompt is being edited; otherwise hold the line (flushed before the
-        # next prompt). This keeps background output from corrupting the live
-        # prompt without needing patch_stdout, which mangled the redraw.
-        live = (self.state.get('view') == 'main'
-                and not self.state.get('prompt_active'))
-        if live:
+        # While [main] is on screen, write to the terminal — patch_stdout
+        # (active during the prompt) lifts it above the live input so main's
+        # turn streams in sync. While the viewer (alt screen) is up, hold the
+        # line and flush it on return.
+        if self.state.get('view') == 'main':
             try:
                 sys.stdout.write(line + '\n')
                 sys.stdout.flush()
@@ -184,8 +183,7 @@ def run() -> None:
         if fn not in main.state.active_tools:
             main.state.active_tools.append(fn)
 
-    state = {'loop': None, 'view': 'main', 'quit': False, 'closing': False,
-             'prompt_active': False}
+    state = {'loop': None, 'view': 'main', 'quit': False, 'closing': False}
     cols = shutil.get_terminal_size((100, 30)).columns
     barriers: dict = {}
     ask_lock = threading.Lock()
@@ -664,19 +662,17 @@ def run() -> None:
             # Default: keep the line on submit (Enter). The sentinel exits
             # (Ctrl+N / Shift+Right) flip this to True to erase instead.
             ps.app.erase_when_done = False
-            state['prompt_active'] = True
             try:
-                res = await ps.prompt_async(
-                    '> ', bottom_toolbar=_main_toolbar,
-                    style=ui._TOOLBAR_STYLE,
-                    pre_run=ui.enable_terminal_modes)
+                with patch_stdout():
+                    res = await ps.prompt_async(
+                        '> ', bottom_toolbar=_main_toolbar,
+                        style=ui._TOOLBAR_STYLE,
+                        pre_run=ui.enable_terminal_modes)
             except EOFError:
                 state['quit'] = True
                 return
             except KeyboardInterrupt:
                 continue
-            finally:
-                state['prompt_active'] = False
             if res is _QUIT:
                 state['quit'] = True
                 return
