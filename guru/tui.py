@@ -464,7 +464,7 @@ def run() -> None:
         ])
 
     statusline = Window(FormattedTextControl(_status), height=1)
-    input_area = TextArea(height=1, prompt='> ', multiline=False)
+    input_area = TextArea(height=1, prompt='> ', multiline=True)
 
     def _accept(buff) -> bool:
         text = buff.text.strip()
@@ -508,6 +508,26 @@ def run() -> None:
         else:
             state['view'] = 'main'
             event.app.exit()
+
+    # Multiline input: Shift+Enter (F13 via modifyOtherKeys) and Ctrl+J insert
+    # a newline; Enter submits unless keys are still queued (a paste). Mirrors
+    # the REPL's ui._kb; eager so it beats the TextArea's default Enter.
+    @tui_kb.add('f13', eager=True)
+    @tui_kb.add('c-j', eager=True)
+    def _tui_newline(event) -> None:
+        event.current_buffer.insert_text('\n')
+
+    @tui_kb.add('enter', eager=True)
+    def _tui_enter(event) -> None:
+        if event.app.key_processor.input_queue:
+            event.current_buffer.insert_text('\n')
+        else:
+            event.current_buffer.validate_and_handle()
+
+    @tui_kb.add('f14', eager=True)
+    @tui_kb.add('escape', 'enter', eager=True)
+    def _tui_submit(event) -> None:
+        event.current_buffer.validate_and_handle()
 
     root = HSplit([
         output,
@@ -626,6 +646,10 @@ def run() -> None:
 
     async def _run_main() -> None:
         while state['view'] == 'main' and not state['quit']:
+            # Arm modifyOtherKeys + bracketed paste so Shift+Enter is sent as a
+            # distinct key (F13). Done before patch_stdout so the escape hits
+            # the real terminal, not the output-capture proxy.
+            ui.enable_terminal_modes()
             with patch_stdout():
                 main_writer.drain()
                 try:
@@ -680,8 +704,10 @@ def run() -> None:
                 elif len(manager.agents) <= 1:
                     state['view'] = 'main'
                 else:
+                    ui.enable_terminal_modes()   # Shift+Enter in the viewer
                     await tui_app.run_async()
         finally:
             state['closing'] = True
+            ui.reset_terminal()
 
     asyncio.run(_amain())
