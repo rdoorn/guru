@@ -9,6 +9,7 @@ exact operation), auto approves silently. Paths are resolved to real absolute
 paths before the check, so ``..``/symlink escapes cannot leave an allowed tree.
 """
 import difflib
+import hashlib
 import re
 import shutil
 import stat
@@ -133,6 +134,11 @@ def _row(st, name: str) -> str:
     return f"{_octal(st.st_mode)} {size} {name}"
 
 
+def _sha(text: str) -> str:
+    """Short content hash used for optimistic-concurrency on writes."""
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]
+
+
 def _resolve(path: str) -> Path:
     return Path(path or '.').expanduser().resolve()
 
@@ -249,7 +255,8 @@ def read_file(path: str, lines: str = '') -> str:
     """
     Read the text content of a file. For large files, pass ``lines`` as a
     1-based inclusive range like '10-20' to read just that span. Output is
-    line-numbered. Binary files are not shown.
+    line-numbered and includes the file's sha — pass that sha to edit_file so
+    the edit is confirmed to apply to the file as it actually is.
     """
     target = _resolve(path)
     if not ensure_path_allowed(target):
@@ -262,14 +269,15 @@ def read_file(path: str, lines: str = '') -> str:
         with target.open('rb') as fh:
             if b'\x00' in fh.read(4096):
                 return f"{target} appears to be a binary file; not shown."
-        text_lines = target.read_text(
-            encoding='utf-8', errors='replace').splitlines()
+        full = target.read_text(encoding='utf-8', errors='replace')
     except OSError as e:
         return f"Cannot read {target}: {e}"
 
+    sha = _sha(full)
+    text_lines = full.splitlines()
     total = len(text_lines)
     if total == 0:
-        return f"{target} is empty."
+        return f"{target} is empty. (sha:{sha})"
     start, end = _parse_range(lines, total)
     if start is None:
         return (f"Invalid line range '{lines}'. Use 'start-end', e.g."
@@ -277,7 +285,7 @@ def read_file(path: str, lines: str = '') -> str:
     selected = text_lines[start - 1:end]
     body = "\n".join(
         f"{i:>6}\t{ln}" for i, ln in enumerate(selected, start))
-    header = f"{target} (lines {start}-{end} of {total}):"
+    header = f"{target} (lines {start}-{end} of {total}, sha:{sha}):"
     note = ''
     if not lines.strip() and total > _MAX_READ_LINES:
         nxt = min(total, _MAX_READ_LINES * 2)
@@ -473,15 +481,17 @@ def write_file(path: str, content: str) -> str:
         return f"Cannot write {target}: {e}"
     if silent:
         _show_change(block)
-    return f"Wrote {len(content)} bytes to {target}."
+    return f"Wrote {len(content)} bytes to {target}. (sha:{_sha(content)})"
 
 
-def edit_file(path: str, old: str, new: str) -> str:
+def edit_file(path: str, old: str, new: str, sha: str) -> str:
     """
     Replace a single unique occurrence of ``old`` with ``new`` in a file.
     ``old`` must appear exactly once (include enough surrounding context to be
-    unique). Needs write access (asked once, shown with the exact diff);
-    refused in read-only mode.
+    unique). You MUST pass ``sha`` — the sha reported by your most recent
+    read_file of this file — so the edit is applied to the file as it actually
+    is; if it no longer matches (the file changed underneath you) the edit is
+    refused. Needs write access; refused in read-only mode.
     """
     target = _resolve(path)
     if config.MODE == config.MODE_READ_ONLY:
@@ -494,6 +504,12 @@ def edit_file(path: str, old: str, new: str) -> str:
         text = target.read_text(encoding='utf-8')
     except OSError as e:
         return f"Cannot read {target}: {e}"
+    current = _sha(text)
+    if (sha or '').strip() != current:
+        return (f"sha mismatch: you passed sha:{sha or '(none)'} but"
+                f" {target} is now sha:{current}. Read the file again with"
+                " read_file to get its current content and sha, then retry"
+                " edit_file with that sha.")
     count = text.count(old)
     if count == 0:
         return f"'old' text not found in {target}; nothing changed."
@@ -511,7 +527,8 @@ def edit_file(path: str, old: str, new: str) -> str:
         return f"Cannot write {target}: {e}"
     if silent:
         _show_change(block)
-    return f"Edited {target} (replaced 1 occurrence)."
+    return (f"Edited {target} (replaced 1 occurrence)."
+            f" (sha:{_sha(new_text)})")
 
 
 def delete_file(path: str) -> str:

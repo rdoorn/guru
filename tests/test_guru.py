@@ -591,7 +591,8 @@ class TestWriteTools:
         self._write_allowed(monkeypatch, tmp_path)
         p = tmp_path / 'c.py'
         p.write_text('a = 1\nb = 2\n')
-        out = files.edit_file(str(p), 'b = 2', 'b = 3')
+        sha = files._sha(p.read_text())
+        out = files.edit_file(str(p), 'b = 2', 'b = 3', sha)
         assert p.read_text() == 'a = 1\nb = 3\n' and 'Edited' in out
 
     def test_edit_file_not_found_and_ambiguous(
@@ -600,8 +601,32 @@ class TestWriteTools:
         self._write_allowed(monkeypatch, tmp_path)
         p = tmp_path / 'c.py'
         p.write_text('x\nx\n')
-        assert 'not found' in files.edit_file(str(p), 'zzz', 'q')
-        assert 'appears 2 times' in files.edit_file(str(p), 'x', 'y')
+        sha = files._sha(p.read_text())
+        assert 'not found' in files.edit_file(str(p), 'zzz', 'q', sha)
+        assert 'appears 2 times' in files.edit_file(str(p), 'x', 'y', sha)
+
+    def test_edit_file_sha_mismatch_refuses(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        self._write_allowed(monkeypatch, tmp_path)
+        p = tmp_path / 'c.py'
+        p.write_text('a = 1\n')
+        out = files.edit_file(str(p), 'a = 1', 'a = 2', 'deadbeef1234')
+        assert 'sha mismatch' in out and p.read_text() == 'a = 1\n'
+
+    def test_read_and_write_report_sha(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        self._write_allowed(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            config, 'ALLOWED_READ_DIRS', {str(tmp_path.resolve())})
+        p = tmp_path / 'c.py'
+        assert 'sha:' in files.write_file(str(p), 'hello\n')
+        out = files.read_file(str(p))
+        assert 'sha:' in out
+        # the sha from read_file is accepted by edit_file
+        sha = out.split('sha:')[1].split(')')[0].split(':')[0].strip()
+        edited = files.edit_file(str(p), 'hello', 'bye', sha)
+        assert 'Edited' in edited and p.read_text() == 'bye\n'
 
     def test_delete_file_removes(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(config, 'MODE', config.MODE_ASK)

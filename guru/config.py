@@ -124,6 +124,9 @@ delete_file in this turn and wait for it to return success — never state that
 a file was written, changed, or deleted unless a tool call did it. Do not
 restate the file's contents afterwards; the change is shown to the user. If no
 tool exists for a request, say so and stop.
+Never state a file's contents from memory — read it. Before editing, read the
+file with read_file and pass the sha it reports to edit_file, so the edit is
+applied to the file as it actually is (not what you imagine it holds).
 """
 
 # Appended to the system prompt of delegation-capable agents (TUI only), to
