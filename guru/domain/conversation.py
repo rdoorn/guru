@@ -191,20 +191,54 @@ def prune_tool_exchanges(messages: list) -> None:
     messages[:] = kept
 
 
+def context_breakdown(messages: list, active_tool_names=None,
+                      can_spawn: bool = False) -> dict:
+    """Estimate resident context tokens by category (rough, ~4 chars/token).
+
+    Accounts for everything we actually send: message content by role, plus
+    the active tool schemas (re-sent every turn but not stored in messages).
+    The returned dict includes 'total' so callers can render percentages that
+    sum to 100% of active usage regardless of how full the window is.
+    """
+    def toks(text: str) -> int:
+        return len(text) // 4
+
+    buckets = {'sys': 0, 'in': 0, 'out': 0, 'toolout': 0}
+    role_bucket = {'system': 'sys', 'user': 'in',
+                   'assistant': 'out', 'tool': 'toolout'}
+    for m in messages:
+        bucket = role_bucket.get(msg_role(m))
+        if bucket:
+            buckets[bucket] += toks(msg_content(m))
+
+    schema = 0
+    for spec in tools.specs_for(active_tool_names or set(), can_spawn):
+        schema += toks(spec.get('name', '') + spec.get('description', ''))
+        for key, val in spec.get('parameters', {}).items():
+            schema += toks(key + str(val))
+    buckets['tools'] = schema
+    buckets['total'] = sum(buckets.values())
+    return buckets
+
+
 def after_turn() -> None:
     """Post-turn context maintenance shared by the TUI and the REPL.
 
-    Prune tool output, refresh the token estimate, then summarise-compact if
-    the lean history still exceeds the threshold. Using the post-prune
-    estimate to decide avoids compacting just because a turn fetched a large
-    (now-discarded) tool result.
+    Prune tool output, refresh the token estimate (including tool schemas),
+    then summarise-compact if the lean history still exceeds the threshold.
+    Using the post-prune estimate to decide avoids compacting just because a
+    turn fetched a large (now-discarded) tool result.
     """
     prune_tool_exchanges(session.messages)
-    session.ctx_used = estimate_tokens(session.messages)
+    session.ctx_used = context_breakdown(
+        session.messages, session.active_tool_names,
+        session.can_spawn)['total']
     if session.num_ctx and session.ctx_used > config.COMPACT_AT \
             * session.num_ctx:
         compact_messages()
-        session.ctx_used = estimate_tokens(session.messages)
+        session.ctx_used = context_breakdown(
+            session.messages, session.active_tool_names,
+            session.can_spawn)['total']
 
 
 def compact_messages(force: bool = False) -> None:

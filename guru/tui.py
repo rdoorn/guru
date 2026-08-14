@@ -86,7 +86,22 @@ def _status_from(st) -> tuple:
     model = (st.model or '?').split(':')[0]
     left = f"🤖 {model} | 💪 {st.model_size or '?'} | "
     ctx = f"🧠 {int(pct * 100)}% {bar}"
+    # Composition of the resident context as percentages summing to ~100% of
+    # active usage: sys=system prompt+GURU.md, tl=tool schemas, in=prompts,
+    # out=responses, res=lingering tool output (usually 0 after pruning).
+    bd = conversation.context_breakdown(
+        st.messages, st.active_tool_names, st.can_spawn)
+    whole = bd['total'] or 1
+
+    def _p(key: str) -> int:
+        return round(100 * bd[key] / whole)
+
+    comp = (f"📊 sys{_p('sys')} tl{_p('tools')}"
+            f" in{_p('in')} out{_p('out')}")
+    if bd['toolout']:
+        comp += f" res{_p('toolout')}"
     right = (
+        f" · {comp}"
         f" | ↓ {st.session_in} | ↑ {st.session_out}"
         f" | 📁 {Path.cwd().name} | 🌿 {st.git_branch or 'none'}"
     )

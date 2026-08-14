@@ -461,11 +461,20 @@ def active_specs() -> list:
     to their native tool schema. search_tools is always present; discovered
     registry tools are added as they are activated.
     """
+    return specs_for(session.active_tool_names, session.can_spawn)
+
+
+def specs_for(active_tool_names, can_spawn: bool) -> list:
+    """Provider-neutral specs for a given tool set (no session routing).
+
+    Lets callers (e.g. the context breakdown) price a specific agent's tool
+    schemas without binding that agent's session context.
+    """
     specs = [_SEARCH_TOOLS_SPEC]
-    if session.can_spawn:
+    if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
     for name in TOOL_REGISTRY:
-        if name in session.active_tool_names:
+        if name in active_tool_names:
             info = TOOL_REGISTRY[name]
             specs.append({
                 'name': name,

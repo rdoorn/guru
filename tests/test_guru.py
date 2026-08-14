@@ -411,6 +411,39 @@ class TestFileTools:
         assert files._parse_range('1-9999', 50) == (1, 50)
 
 
+class TestSpecsFor:
+    """tools.specs_for builds tool specs without session routing."""
+
+    def test_search_tools_always(self) -> None:
+        assert [s['name'] for s in tools.specs_for(set(), False)] == [
+            'search_tools']
+
+    def test_can_spawn_and_activated(self) -> None:
+        names = {s['name'] for s in tools.specs_for({'web_fetch'}, True)}
+        assert {'search_tools', 'spawn', 'check', 'join', 'web_fetch'} <= names
+
+
+class TestContextBreakdown:
+    """conversation.context_breakdown categorises resident context tokens."""
+
+    def test_categorises_and_totals(self) -> None:
+        msgs = [
+            {'role': 'system', 'content': 'x' * 40},    # 10 tokens
+            {'role': 'user', 'content': 'y' * 20},      # 5 tokens
+            {'role': 'assistant', 'content': 'z' * 8},  # 2 tokens
+        ]
+        bd = conversation.context_breakdown(msgs, set(), False)
+        assert bd['sys'] == 10 and bd['in'] == 5 and bd['out'] == 2
+        assert bd['tools'] > 0        # search_tools schema always present
+        assert bd['total'] == (bd['sys'] + bd['in'] + bd['out']
+                               + bd['toolout'] + bd['tools'])
+
+    def test_can_spawn_adds_schema_tokens(self) -> None:
+        base = conversation.context_breakdown([], set(), False)['tools']
+        more = conversation.context_breakdown([], set(), True)['tools']
+        assert more > base            # spawn/check/join schemas add tokens
+
+
 class TestPruneToolExchanges:
     """Tool output and text-less tool-call steps are dropped after a turn."""
 
