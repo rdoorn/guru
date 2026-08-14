@@ -23,7 +23,7 @@ import threading
 from pathlib import Path
 
 from prompt_toolkit import Application, PromptSession
-from prompt_toolkit.application import run_in_terminal
+from prompt_toolkit.application import get_app, run_in_terminal
 from prompt_toolkit.formatted_text import ANSI, FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
@@ -120,6 +120,15 @@ class _MainWriter:
                     pass
             sys.stdout.flush()
             self._pending.clear()
+
+
+def _app_cols() -> int:
+    """Full render width from the active app (accurate under prompt_toolkit;
+    shutil returns the fallback size while a prompt owns the terminal)."""
+    try:
+        return get_app().output.get_size().columns
+    except Exception:                                    # noqa: BLE001
+        return shutil.get_terminal_size((100, 30)).columns
 
 
 def _status_from(st) -> tuple:
@@ -552,11 +561,12 @@ def run() -> None:
 
     def _main_toolbar():
         # Match the TUI's bottom chrome: rule · status · tabs. The output
-        # "pane" for [main] is the terminal scrollback above this bar.
-        _, columns = shutil.get_terminal_size((100, 30))
+        # "pane" for [main] is the terminal scrollback above this bar. Rules
+        # use the default foreground (like HorizontalLine), full render width.
+        columns = _app_cols()
         left, ctx, right, colour = _status_from(main.state)
         parts = [
-            ('ansibrightblack', '─' * columns + '\n'),
+            ('', '─' * columns + '\n'),
             ('ansibrightblack', left),
             (_CTX_COLOUR[colour], ctx),
             ('ansibrightblack', right),
@@ -567,9 +577,8 @@ def run() -> None:
 
     def _main_message():
         # A rule above the '> ' input, mirroring the TUI's rule-above-prompt.
-        _, columns = shutil.get_terminal_size((100, 30))
         return FormattedText([
-            ('ansibrightblack', '─' * columns + '\n'),
+            ('', '─' * _app_cols() + '\n'),
             ('', '> '),
         ])
 
