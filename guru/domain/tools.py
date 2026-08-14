@@ -419,9 +419,10 @@ TOOL_REGISTRY: dict = {
         "description": (
             "Replace a single unique occurrence of 'old' with 'new' in a"
             " file ('old' must appear exactly once; include surrounding"
-            " context). You must first read_file to get the file's 'sha' and"
-            " pass it; the edit is refused if the file changed since then."
-            " Requires write access; refused in read-only mode."
+            " context). Pass 'sha' — the value the last read_file/write_file/"
+            "edit_file of this file returned (reuse it; no re-read needed)."
+            " Returns the new sha so edits chain. Refused if the file changed"
+            " since that sha. Requires write access; refused in read-only."
         ),
         "tags": [
             "edit", "change", "modify", "replace", "patch", "file", "update",
@@ -431,7 +432,7 @@ TOOL_REGISTRY: dict = {
             "path": "File to edit",
             "old": "Exact text to replace (must be unique in the file)",
             "new": "Replacement text",
-            "sha": "The sha from your most recent read_file of this file",
+            "sha": "sha the last read/write/edit of this file returned",
         },
     },
     "delete_file": {

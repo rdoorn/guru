@@ -124,9 +124,11 @@ delete_file in this turn and wait for it to return success — never state that
 a file was written, changed, or deleted unless a tool call did it. Do not
 restate the file's contents afterwards; the change is shown to the user. If no
 tool exists for a request, say so and stop.
-Never state a file's contents from memory — read it. Before editing, read the
-file with read_file and pass the sha it reports to edit_file, so the edit is
-applied to the file as it actually is (not what you imagine it holds).
+Never state a file's contents from memory — read it. edit_file needs the
+file's sha: reuse the one your most recent read_file, write_file, or edit_file
+of that file returned (they all return it) — you need not re-read if you
+already hold a current sha. If edit_file reports a sha mismatch, the file
+changed underneath you; read it again to refresh the sha, then retry.
 """
 
 # Appended to the system prompt of delegation-capable agents (TUI only), to

@@ -490,10 +490,12 @@ def edit_file(path: str, old: str, new: str, sha: str) -> str:
     """
     Replace a single unique occurrence of ``old`` with ``new`` in a file.
     ``old`` must appear exactly once (include enough surrounding context to be
-    unique). You MUST pass ``sha`` — the sha reported by your most recent
-    read_file of this file — so the edit is applied to the file as it actually
-    is; if it no longer matches (the file changed underneath you) the edit is
-    refused. Needs write access; refused in read-only mode.
+    unique). You MUST pass ``sha`` — the sha your most recent read_file,
+    write_file, or edit_file of this file returned (reuse it; no need to
+    re-read). This call returns the new sha, so consecutive edits can chain.
+    If the sha no longer matches (the file changed underneath you) the edit is
+    refused — read the file again to refresh the sha, then retry. Needs write
+    access; refused in read-only mode.
     """
     target = _resolve(path)
     if config.MODE == config.MODE_READ_ONLY:
