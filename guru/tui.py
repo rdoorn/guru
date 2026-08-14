@@ -573,6 +573,11 @@ def run() -> None:
 
     @main_kb.add('c-n', eager=True)
     def _m_spawn(event) -> None:
+        # erase_when_done so leaving for the viewer wipes the prompt instead of
+        # depositing a leftover '> ' line in the scrollback (which stacked up
+        # every round-trip). A real Enter-submit keeps erase_when_done False,
+        # so submitted input stays visible.
+        event.app.erase_when_done = True
         event.app.exit(result=_NEW_AGENT)
 
     @main_kb.add('s-right', eager=True)
@@ -580,6 +585,7 @@ def run() -> None:
         # Only leave the prompt if there's actually a sub-agent to view, so an
         # accidental Shift+Right doesn't discard what you're typing.
         if len(manager.agents) > 1:
+            event.app.erase_when_done = True
             event.app.exit(result=_ENTER_TUI)
 
     ps = PromptSession(
@@ -655,6 +661,9 @@ def run() -> None:
             # the cursor), matching the classic REPL — arming it manually
             # beforehand corrupted the cursor-position detection.
             main_writer.drain()
+            # Default: keep the line on submit (Enter). The sentinel exits
+            # (Ctrl+N / Shift+Right) flip this to True to erase instead.
+            ps.app.erase_when_done = False
             state['prompt_active'] = True
             try:
                 res = await ps.prompt_async(
