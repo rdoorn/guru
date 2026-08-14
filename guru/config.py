@@ -34,15 +34,13 @@ COMPACT_AT = 0.85
 # Number of most-recent turn-groups kept verbatim during compaction.
 KEEP_RECENT_GROUPS = 4
 
-DEFAULT_GURU_MD = """# GURU.md
-
-Instructions for the guru assistant. Edit this file to change guru's
-behaviour globally. Add a `.guru/GURU.md` inside a project to append
-project-specific instructions.
-
-## Persona
+# The GURU.md contents are appended verbatim to the model's system prompt, so
+# this default holds only model-directed instructions — no human-facing notes
+# (those belong in the README, not in every request's context).
+DEFAULT_GURU_MD = """## Persona
 
 - Be concise and direct.
+- Do not use emoji or icons in responses.
 - Cite sources when you use a tool result.
 
 ## Rules
