@@ -12,9 +12,13 @@ from dataclasses import dataclass, field
 from guru.session import SessionState
 
 
-@dataclass
+@dataclass(eq=False)
 class Agent:
-    """One agent viewport with its own output buffer and conversation state."""
+    """One agent viewport with its own output buffer and conversation state.
+
+    ``eq=False`` keeps identity-based equality and hashing, so agents can be
+    used as dict keys (e.g. the TUI's join barriers) and compared with ``is``.
+    """
     id: str
     title: str = "main"
     lines: list = field(default_factory=list)
