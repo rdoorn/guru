@@ -30,7 +30,6 @@ from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
@@ -195,14 +194,6 @@ def run() -> None:
     main.console = Console(
         file=main_writer, force_terminal=True,
         color_system='standard', width=cols)
-
-    # Shared output with CPR (cursor-position report) disabled. Some terminals
-    # answer the probe in a way prompt_toolkit mis-reads, offsetting every
-    # redraw (phantom '>' / everything shifts up). We always start prompts on
-    # a fresh line, so the probe is unneeded.
-    pt_output = create_output()
-    if hasattr(pt_output, 'enable_cpr'):
-        pt_output.enable_cpr = False
 
     # --- permission asker (run_in_terminal; works in either view) -----------
 
@@ -557,7 +548,6 @@ def run() -> None:
         key_bindings=tui_kb,
         full_screen=True,
         mouse_support=False,
-        output=pt_output,
     )
 
     def _invalidate() -> None:
@@ -596,7 +586,6 @@ def run() -> None:
         history=FileHistory(str(config.GURU_HOME / 'history')),
         multiline=True,
         key_bindings=merge_key_bindings([ui._kb, main_kb]),
-        output=pt_output,
     )
 
     def _main_toolbar():
