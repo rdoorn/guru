@@ -20,6 +20,7 @@ import asyncio
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 
 from prompt_toolkit import Application, PromptSession
@@ -257,8 +258,13 @@ def run() -> None:
                 agent.state.messages.append(
                     {'role': 'user', 'content': message})
                 conversation.refresh_system_context()
+                start = time.monotonic()
                 session.adapter.run_turn()
                 conversation.after_turn()
+                elapsed = time.monotonic() - start
+                verb = ('stopped after' if agent.state.cancel_requested
+                        else 'answered in')
+                agent.console.print(f"[dim]({verb} {elapsed:.1f}s)[/dim]")
         except Exception as e:                           # noqa: BLE001
             agent.append(f"[error] {e}")
         finally:
