@@ -51,6 +51,14 @@ KEEP_RECENT_GROUPS = 4
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
 # It is only a default: a stored per-model choice or a manual /context or
 # --num-ctx always wins, and the reported architecture max is never touched.
+# The fit is measured from Ollama's own memory report (ollama.ps) rather than
+# guessed from a RAM fraction: two probe loads reveal the real weights, the
+# real per-token KV cost (so it is correct for f16 OR q8_0), and — on a spill —
+# the true GPU budget. GPU_FIT_SAFETY stays a little under the measured budget.
+GPU_FIT_SAFETY = 0.95         # use 95% of the measured GPU budget
+CTX_PROBE_HIGH = 32768        # upper probe context for the fit measurement
+# The constants below are only used by the metadata fallback estimate, taken
+# when ollama.ps is unavailable (e.g. a remote daemon that hides memory).
 GPU_MEM_HEADROOM = 0.20       # fraction of GPU memory left free (other apps)
 MAC_GPU_FRACTION = 0.75       # Apple-Silicon Metal working set ~= 75% of RAM
 KV_CACHE_BYTES = 2.0          # bytes per KV element (f16); q8_0 ~= 1.0

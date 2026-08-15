@@ -82,13 +82,17 @@ class OllamaAdapter(Adapter):
 
     def _default_ctx(self, model: str, resolved: int, ceiling: int) -> int:
         """First-selection default context: a stored choice from a prior
-        session wins; otherwise the GPU auto-fit; otherwise the resolved
-        default. Never exceeds the architecture ceiling."""
+        session wins; otherwise the measured GPU fit; otherwise the metadata
+        estimate; otherwise the resolved default. Never exceeds the ceiling."""
         stored = config.load_model_ctx().get(model)
         if stored:
             return min(int(stored), ceiling or int(stored))
-        auto = self._max_gpu_ctx(model, ceiling)
-        return auto or resolved
+        ui.console.print(
+            f"[dim]Fitting {model} context to the GPU (one-time)…[/dim]")
+        ctx = self._calibrated_ctx(model, ceiling)
+        if not ctx:
+            ctx = self._max_gpu_ctx(model, ceiling)   # metadata fallback
+        return ctx or resolved
 
     # --- context / metadata --------------------------------------------------
 
@@ -159,6 +163,75 @@ class OllamaAdapter(Adapter):
 
     # --- GPU auto-fit (first-selection default) ------------------------------
 
+    def _ps_stats(self) -> tuple:
+        """(total footprint, bytes resident in VRAM) for the current model."""
+        try:
+            for m in ollama.ps().models:
+                if m.model == session.model:
+                    return (int(getattr(m, 'size', 0) or 0),
+                            int(getattr(m, 'size_vram', 0) or 0))
+        except Exception:                                # noqa: BLE001
+            pass
+        return (0, 0)
+
+    def _measure_at(self, ctx: int) -> tuple:
+        """Load the model at ``ctx`` and return its (size, size_vram)."""
+        if not self._reload(ctx):
+            return (0, 0)
+        return self._ps_stats()
+
+    def _calibrated_ctx(self, model: str, ceiling: int) -> int:
+        """Largest context that stays 100% on GPU, measured from Ollama.
+
+        Two probe loads give the footprint as a line in the context length
+        (``size = weights + ctx * kv_per_token``); a spill reveals the real GPU
+        budget (``size_vram``). This is accurate regardless of the KV cache
+        type (f16/q8_0) because the per-token cost is measured, not assumed.
+        Returns 0 if measurement is unavailable (fall back to the estimate).
+        """
+        lo = _CTX_FLOOR
+        hi = min(ceiling or config.CTX_PROBE_HIGH, config.CTX_PROBE_HIGH)
+        if hi <= lo:
+            return 0
+        size_lo, vram_lo = self._measure_at(lo)
+        size_hi, vram_hi = self._measure_at(hi)
+        if size_lo <= 0 or size_hi <= 0:
+            return 0
+        kv = (size_hi - size_lo) / (hi - lo)
+        if kv <= 0:
+            return min(hi, ceiling or hi)            # fit at both probes
+        weights = size_lo - lo * kv
+        self._report_kv_type(model, kv)
+        if vram_hi and vram_hi < size_hi:
+            budget = vram_hi
+        elif vram_lo and vram_lo < size_lo:
+            budget = vram_lo
+        else:
+            return min(hi, ceiling or hi)            # both probes fit the GPU
+        ctx = int((budget * config.GPU_FIT_SAFETY - weights) / kv)
+        ctx = (ctx // 1024) * 1024
+        ctx = max(_CTX_FLOOR, ctx)
+        if ceiling:
+            ctx = min(ctx, ceiling)
+        return ctx
+
+    def _report_kv_type(self, model: str, measured_kv: float) -> None:
+        """Log the KV cache type inferred from the measured per-token cost vs
+        the f16 value from metadata — the only reliable way to confirm it,
+        since Ollama does not expose the setting over its API."""
+        meta = self._kv_bytes_per_token(model)
+        if not meta:
+            return
+        ratio = measured_kv / meta
+        kind = 'f16'
+        if ratio < 0.375:
+            kind = 'q4_0'
+        elif ratio < 0.75:
+            kind = 'q8_0'
+        ui.console.print(
+            f"[dim]KV cache ~{measured_kv / 1024:.0f} KB/token — looks like"
+            f" {kind} (f16 would be ~{meta / 1024:.0f} KB).[/dim]")
+
     def _total_gpu_bytes(self) -> int:
         """Best-effort total GPU memory in bytes (0 if it can't be found)."""
         try:
@@ -227,7 +300,7 @@ class OllamaAdapter(Adapter):
         budget = total * (1 - config.GPU_MEM_HEADROOM)
         avail = budget - self._weight_bytes(model) - config.FIT_OVERHEAD_BYTES
         if avail <= 0:
-            return _CTX_FLOOR
+            return 0            # weights barely fit — let the caller default
         ctx = int(avail // kv)
         ctx = (ctx // 1024) * 1024                      # multiple of 1024
         ctx = max(_CTX_FLOOR, ctx)

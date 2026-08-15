@@ -259,6 +259,38 @@ class TestGpuAutoFit:
         monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 0)
         assert a._max_gpu_ctx('m', 40960) == 0
 
+    def test_max_gpu_ctx_zero_when_weights_exceed(self, monkeypatch) -> None:
+        a = self._adapter()
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 20 * 1024 ** 3)
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 163840)
+        monkeypatch.setattr(a, '_weight_bytes', lambda m: 19 * 1024 ** 3)
+        # budget 16G, weights 19G -> avail < 0 -> 0 (not the 2k floor)
+        assert a._max_gpu_ctx('m', 40960) == 0
+
+    def test_calibrated_ctx_from_measurement(self, monkeypatch) -> None:
+        a = self._adapter()
+        # weights 15e9, kv 163840/token; high probe spills to an 18e9 budget.
+        measured = {
+            2048: (15335544320, 15335544320),     # fits (vram == size)
+            32768: (20368709120, 18000000000),    # spills -> budget 18e9
+        }
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 163840)
+        # (18e9*0.95 - 15e9)/163840 -> 12288 after rounding to 1024
+        assert a._calibrated_ctx('m', 262144) == 12288
+
+    def test_calibrated_ctx_both_fit_uses_high_probe(self, monkeypatch):
+        a = self._adapter()
+        measured = {2048: (5e9, 5e9), 32768: (9e9, 9e9)}   # both 100% GPU
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
+        assert a._calibrated_ctx('m', 262144) == 32768
+
+    def test_calibrated_ctx_zero_when_measure_fails(self, monkeypatch):
+        a = self._adapter()
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: (0, 0))
+        assert a._calibrated_ctx('m', 262144) == 0
+
     def test_default_ctx_prefers_stored(self, monkeypatch) -> None:
         a = self._adapter()
         monkeypatch.setattr(config, 'load_model_ctx', lambda: {'m': 16384})
