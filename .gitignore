@@ -5,3 +5,7 @@ __pycache__/
 *.local
 .DS_Store
 .guru/
+
+# benchmark artifacts (models.txt is tracked)
+bench/results-*.json
+bench/*.png

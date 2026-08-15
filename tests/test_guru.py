@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from guru import cli, config, session, skills, ui
+from guru import bench, bench_plot, cli, config, session, skills, ui
 from guru.adapters import anthropic as anth
 from guru.adapters import litellm as lite
 from guru.adapters.ollama import OllamaAdapter
@@ -1697,3 +1697,161 @@ class TestOutlineCode:
             self._read_output('/tmp/b.py', src))
         # regex fallback keeps def/import lines even when AST fails
         assert 'import sys' in out or 'def broken' in out
+
+
+class TestBenchModels:
+    def test_load_models_parses_adapter_and_filters(
+            self, tmp_path) -> None:
+        p = tmp_path / 'models.txt'
+        p.write_text(
+            "# a comment\nqwen3:14b\n\n  devstral:24b \n"
+            "litellm|aws/claude-4-8-opus\n", encoding='utf-8')
+        assert bench.load_models(p) == [
+            (None, 'qwen3:14b'),
+            (None, 'devstral:24b'),
+            ('litellm', 'aws/claude-4-8-opus'),
+        ]
+
+    def test_load_models_missing_returns_empty(self, tmp_path) -> None:
+        assert bench.load_models(tmp_path / 'nope.txt') == []
+
+
+class TestBenchMetrics:
+    def _agent(self, title, model, tool_names, tin, tout,
+               role=None, skill=None):
+        from guru.agents import Agent
+        a = Agent(id=title, title=title)
+        a.state.model = model
+        a.state.session_in = tin
+        a.state.session_out = tout
+        a.state.active_role = role
+        a.state.active_skill = skill
+        a.state.messages = [{'role': 'user', 'content': 'q'}]
+        for n in tool_names:
+            a.state.messages.append(
+                {'role': 'tool', 'tool_name': n, 'content': 'x'})
+        a.state.messages.append(
+            {'role': 'assistant', 'content': 'ANSWER'})
+        return a
+
+    def test_collect_metrics_aggregates(self) -> None:
+        main = self._agent('main', 'qwen3:14b',
+                           ['search_tools', 'read_file'], 100, 40)
+        sub = self._agent('agent1', 'qwen3:14b', ['read_file'], 20, 10,
+                          role='security-engineer', skill='code-review')
+        rec = bench.collect_metrics(
+            'qwen3:14b', num_ctx=40960, ceiling=40960, seconds=4.0,
+            agents=[main, sub])
+        assert rec['tokens_in'] == 120 and rec['tokens_out'] == 50
+        assert rec['tokens_per_sec'] == 12.5      # 50/4.0
+        assert rec['tool_count'] == 3
+        assert sorted(rec['tools_called']) == [
+            'read_file', 'read_file', 'search_tools']
+        assert rec['agents_used'] == 2
+        assert rec['agents'][1]['role'] == 'security-engineer'
+        assert rec['result'] == 'ANSWER'
+        assert rec['accuracy'] is None and rec['error'] is None
+
+    def test_collect_metrics_empty_agents(self) -> None:
+        rec = bench.collect_metrics('m', 4096, 4096, 0.0, [],
+                                    error='boom')
+        assert rec['agents_used'] == 0 and rec['result'] == ''
+        assert rec['error'] == 'boom' and rec['tokens_per_sec'] == 0.0
+
+
+class TestBenchOrchestrator:
+    def test_spawn_runs_child_and_counts_agents(self, monkeypatch) -> None:
+        import asyncio
+        from guru.adapters.base import Adapter
+
+        class FakeAdapter(Adapter):
+            name = 'fake'
+            def available(self): return True
+            def list_models(self): return []
+            def activate(self, m): pass
+            def summarise(self, t): return 's'
+
+            def run_turn(self):
+                st = session.current()
+                spawned = any(
+                    isinstance(m, dict) and m.get('tool_name') == 'spawn'
+                    for m in st.messages)
+                if st.can_spawn and not spawned:
+                    tools.spawn('sub task', role='', skill='')
+                    st.messages.append(
+                        {'role': 'tool', 'tool_name': 'spawn',
+                         'content': 'ok'})
+                st.session_out += 5
+                st.messages.append(
+                    {'role': 'assistant', 'content': 'done'})
+
+        base = session.SessionState()
+        base.adapter = FakeAdapter()
+        base.model = 'fake'
+        base.num_ctx = 4096
+        try:
+            agents = asyncio.run(bench.run_once(base))
+            titles = [a.title for a in agents]
+            assert 'main' in titles and len(agents) >= 2
+        finally:
+            tools.set_spawn_handler(None)
+            tools.set_check_handler(None)
+            tools.set_join_handler(None)
+
+
+class TestBenchRunner:
+    def test_writes_results_json(self, tmp_path, monkeypatch) -> None:
+        from guru.agents import Agent
+
+        class FakeAdapter:
+            name = 'fake'
+
+            def activate(self, m):
+                session.current().model = m
+                session.current().num_ctx = 4096
+                session.current().ctx_ceiling = 4096
+
+        monkeypatch.setattr(bench, '_build_adapters',
+                            lambda: [FakeAdapter()])
+        monkeypatch.setattr(bench, '_adapter_for',
+                            lambda name, built: built[0])
+
+        def fake_run_once(base):
+            a = Agent(id='main', title='main')
+            a.state.model = base.model
+            a.state.session_out = 10
+            a.state.messages = [{'role': 'assistant', 'content': 'A'}]
+            return [a]
+        monkeypatch.setattr(bench, 'run_once', fake_run_once)
+        # make asyncio.run a passthrough (run_once is a plain function here)
+        monkeypatch.setattr(bench.asyncio, 'run', lambda coro: coro)
+
+        path = bench.run_benchmark([(None, 'm1')], out_dir=tmp_path)
+        import json
+        data = json.loads(path.read_text(encoding='utf-8'))
+        assert len(data) == 1
+        assert data[0]['model'] == 'm1' and data[0]['result'] == 'A'
+        assert data[0]['tokens_out'] == 10
+
+
+class TestBenchPlot:
+    def test_points_skips_null_accuracy(self) -> None:
+        records = [
+            {'model': 'a', 'num_ctx': 4096, 'tokens_per_sec': 20.0,
+             'seconds': 5.0, 'accuracy': 80},
+            {'model': 'b', 'num_ctx': 8192, 'tokens_per_sec': 10.0,
+             'seconds': 9.0, 'accuracy': None},
+        ]
+        assert bench_plot.points(records, x_key='tokens_per_sec') == [
+            (20.0, 80, 'a (4096)')]
+
+    def test_render_writes_two_pngs(self, tmp_path) -> None:
+        import json
+        recs = [{'model': 'a', 'num_ctx': 4096, 'tokens_per_sec': 20.0,
+                 'seconds': 5.0, 'accuracy': 80}]
+        rp = tmp_path / 'results-x.json'
+        rp.write_text(json.dumps(recs), encoding='utf-8')
+        paths = bench_plot.render(rp, out_dir=tmp_path)
+        assert len(paths) == 2
+        for p in paths:
+            assert p.exists() and p.stat().st_size > 0

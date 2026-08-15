@@ -7,6 +7,7 @@ dependencies = [
     "anthropic>=0.120.2",
     "beautifulsoup4>=4.15.0",
     "ddgs>=9.14.4",
+    "matplotlib>=3.11.1",
     "ollama>=0.6.2",
     "openai>=2.53.0",
     "prompt-toolkit>=3.0.53",

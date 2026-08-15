@@ -1,0 +1,9 @@
+# One model per line, optionally adapter-qualified as 'adapter|model'.
+# No prefix = Ollama. '#' comments and blank lines ignored. Runs in order.
+qwen3:14b
+devstral-small-2:24b
+gpt-oss-20b-32k:latest
+batiai/qwen3.6-27b:q3
+# Cloud baseline via the configured litellm adapter (needs it set up in
+# ~/.guru/adapters.toml). Much faster; we want to see by how much.
+litellm|aws/claude-4-8-opus
