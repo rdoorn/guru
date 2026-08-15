@@ -5,6 +5,7 @@ model listing, context-window resolution, the tool-calling turn loop, and a
 daemon-reachable check with an on-demand model pull (moved from start.sh).
 """
 import platform
+import re
 import subprocess
 
 import ollama
@@ -13,6 +14,26 @@ from rich.markdown import Markdown
 from guru import config, session, ui
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
+
+# A weak model sometimes ends a turn by announcing an action ("Let me read the
+# files…") without calling a tool; guru would treat that as the final answer.
+# _looks_like_preamble catches that stall so run_turn can nudge it to act.
+_NUDGE_CAP = 2
+_PREAMBLE_RE = re.compile(
+    r"\b(let me|i'?ll|i will|let'?s|i'?m going to|i am going to|going to|"
+    r"start by|next[,]? i|first[,]? i)\b", re.IGNORECASE)
+
+
+def _looks_like_preamble(content: str) -> bool:
+    """True if text announces an action instead of answering — a short
+    'Let me… / I'll…' preamble, or one trailing off into a promised list.
+    Long substantive answers (the real result) do not match."""
+    if len(content) > 600:
+        return False
+    if content.rstrip().endswith((':', '…', '...')):
+        return True
+    return bool(_PREAMBLE_RE.search(content))
+
 
 # Smallest context to fall back to before giving up on fitting into memory.
 _CTX_FLOOR = 2048
@@ -491,17 +512,22 @@ class OllamaAdapter(Adapter):
 
             if not msg.tool_calls:
                 content = (msg.content or '').strip()
-                if not content and nudged < 1:
+                stalled = not content or _looks_like_preamble(content)
+                if stalled and nudged < _NUDGE_CAP:
                     nudged += 1
+                    reason = ("empty response" if not content
+                              else "announced an action but called no tool")
                     ui.console.print(
-                        "[dim yellow]\\[NUDGE][/dim yellow]"
-                        " empty response — retrying"
+                        f"[dim yellow]\\[NUDGE][/dim yellow] {reason}"
+                        " — asking it to act"
                     )
                     session.messages.append({
                         "role": "user",
                         "content": (
-                            "Please continue — use search_tools"
-                            " to find what you need, then call it."
+                            "Do not describe what you will do — do it now."
+                            " Call the tool you need in this reply (use"
+                            " search_tools first if it is not active). If you"
+                            " are genuinely finished, give the final answer."
                         ),
                     })
                     continue

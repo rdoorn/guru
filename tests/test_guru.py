@@ -375,6 +375,48 @@ class TestModelCtxStore:
         assert config.load_model_ctx() == {}
 
 
+class TestActNudge:
+    """Nudge weak models that announce an action but call no tool."""
+
+    def test_looks_like_preamble(self) -> None:
+        from guru.adapters.ollama import _looks_like_preamble as p
+        assert p("Let me read the files.") is True
+        assert p("I'll inspect the code next.") is True
+        assert p("Here is my plan:") is True
+        assert p("The code is clean and well tested.") is False
+        assert p("Let me " + "x" * 700) is False   # too long -> real answer
+
+    def test_run_turn_nudges_then_answers(self, monkeypatch) -> None:
+        import ollama
+        from guru.adapters.ollama import OllamaAdapter
+        a = OllamaAdapter()
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'inspect the code'}]
+        monkeypatch.setattr(session, 'messages', msgs)
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(a, '_fit_after_load', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        seq = [
+            ollama.Message(role='assistant',
+                           content='Let me read the files.', tool_calls=None),
+            ollama.Message(role='assistant',
+                           content='The code is well structured overall.',
+                           tool_calls=None),
+        ]
+        calls = {'n': 0}
+
+        def fake_collect():
+            m = seq[calls['n']]
+            calls['n'] += 1
+            return m
+        monkeypatch.setattr(a, '_collect_response', fake_collect)
+        a.run_turn()
+        assert calls['n'] == 2      # looped again after the nudge
+        assert any(m.get('role') == 'user'
+                   and 'do it now' in (m.get('content') or '').lower()
+                   for m in session.messages)
+
+
 class TestStreamingCancel:
     """The streamed turn accumulates chunks and aborts on cancel_requested."""
 
