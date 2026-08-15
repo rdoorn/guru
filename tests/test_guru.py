@@ -1,6 +1,7 @@
 """Unit tests for guru's pure helper functions across the package."""
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from guru import cli, config, session, skills, ui
 from guru.adapters import anthropic as anth
@@ -216,6 +217,103 @@ class TestResolveContextWindow:
         num_ctx, ceiling = self._adapter()._resolve_context_window('m')
         assert num_ctx == config.DEFAULT_NUM_CTX
         assert ceiling == 0
+
+
+class TestGpuAutoFit:
+    """GPU auto-fit default: KV math, budget clamp, and the default policy."""
+
+    def _adapter(self) -> OllamaAdapter:
+        return OllamaAdapter()
+
+    def test_kv_bytes_per_token(self, monkeypatch) -> None:
+        info = SimpleNamespace(modelinfo={
+            'general.architecture': 'qwen3',
+            'qwen3.block_count': 40,
+            'qwen3.attention.head_count': 40,
+            'qwen3.attention.head_count_kv': 8,
+            'qwen3.embedding_length': 5120,
+        })
+        monkeypatch.setattr(
+            'guru.adapters.ollama.ollama.show', lambda m: info)
+        # head_dim = 5120/40 = 128; 2*40*8*128*2.0 = 163840
+        assert self._adapter()._kv_bytes_per_token('m') == 163840
+
+    def test_kv_bytes_missing_metadata_is_zero(self, monkeypatch) -> None:
+        info = SimpleNamespace(modelinfo={'general.architecture': 'qwen3'})
+        monkeypatch.setattr(
+            'guru.adapters.ollama.ollama.show', lambda m: info)
+        assert self._adapter()._kv_bytes_per_token('m') == 0
+
+    def test_max_gpu_ctx_math(self, monkeypatch) -> None:
+        a = self._adapter()
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 24 * 1024 ** 3)
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 163840)
+        monkeypatch.setattr(a, '_weight_bytes', lambda m: 9 * 1024 ** 3)
+        assert a._max_gpu_ctx('m', 262144) == 63488      # not capped
+        assert a._max_gpu_ctx('m', 40960) == 40960       # capped at ceiling
+
+    def test_max_gpu_ctx_zero_when_no_budget(self, monkeypatch) -> None:
+        a = self._adapter()
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 163840)
+        monkeypatch.setattr(a, '_weight_bytes', lambda m: 0)
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 0)
+        assert a._max_gpu_ctx('m', 40960) == 0
+
+    def test_default_ctx_prefers_stored(self, monkeypatch) -> None:
+        a = self._adapter()
+        monkeypatch.setattr(config, 'load_model_ctx', lambda: {'m': 16384})
+        assert a._default_ctx('m', 4096, 40960) == 16384
+        assert a._default_ctx('m', 4096, 8192) == 8192   # capped at ceiling
+
+    def test_default_ctx_autofit_when_no_stored(self, monkeypatch) -> None:
+        a = self._adapter()
+        monkeypatch.setattr(config, 'load_model_ctx', lambda: {})
+        monkeypatch.setattr(a, '_max_gpu_ctx', lambda m, c: 32768)
+        assert a._default_ctx('m', 4096, 40960) == 32768
+
+    def test_default_ctx_falls_back_to_resolved(self, monkeypatch) -> None:
+        a = self._adapter()
+        monkeypatch.setattr(config, 'load_model_ctx', lambda: {})
+        monkeypatch.setattr(a, '_max_gpu_ctx', lambda m, c: 0)
+        assert a._default_ctx('m', 4096, 40960) == 4096
+
+    def test_list_models_reports_ceiling(self, monkeypatch) -> None:
+        models = SimpleNamespace(models=[
+            SimpleNamespace(model='qwen3:14b', size=9_000_000_000)])
+        monkeypatch.setattr(
+            'guru.adapters.ollama.ollama.list', lambda: models)
+        a = self._adapter()
+        monkeypatch.setattr(
+            a, '_resolve_context_window', lambda m: (4096, 40960))
+        monkeypatch.setattr(a, '_param_size', lambda m: '14B')
+        infos = a.list_models()
+        assert infos[0].context_window == 40960
+
+
+class TestModelCtxStore:
+    """Per-model context persistence (~/.guru/model_ctx.json)."""
+
+    def _isolate(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'GURU_HOME', tmp_path)
+        monkeypatch.setattr(
+            config, 'MODEL_CTX_PATH', tmp_path / 'model_ctx.json')
+
+    def test_save_and_load_roundtrip(self, tmp_path, monkeypatch) -> None:
+        self._isolate(tmp_path, monkeypatch)
+        config.save_model_ctx('qwen3:14b', 32768)
+        config.save_model_ctx('devstral', 65536)
+        assert config.load_model_ctx() == {
+            'qwen3:14b': 32768, 'devstral': 65536}
+
+    def test_save_ignores_empty(self, tmp_path, monkeypatch) -> None:
+        self._isolate(tmp_path, monkeypatch)
+        config.save_model_ctx('', 100)
+        config.save_model_ctx('m', 0)
+        assert config.load_model_ctx() == {}
+
+    def test_load_missing_returns_empty(self, tmp_path, monkeypatch) -> None:
+        self._isolate(tmp_path, monkeypatch)
+        assert config.load_model_ctx() == {}
 
 
 class TestGroupMessages:
@@ -817,11 +915,32 @@ class TestSystemContext:
 
 
 class TestAccessPromptDefaults:
-    """Access prompts default to allow on Enter but deny on any error."""
+    """Access prompts allow only on an explicit yes (Enter/y/yes); any other
+    input, junk, escape-sequence text, or error denies."""
 
     def test_path_enter_allows(self, monkeypatch) -> None:
         monkeypatch.setattr('builtins.input', lambda *a: '')
         assert files._ask_path('/x') is True
+
+    def test_path_y_and_yes_allow(self, monkeypatch) -> None:
+        monkeypatch.setattr('builtins.input', lambda *a: 'y')
+        assert files._ask_path('/x') is True
+        monkeypatch.setattr('builtins.input', lambda *a: 'YES')
+        assert files._ask_path('/x') is True
+
+    def test_path_junk_denies(self, monkeypatch) -> None:
+        monkeypatch.setattr('builtins.input', lambda *a: 'x')
+        assert files._ask_path('/x') is False
+
+    def test_path_escape_sequence_denies(self, monkeypatch) -> None:
+        # The CSI-u text a modifyOtherKeys terminal emits for Ctrl+C must NOT
+        # be read as approval (the reported bug).
+        monkeypatch.setattr('builtins.input', lambda *a: '\x1b[27;5;99~')
+        assert files._ask_path('/x') is False
+
+    def test_domain_junk_denies(self, monkeypatch) -> None:
+        monkeypatch.setattr('builtins.input', lambda *a: 'maybe')
+        assert tools._ask_domain('x.com') is False
 
     def test_path_explicit_no_denies(self, monkeypatch) -> None:
         monkeypatch.setattr('builtins.input', lambda *a: 'no')

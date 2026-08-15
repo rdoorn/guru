@@ -207,11 +207,18 @@ def run() -> None:
         # the exact operation). Shown via run_in_terminal so it works in both
         # the [main] prompt and the viewer; serialized so agents don't collide.
         def _ask() -> bool:
+            # Drop modifyOtherKeys/raw mode for the prompt so Ctrl+C raises a
+            # real KeyboardInterrupt (deny) and stray keys aren't re-encoded as
+            # CSI-u text; restore the modes afterwards. Only an explicit yes
+            # (Enter default, y, or yes) approves — anything else denies.
+            ui.reset_terminal()
             try:
                 ans = input(f"{question}\n[Y/n] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 return False
-            return not ans.startswith('n')
+            finally:
+                ui.enable_terminal_modes()
+            return ans in ('', 'y', 'yes')
 
         async def _prompt() -> bool:
             return await run_in_terminal(_ask)

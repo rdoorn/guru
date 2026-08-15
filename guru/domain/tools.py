@@ -168,12 +168,13 @@ _USE_SKILL_SPEC = {
 
 
 def _ask_domain(question: str) -> bool:
-    """Default terminal approval prompt. Enter approves; errors deny."""
+    """Default terminal approval prompt. Only an explicit yes (Enter, y, or
+    yes) approves; any other input, or an error, denies."""
     try:
         answer = input(f"{question}\n[Y/n] ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return False
-    return not answer.startswith('n')
+    return answer in ('', 'y', 'yes')
 
 
 def ensure_domain_allowed(domain: str) -> bool:

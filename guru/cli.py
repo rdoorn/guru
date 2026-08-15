@@ -279,6 +279,7 @@ def _context_command() -> None:
     if isinstance(session.adapter, OllamaAdapter):
         # Respect the manual choice; don't let auto-fit override it.
         session.adapter.mark_fitted()
+    config.save_model_ctx(session.model, session.num_ctx)
     ui.console.print(
         f"[green]Context[/green] set to {session.num_ctx:,}"
         f" (applies on the next turn)."
@@ -355,6 +356,9 @@ def main() -> None:
 
     from guru import tui
     tui.run()
+    # Remember the context the (final) model ran at, so the next launch loads
+    # it directly instead of recomputing the GPU fit.
+    config.save_model_ctx(session.model, session.num_ctx)
 
 
 if __name__ == '__main__':

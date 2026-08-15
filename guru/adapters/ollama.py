@@ -4,6 +4,7 @@ Wraps the existing local-Ollama behaviour behind the Adapter interface:
 model listing, context-window resolution, the tool-calling turn loop, and a
 daemon-reachable check with an on-demand model pull (moved from start.sh).
 """
+import platform
 import subprocess
 
 import ollama
@@ -48,12 +49,14 @@ class OllamaAdapter(Adapter):
             return []
         infos = []
         for m in sorted(models, key=lambda x: x.model):
-            num_ctx, _ = self._resolve_context_window(m.model)
+            num_ctx, ceiling = self._resolve_context_window(m.model)
             infos.append(ModelInfo(
                 adapter=self.name,
                 model_id=m.model,
                 label=m.model,
-                context_window=num_ctx,
+                # Report the model's architecture max so /models and /context
+                # agree; the running context is shown in the status bar.
+                context_window=ceiling or num_ctx,
                 size=self._param_size(m.model),
                 # On-disk weight size is a good proxy for the RAM needed to
                 # run the model; used to flag models that won't fit memory.
@@ -65,10 +68,27 @@ class OllamaAdapter(Adapter):
         self._ensure_daemon()
         self._ensure_model(model_id)
         session.model = model_id
-        session.num_ctx, session.ctx_ceiling = (
-            self._resolve_context_window(model_id))
+        num_ctx, ceiling = self._resolve_context_window(model_id)
+        session.ctx_ceiling = ceiling
+        # First-selection default only: apply the stored per-model choice or a
+        # fresh GPU auto-fit when the user gave no explicit --num-ctx. A manual
+        # /context or --num-ctx always wins; the reported max is untouched.
+        if not session.num_ctx_override:
+            num_ctx = self._default_ctx(model_id, num_ctx, ceiling)
+        session.num_ctx = num_ctx
         session.model_size = self._param_size(model_id)
         self._preload_and_fit()
+        config.save_model_ctx(model_id, session.num_ctx)
+
+    def _default_ctx(self, model: str, resolved: int, ceiling: int) -> int:
+        """First-selection default context: a stored choice from a prior
+        session wins; otherwise the GPU auto-fit; otherwise the resolved
+        default. Never exceeds the architecture ceiling."""
+        stored = config.load_model_ctx().get(model)
+        if stored:
+            return min(int(stored), ceiling or int(stored))
+        auto = self._max_gpu_ctx(model, ceiling)
+        return auto or resolved
 
     # --- context / metadata --------------------------------------------------
 
@@ -136,6 +156,84 @@ class OllamaAdapter(Adapter):
             subprocess.run(['ollama', 'pull', model_id], check=False)
         except Exception as e:
             ui.console.print(f"[red]Could not pull {model_id}: {e}[/red]")
+
+    # --- GPU auto-fit (first-selection default) ------------------------------
+
+    def _total_gpu_bytes(self) -> int:
+        """Best-effort total GPU memory in bytes (0 if it can't be found)."""
+        try:
+            out = subprocess.run(
+                ['nvidia-smi', '--query-gpu=memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=3)
+            if out.returncode == 0 and out.stdout.strip():
+                mib = int(out.stdout.strip().splitlines()[0])
+                return mib * 1024 * 1024
+        except Exception:                                # noqa: BLE001
+            pass
+        # Apple Silicon: unified memory; the GPU working set is a fraction.
+        if platform.system() == 'Darwin':
+            try:
+                out = subprocess.run(
+                    ['sysctl', '-n', 'hw.memsize'],
+                    capture_output=True, text=True, timeout=3)
+                if out.returncode == 0 and out.stdout.strip():
+                    ram = int(out.stdout.strip())
+                    return int(ram * config.MAC_GPU_FRACTION)
+            except Exception:                            # noqa: BLE001
+                pass
+        return 0
+
+    def _kv_bytes_per_token(self, model: str) -> int:
+        """KV-cache bytes per token from model metadata (0 if unknown)."""
+        try:
+            mi = ollama.show(model).modelinfo or {}
+        except Exception:                                # noqa: BLE001
+            return 0
+        arch = mi.get('general.architecture', '')
+
+        def _int(key: str) -> int:
+            return int(mi.get(f'{arch}.{key}', 0) or 0)
+
+        layers = _int('block_count')
+        heads = _int('attention.head_count')
+        kv_heads = _int('attention.head_count_kv') or heads
+        emb = _int('embedding_length')
+        head_dim = _int('attention.key_length') or (
+            emb // heads if heads else 0)
+        if not (layers and kv_heads and head_dim):
+            return 0
+        # 2 = one tensor each for keys and values.
+        return int(2 * layers * kv_heads * head_dim * config.KV_CACHE_BYTES)
+
+    def _weight_bytes(self, model: str) -> int:
+        """On-disk weight size (proxy for VRAM weights); 0 if unknown."""
+        try:
+            for m in ollama.list().models:
+                if m.model == model:
+                    return int(getattr(m, 'size', 0) or 0)
+        except Exception:                                # noqa: BLE001
+            pass
+        return 0
+
+    def _max_gpu_ctx(self, model: str, ceiling: int) -> int:
+        """Largest num_ctx whose weights + KV cache stay within the GPU budget
+        (minus headroom). 0 when the budget or metadata is unavailable, so the
+        caller can fall back to the plain default."""
+        total = self._total_gpu_bytes()
+        kv = self._kv_bytes_per_token(model)
+        if total <= 0 or kv <= 0:
+            return 0
+        budget = total * (1 - config.GPU_MEM_HEADROOM)
+        avail = budget - self._weight_bytes(model) - config.FIT_OVERHEAD_BYTES
+        if avail <= 0:
+            return _CTX_FLOOR
+        ctx = int(avail // kv)
+        ctx = (ctx // 1024) * 1024                      # multiple of 1024
+        ctx = max(_CTX_FLOOR, ctx)
+        if ceiling:
+            ctx = min(ctx, ceiling)
+        return ctx
 
     # --- fit context to memory ----------------------------------------------
 

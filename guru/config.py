@@ -14,6 +14,7 @@ GURU_HOME = Path(os.path.expanduser('~/.guru'))
 GURU_MD_PATH = GURU_HOME / 'GURU.md'                 # global base persona
 ADAPTERS_PATH = GURU_HOME / 'adapters.toml'          # adapter configuration
 GURU_SKILLS_DIR = GURU_HOME / 'skills'               # roles & skills overlays
+MODEL_CTX_PATH = GURU_HOME / 'model_ctx.json'        # per-model chosen context
 
 PROJECT_GURU_DIR = Path.cwd() / '.guru'
 PROJECT_GURU_MD = PROJECT_GURU_DIR / 'GURU.md'       # appended to the global
@@ -45,6 +46,15 @@ DEFAULT_NUM_CTX = 4096
 COMPACT_AT = 0.85
 # Number of most-recent turn-groups kept verbatim during compaction.
 KEEP_RECENT_GROUPS = 4
+
+# GPU auto-fit: when a model is first selected (and the user gave no explicit
+# --num-ctx), guru picks the largest context that stays entirely on the GPU.
+# It is only a default: a stored per-model choice or a manual /context or
+# --num-ctx always wins, and the reported architecture max is never touched.
+GPU_MEM_HEADROOM = 0.20       # fraction of GPU memory left free (other apps)
+MAC_GPU_FRACTION = 0.75       # Apple-Silicon Metal working set ~= 75% of RAM
+KV_CACHE_BYTES = 2.0          # bytes per KV element (f16); q8_0 ~= 1.0
+FIT_OVERHEAD_BYTES = 512 * 1024 * 1024   # compute buffers / activations slack
 
 # The GURU.md contents are appended verbatim to the model's system prompt, so
 # this default holds only model-directed instructions — no human-facing notes
@@ -314,6 +324,35 @@ def save_adapter_configs(configs: list) -> None:
     GURU_HOME.mkdir(parents=True, exist_ok=True)
     text = '\n'.join(lines).rstrip() + '\n'
     ADAPTERS_PATH.write_text(text, encoding='utf-8')
+
+
+def load_model_ctx() -> dict:
+    """Return the per-model chosen context sizes ({model_id: num_ctx})."""
+    try:
+        data = json.loads(MODEL_CTX_PATH.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_model_ctx(model: str, num_ctx: int) -> None:
+    """Remember the context ``model`` was last run at, for next selection.
+
+    Stored globally (a fit is machine+model specific, not project specific) so
+    the size is reused on the next load instead of being recomputed.
+    """
+    if not model or not num_ctx:
+        return
+    data = load_model_ctx()
+    if data.get(model) == int(num_ctx):
+        return
+    data[model] = int(num_ctx)
+    try:
+        GURU_HOME.mkdir(parents=True, exist_ok=True)
+        MODEL_CTX_PATH.write_text(
+            json.dumps(data, indent=2), encoding='utf-8')
+    except OSError:
+        pass
 
 
 # Create global config on import; project state stays lazy.
