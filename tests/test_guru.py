@@ -279,22 +279,38 @@ class TestGpuAutoFit:
         # (18e9*0.95 - 15e9)/163840 -> 12288 after rounding to 1024
         assert a._calibrated_ctx('m', 262144) == 12288
 
-    def test_calibrated_ctx_both_fit_extends_to_ceiling(self, monkeypatch):
+    # sizes chosen so the probe deltas give kv = 100000 bytes/token exactly:
+    #   (8_072_000_000 - 5_000_000_000) / (32768 - 2048) = 100000
+    _FIT = {2048: (5_000_000_000, 5_000_000_000),
+            32768: (8_072_000_000, 8_072_000_000)}      # both 100% GPU
+
+    def test_calibrated_ctx_both_fit_ceiling_probe_fits(self, monkeypatch):
         a = self._adapter()
-        measured = {2048: (5e9, 5e9), 32768: (9e9, 9e9)}   # both 100% GPU
+        measured = dict(self._FIT)
+        measured[131072] = (13_000_000_000, 13_000_000_000)   # ceiling fits
         monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
         monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
         monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 10 ** 12)  # huge
-        # tiny KV + huge budget -> use the full ceiling, not the 32k probe cap
+        # ceiling probe fits -> use the full ceiling, not the 32k probe cap
         assert a._calibrated_ctx('m', 131072) == 131072
 
-    def test_calibrated_ctx_both_fit_keeps_at_least_probe(self, monkeypatch):
+    def test_calibrated_ctx_extend_probe_spills(self, monkeypatch):
         a = self._adapter()
-        measured = {2048: (5e9, 5e9), 32768: (9e9, 9e9)}
+        measured = dict(self._FIT)
+        measured[131072] = (30_000_000_000, 18_000_000_000)   # spills
         monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
         monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
-        # platform budget below weights -> can't extend, but hi fit -> keep hi
-        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: int(5.2e9))
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 10 ** 12)
+        # weights = 5e9 - 2048*100000 = 4_795_200_000
+        # (18e9*0.95 - weights)/100000 = 123048 -> round down to 122880
+        assert a._calibrated_ctx('m', 131072) == 122880
+
+    def test_calibrated_ctx_no_budget_keeps_probe(self, monkeypatch):
+        a = self._adapter()
+        measured = dict(self._FIT)
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 0)   # unknown
         assert a._calibrated_ctx('m', 262144) == 32768
 
     def test_calibrated_ctx_zero_when_measure_fails(self, monkeypatch):

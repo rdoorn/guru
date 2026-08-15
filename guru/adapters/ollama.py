@@ -207,27 +207,41 @@ class OllamaAdapter(Adapter):
         if spill:
             # A spill measured the real GPU budget directly.
             avail = spill * config.GPU_FIT_SAFETY - weights
+            ctx = int(avail // kv) if avail > 0 else _CTX_FLOOR
         else:
-            # Both probes fit — extend toward the ceiling using the platform
-            # budget estimate against the MEASURED weights/kv (only the budget
-            # is estimated now, not the per-token cost). Never drop below hi,
-            # which is known to fit; the load-time safety net corrects any
-            # over-estimate by scaling down on a real spill.
-            total = self._total_gpu_bytes()
-            if total <= 0:
-                return min(hi, ceiling or hi)
-            avail = (total * (1 - config.GPU_MEM_HEADROOM)
-                     - weights - config.FIT_OVERHEAD_BYTES)
-            if avail <= 0:
-                return min(hi, ceiling or hi)
-        ctx = int(avail // kv)
+            # Both moderate probes fit — the platform estimate under-reads the
+            # real budget on unified memory, so probe near the ceiling to find
+            # the true maximum by measurement rather than trusting the guess.
+            ctx = self._extend_fit(ceiling, hi, weights, kv)
         ctx = (ctx // 1024) * 1024
-        if not spill:
-            ctx = max(ctx, hi)                       # hi is known to fit
         ctx = max(_CTX_FLOOR, ctx)
         if ceiling:
             ctx = min(ctx, ceiling)
         return ctx
+
+    def _extend_fit(self, ceiling: int, hi: int, weights: float,
+                    kv: float) -> int:
+        """Both moderate probes fit: find the true max by probing near the
+        ceiling. The probe is bounded (~1.5x the platform estimate) so it can
+        never request a runaway KV buffer. If the probe fits, use it; if it
+        spills, the measured budget gives the exact max. Falls back to the
+        fitting probe ``hi`` when no budget can be determined."""
+        total = self._total_gpu_bytes()
+        if total <= 0:
+            return hi
+        rough = total * (1 - config.GPU_MEM_HEADROOM) * 1.5
+        cap = int((rough - weights) / kv) if kv else hi
+        probe = min(ceiling or cap, max(hi * 2, cap))
+        probe = max((probe // 1024) * 1024, hi)
+        if ceiling:
+            probe = min(probe, ceiling)
+        size_p, vram_p = self._measure_at(probe)
+        if size_p <= 0:
+            return hi
+        if not (vram_p and vram_p < size_p):
+            return probe                         # the probe fits the GPU
+        avail = vram_p * config.GPU_FIT_SAFETY - weights
+        return max(hi, int(avail // kv)) if avail > 0 else hi
 
     def _report_kv_type(self, model: str, measured_kv: float) -> None:
         """Log the KV cache type inferred from the measured per-token cost vs
