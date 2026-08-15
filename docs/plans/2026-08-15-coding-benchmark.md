@@ -32,13 +32,21 @@ The fixed prompt (define once as `guru/bench.py::PROMPT`):
 
 **Step 2: create `bench/models.txt`:**
 ```
-# One Ollama model per line (model[:tag]). '#' comments and blanks ignored.
-# Edit to taste; the benchmark runs these in order.
+# One model per line, optionally adapter-qualified as 'adapter|model'.
+# No prefix = Ollama. '#' comments and blanks ignored. Runs in order.
 qwen3:14b
 devstral-small-2:24b
 gpt-oss-20b-32k:latest
 batiai/qwen3.6-27b:q3
+# Cloud baseline via the configured litellm adapter (much faster; we want the
+# magnitude). Requires the litellm adapter set up in ~/.guru/adapters.toml.
+litellm|aws/claude-4-8-opus
 ```
+
+`load_models` returns `[(adapter_name_or_None, model), ...]` — split each line
+on the first `|`; no `|` → `(None, line)` (Ollama). Adjust the Task-1 tests to
+assert the tuple form (e.g. `('litellm', 'aws/claude-4-8-opus')` and
+`(None, 'qwen3:14b')`).
 
 **Step 3: failing test** (append to `tests/test_guru.py`; add `from guru import bench` to imports):
 ```python
@@ -279,12 +287,26 @@ Note: keep the coordinator self-contained in `bench.py`; do not modify
 
 **Files:** Modify `guru/bench.py`; Test `tests/test_guru.py::TestBenchRunner`.
 
-**Step 1: implement** `run_benchmark(models, out_dir=BENCH_DIR)`:
-- For each model id: create `OllamaAdapter()`, a fresh `SessionState` as the
-  base, `session.use(base)`, `session.adapter = base.adapter`,
-  `base.adapter.activate(model)` (fills `base.model/num_ctx/ctx_ceiling`),
-  wrapped in try/except → on error record `collect_metrics(..., agents=[],
-  error=str(e))` (guard `agents=[]` in collect_metrics: `result=''`).
+**Adapter resolution (multi-provider).** The runner must serve both Ollama and
+cloud (litellm) models. Reuse guru's own adapter construction: call
+`cli._build_adapters()` (or `config.load_adapter_configs()` + the adapter
+classes) once to get the configured adapters keyed by type/name. A small
+`_adapter_for(adapter_name)` returns the `OllamaAdapter` when `adapter_name` is
+None, else the configured adapter whose type/name matches (e.g. `litellm`).
+Note: only Ollama has the GPU auto-fit; for litellm, `activate` sets its own
+`num_ctx` (or leave guru's default) — `collect_metrics` just records whatever
+`base.num_ctx/ctx_ceiling` end up as. The headless orchestrator is
+adapter-agnostic (it only calls `session.adapter.run_turn`), and spawn is known
+to work on Opus/litellm, so multi-agent runs are measured there too.
+
+**Step 1: implement** `run_benchmark(models, out_dir=BENCH_DIR)` where `models`
+is the `[(adapter_name, model), ...]` list from `load_models`:
+- For each `(adapter_name, model)`: resolve the adapter via `_adapter_for`, a
+  fresh `SessionState` as the base, `session.use(base)`,
+  `session.adapter = adapter`, `adapter.activate(model)` (fills
+  `base.model/num_ctx/ctx_ceiling`), wrapped in try/except → on error record
+  `collect_metrics(..., agents=[], error=str(e))` (guard `agents=[]` in
+  collect_metrics: `result=''`).
 - Time `asyncio.run(run_once(base))`; `collect_metrics(model, base.num_ctx,
   base.ctx_ceiling, seconds, agents)`.
 - Print a one-line progress note per model via `print()` (this is a CLI

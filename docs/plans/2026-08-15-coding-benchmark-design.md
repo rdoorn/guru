@@ -25,9 +25,14 @@ actual search_tools/tool pipeline, not raw Ollama.
 
 **Components**
 
-1. `bench/models.txt` — curated, editable list (one `model[:tag]` per line;
-   `#` comments). Seeded with the current coding models. If missing, the
-   runner falls back to the coding models found in `ollama list`.
+1. `bench/models.txt` — curated, editable list. Each line is `[adapter|]model`
+   (`#` comments/blanks ignored); no prefix = Ollama, `litellm|…` = the
+   configured litellm adapter. Seeded with the current coding models plus a
+   cloud baseline `litellm|aws/claude-4-8-opus` so we see how far ahead a
+   frontier cloud model is (we expect much faster — the point is to quantify
+   by how much). The runner resolves each model's adapter via guru's own
+   adapter config (only Ollama gets the GPU auto-fit; litellm uses its own
+   context).
 
 2. `guru/bench.py` — headless runner. Per model:
    - Fresh `SessionState`; `session.adapter = OllamaAdapter(); adapter.activate(
