@@ -23,6 +23,7 @@ from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 from rich.console import Console
+from rich.text import Text
 from rich.theme import Theme
 
 from guru import config, session
@@ -509,9 +510,39 @@ def note_thinking() -> None:
 
 
 def note_tool(name: str, arg: str) -> None:
-    """Show a tool invocation, e.g. '* web_search kubernetes version'."""
-    text = f"* {name} {arg}".rstrip()
-    console.print(text, style="cyan", markup=False)
+    """Show a tool invocation, e.g. '* web_search kubernetes version'. The tool
+    name is cyan and the argument (path/query) magenta, so it reads the same
+    whether a path is relative or absolute (rich's auto-highlight only tinted
+    absolute paths, which looked inconsistent)."""
+    line = Text("* ", style="cyan")
+    line.append(name, style="cyan")
+    if arg:
+        line.append(" ")
+        line.append(arg, style="magenta")
+    console.print(line)
+
+
+def _fmt_bytes(n: int) -> str:
+    """Human byte size: 80b, 1.5k, 50k, 3.2M."""
+    if n < 1024:
+        return f"{n}b"
+    k = n / 1024
+    if k < 1024:
+        return f"{k:.0f}k" if k >= 10 else f"{k:.1f}k"
+    m = k / 1024
+    return f"{m:.0f}M" if m >= 10 else f"{m:.1f}M"
+
+
+def _fmt_size(nbytes: int) -> str:
+    """'12.3k · ~3.1k tok' — bytes plus a ~4-chars/token estimate."""
+    tok = nbytes // 4
+    tstr = f"{tok / 1000:.1f}k" if tok >= 1000 else str(tok)
+    return f"{_fmt_bytes(nbytes)} · ~{tstr} tok"
+
+
+def note_tool_result(nbytes: int) -> None:
+    """Show how much a tool returned — the context cost of its output."""
+    console.print(f"  {_fmt_size(nbytes)}", style="dim")
 
 
 def debug(text: str) -> None:

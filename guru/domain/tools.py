@@ -632,18 +632,21 @@ def execute_tool(name: str, arguments: dict) -> str:
         result = search_tools(**arguments)
         for tn in _match_tools(arguments.get("query", "")):
             activate(tn)
-        return result
-    if name == "use_skill":
-        return use_skill(**arguments)
-    if name == "spawn":
-        return spawn(**arguments)
-    if name == "check":
-        return check(**arguments)
-    if name == "join":
-        return join(**arguments)
-    if name in TOOL_REGISTRY:
+    elif name == "use_skill":
+        result = use_skill(**arguments)
+    elif name == "spawn":
+        result = spawn(**arguments)
+    elif name == "check":
+        result = check(**arguments)
+    elif name == "join":
+        result = join(**arguments)
+    elif name in TOOL_REGISTRY:
         try:
-            return TOOL_REGISTRY[name]["fn"](**arguments)
-        except Exception as e:
-            return f"Tool error: {e}"
-    return f"Unknown tool: {name}"
+            result = TOOL_REGISTRY[name]["fn"](**arguments)
+        except Exception as e:                       # noqa: BLE001
+            result = f"Tool error: {e}"
+    else:
+        result = f"Unknown tool: {name}"
+    # Show the output's size — the context cost of this tool result.
+    ui.note_tool_result(len(result))
+    return result

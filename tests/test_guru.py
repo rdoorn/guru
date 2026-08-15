@@ -1106,6 +1106,33 @@ class TestAccessPromptDefaults:
         assert tools._ask_domain('x.com') is False
 
 
+class TestToolSizeFormat:
+    """Human byte/token formatting for the per-tool result size line."""
+
+    def test_fmt_bytes(self) -> None:
+        assert ui._fmt_bytes(80) == '80b'
+        assert ui._fmt_bytes(1536) == '1.5k'
+        assert ui._fmt_bytes(51200) == '50k'
+        assert ui._fmt_bytes(5 * 1024 * 1024) == '5.0M'
+
+    def test_fmt_size_includes_tokens(self) -> None:
+        assert ui._fmt_size(40) == '40b · ~10 tok'
+        assert '~2.0k tok' in ui._fmt_size(8000)   # 8000/4 = 2000 tok
+
+    def test_execute_tool_reports_size_and_returns_result(
+            self, monkeypatch) -> None:
+        sizes = []
+        monkeypatch.setattr(ui, 'note_tool_result', sizes.append)
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        tools.set_spawn_handler(lambda t, r, s: 'RESULT-9')
+        try:
+            out = tools.execute_tool('spawn', {'task': 't'})
+        finally:
+            tools.set_spawn_handler(None)
+        assert out == 'RESULT-9'
+        assert sizes == [len('RESULT-9')]
+
+
 class TestOptionalToolParams:
     """Optional params are excluded from adapter 'required' schemas."""
 
