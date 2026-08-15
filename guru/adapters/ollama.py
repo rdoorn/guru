@@ -202,14 +202,28 @@ class OllamaAdapter(Adapter):
             return min(hi, ceiling or hi)            # fit at both probes
         weights = size_lo - lo * kv
         self._report_kv_type(model, kv)
-        if vram_hi and vram_hi < size_hi:
-            budget = vram_hi
-        elif vram_lo and vram_lo < size_lo:
-            budget = vram_lo
+        spill = vram_hi if (vram_hi and vram_hi < size_hi) else (
+            vram_lo if (vram_lo and vram_lo < size_lo) else 0)
+        if spill:
+            # A spill measured the real GPU budget directly.
+            avail = spill * config.GPU_FIT_SAFETY - weights
         else:
-            return min(hi, ceiling or hi)            # both probes fit the GPU
-        ctx = int((budget * config.GPU_FIT_SAFETY - weights) / kv)
+            # Both probes fit — extend toward the ceiling using the platform
+            # budget estimate against the MEASURED weights/kv (only the budget
+            # is estimated now, not the per-token cost). Never drop below hi,
+            # which is known to fit; the load-time safety net corrects any
+            # over-estimate by scaling down on a real spill.
+            total = self._total_gpu_bytes()
+            if total <= 0:
+                return min(hi, ceiling or hi)
+            avail = (total * (1 - config.GPU_MEM_HEADROOM)
+                     - weights - config.FIT_OVERHEAD_BYTES)
+            if avail <= 0:
+                return min(hi, ceiling or hi)
+        ctx = int(avail // kv)
         ctx = (ctx // 1024) * 1024
+        if not spill:
+            ctx = max(ctx, hi)                       # hi is known to fit
         ctx = max(_CTX_FLOOR, ctx)
         if ceiling:
             ctx = min(ctx, ceiling)
@@ -217,20 +231,31 @@ class OllamaAdapter(Adapter):
 
     def _report_kv_type(self, model: str, measured_kv: float) -> None:
         """Log the KV cache type inferred from the measured per-token cost vs
-        the f16 value from metadata — the only reliable way to confirm it,
-        since Ollama does not expose the setting over its API."""
+        the f16 value from metadata — the only way to confirm it, since Ollama
+        does not expose the setting over its API. Only claims a type when the
+        ratio lands near a known quant level; some architectures (sliding
+        window / MoE, e.g. gpt-oss) don't match the simple f16 formula, so it
+        reports the measured cost without guessing rather than misleading."""
         meta = self._kv_bytes_per_token(model)
         if not meta:
             return
         ratio = measured_kv / meta
-        kind = 'f16'
-        if ratio < 0.375:
-            kind = 'q4_0'
-        elif ratio < 0.75:
+        kind = None
+        if 0.85 <= ratio <= 1.2:
+            kind = 'f16'
+        elif 0.4 <= ratio <= 0.65:
             kind = 'q8_0'
-        ui.console.print(
-            f"[dim]KV cache ~{measured_kv / 1024:.0f} KB/token — looks like"
-            f" {kind} (f16 would be ~{meta / 1024:.0f} KB).[/dim]")
+        elif 0.18 <= ratio <= 0.32:
+            kind = 'q4_0'
+        kb = measured_kv / 1024
+        if kind:
+            ui.console.print(
+                f"[dim]KV cache ~{kb:.0f} KB/token — {kind}"
+                f" (f16 would be ~{meta / 1024:.0f} KB).[/dim]")
+        else:
+            ui.console.print(
+                f"[dim]KV cache ~{kb:.1f} KB/token (measured; type"
+                f" indeterminate for this model's attention).[/dim]")
 
     def _total_gpu_bytes(self) -> int:
         """Best-effort total GPU memory in bytes (0 if it can't be found)."""
@@ -387,6 +412,47 @@ class OllamaAdapter(Adapter):
 
     # --- turn loop -----------------------------------------------------------
 
+    def _collect_response(self):
+        """Stream a chat response, checking cancel between chunks so a running
+        generation can be interrupted (Ctrl+C sets cancel_requested). Returns
+        the assembled assistant Message, or None if cancelled mid-stream. The
+        stream is closed on cancel, which aborts generation server-side."""
+        content: list = []
+        tool_calls: list = []
+        prompt_ct = eval_ct = 0
+        stream = ollama.chat(
+            model=session.model,
+            messages=session.messages,
+            think=self._supports_thinking(session.model),
+            tools=session.active_tools,
+            options={'num_ctx': session.num_ctx},
+            stream=True,
+        )
+        for chunk in stream:
+            if session.cancel_requested:
+                try:
+                    stream.close()
+                except Exception:                        # noqa: BLE001
+                    pass
+                return None
+            m = getattr(chunk, 'message', None)
+            if m is not None:
+                if getattr(m, 'content', None):
+                    content.append(m.content)
+                if getattr(m, 'tool_calls', None):
+                    tool_calls.extend(m.tool_calls)
+            prompt_ct = getattr(chunk, 'prompt_eval_count', 0) or prompt_ct
+            eval_ct = getattr(chunk, 'eval_count', 0) or eval_ct
+        session.session_in += prompt_ct
+        session.session_out += eval_ct
+        if prompt_ct:
+            session.ctx_used = prompt_ct
+        return ollama.Message(
+            role='assistant',
+            content=''.join(content),
+            tool_calls=tool_calls or None,
+        )
+
     def run_turn(self) -> None:
         session.cancel_requested = False
         called: set = set()
@@ -396,27 +462,13 @@ class OllamaAdapter(Adapter):
                 ui.console.print("[yellow]* cancelled[/yellow]")
                 return
             ui.note_thinking()
-            # Non-streaming for tool-call rounds: more reliable tool-call
-            # detection; streaming is reserved for the final text answer.
-            response = ollama.chat(
-                model=session.model,
-                messages=session.messages,
-                think=self._supports_thinking(session.model),
-                tools=session.active_tools,
-                options={'num_ctx': session.num_ctx},
-            )
+            msg = self._collect_response()
+            if msg is None:                  # cancelled mid-generation
+                ui.console.print("[yellow]* cancelled[/yellow]")
+                return
             # The model is now loaded — check for CPU spill and scale down.
             self._fit_after_load()
-
-            session.session_in += (
-                getattr(response, 'prompt_eval_count', 0) or 0)
-            session.session_out += (
-                getattr(response, 'eval_count', 0) or 0)
-            session.ctx_used = (
-                getattr(response, 'prompt_eval_count', 0) or session.ctx_used)
             ui.status_draw()
-
-            msg = response.message
 
             ui.debug(
                 f"content={msg.content!r} tool_calls={msg.tool_calls}")

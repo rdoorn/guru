@@ -279,11 +279,22 @@ class TestGpuAutoFit:
         # (18e9*0.95 - 15e9)/163840 -> 12288 after rounding to 1024
         assert a._calibrated_ctx('m', 262144) == 12288
 
-    def test_calibrated_ctx_both_fit_uses_high_probe(self, monkeypatch):
+    def test_calibrated_ctx_both_fit_extends_to_ceiling(self, monkeypatch):
         a = self._adapter()
         measured = {2048: (5e9, 5e9), 32768: (9e9, 9e9)}   # both 100% GPU
         monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
         monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 10 ** 12)  # huge
+        # tiny KV + huge budget -> use the full ceiling, not the 32k probe cap
+        assert a._calibrated_ctx('m', 131072) == 131072
+
+    def test_calibrated_ctx_both_fit_keeps_at_least_probe(self, monkeypatch):
+        a = self._adapter()
+        measured = {2048: (5e9, 5e9), 32768: (9e9, 9e9)}
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
+        # platform budget below weights -> can't extend, but hi fit -> keep hi
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: int(5.2e9))
         assert a._calibrated_ctx('m', 262144) == 32768
 
     def test_calibrated_ctx_zero_when_measure_fails(self, monkeypatch):
@@ -346,6 +357,55 @@ class TestModelCtxStore:
     def test_load_missing_returns_empty(self, tmp_path, monkeypatch) -> None:
         self._isolate(tmp_path, monkeypatch)
         assert config.load_model_ctx() == {}
+
+
+class TestStreamingCancel:
+    """The streamed turn accumulates chunks and aborts on cancel_requested."""
+
+    def _adapter(self) -> OllamaAdapter:
+        return OllamaAdapter()
+
+    def _chunk(self, content='', tool_calls=None, pin=0, ein=0):
+        return SimpleNamespace(
+            message=SimpleNamespace(content=content, tool_calls=tool_calls),
+            prompt_eval_count=pin, eval_count=ein)
+
+    def _bind(self, monkeypatch, a) -> None:
+        monkeypatch.setattr(a, '_supports_thinking', lambda m: False)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'messages', [])
+        monkeypatch.setattr(session, 'active_tools', [])
+        monkeypatch.setattr(session, 'session_in', 0)
+        monkeypatch.setattr(session, 'session_out', 0)
+
+    def test_accumulates_content_and_counts(self, monkeypatch) -> None:
+        a = self._adapter()
+        self._bind(monkeypatch, a)
+        monkeypatch.setattr(session, 'cancel_requested', False)
+
+        def fake(*args, **kw):
+            yield self._chunk('Hel')
+            yield self._chunk('lo', pin=12, ein=5)
+        monkeypatch.setattr('guru.adapters.ollama.ollama.chat', fake)
+        msg = a._collect_response()
+        assert msg.content == 'Hello' and not msg.tool_calls
+        assert session.session_in == 12 and session.session_out == 5
+
+    def test_returns_none_and_closes_on_cancel(self, monkeypatch) -> None:
+        a = self._adapter()
+        self._bind(monkeypatch, a)
+        monkeypatch.setattr(session, 'cancel_requested', True)
+        closed = {'v': False}
+
+        def fake(*args, **kw):
+            try:
+                while True:
+                    yield self._chunk('x')
+            finally:
+                closed['v'] = True
+        monkeypatch.setattr('guru.adapters.ollama.ollama.chat', fake)
+        assert a._collect_response() is None
+        assert closed['v'] is True        # stream closed -> generation aborted
 
 
 class TestGroupMessages:
