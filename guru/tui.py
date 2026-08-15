@@ -34,7 +34,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
-from guru import config, session, ui
+from guru import config, session, skills, ui
 from guru.agents import Agent, AgentManager
 from guru.domain import conversation, files, tools
 
@@ -152,7 +152,11 @@ def _status_from(st) -> tuple:
     mode = {config.MODE_READ_ONLY: 'read-only',
             config.MODE_ASK: 'ask', config.MODE_AUTO: 'auto'}.get(
         config.MODE, config.MODE)
-    left = f"🤖 {model} | 💪 {st.model_size or '?'} | 🔐 {mode} | "
+    rs = st.active_role or 'general'
+    if st.active_skill:
+        rs += f"/{st.active_skill}"
+    left = (f"🤖 {model} | 💪 {st.model_size or '?'} | 🔐 {mode}"
+            f" | 🎭 {rs} | ")
     ctx = f"🧠 {int(pct * 100)}% {bar}"
     # Composition of the resident context in tokens (rough, ~4 chars/token).
     bd = conversation.context_breakdown(
@@ -194,7 +198,7 @@ def run() -> None:
     main_writer = _MainWriter(main, state)
     main.console = Console(
         file=main_writer, force_terminal=True,
-        color_system='standard', width=cols)
+        color_system='256', width=cols)
 
     # --- permission asker (run_in_terminal; works in either view) -----------
 
@@ -233,7 +237,7 @@ def run() -> None:
         writer.refresh = _invalidate
         agent.console = Console(
             file=writer, force_terminal=True,
-            color_system='standard', width=cols)
+            color_system='256', width=cols)
 
     # --- background execution (workers only run the blocking turn) ----------
 
@@ -245,6 +249,7 @@ def run() -> None:
                 message = agent.queue.pop(0)
                 agent.state.messages.append(
                     {'role': 'user', 'content': message})
+                conversation.refresh_system_context()
                 session.adapter.run_turn()
                 conversation.after_turn()
         except Exception as e:                           # noqa: BLE001
@@ -338,15 +343,18 @@ def run() -> None:
             raise box['error']
         return box['result']
 
-    def _configure(agent, base, can_spawn: bool) -> None:
+    def _configure(agent, base, can_spawn: bool,
+                   role=None, skill=None) -> None:
         st = agent.state
         st.messages = [
             {'role': 'system', 'content': config.build_system_prompt()}]
-        st.active_tools = [tools.search_tools]
+        st.active_tools = [tools.search_tools, tools.use_skill]
         if can_spawn:
             st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
             st.active_tools.extend([tools.spawn, tools.check, tools.join])
         st.active_tool_names = set()
+        st.active_role = role or None
+        st.active_skill = skill or None
         st.model = base.model
         st.adapter = base.adapter
         st.num_ctx = base.num_ctx
@@ -363,11 +371,11 @@ def run() -> None:
         agent.append(f"[{agent.title}] new agent · model {agent.state.model}")
         manager.active_index = len(manager.agents) - 1
 
-    def _spawn_agent(task: str) -> str:
+    def _spawn_agent(task: str, role: str = '', skill: str = '') -> str:
         base = session.current()
         title = f"agent{len(manager.agents)}"
         child = Agent(id=title, title=title)
-        _configure(child, base, can_spawn=False)
+        _configure(child, base, can_spawn=False, role=role, skill=skill)
         child.task = task
         child.append(f"[{title}] spawned · task: {task}")
         child.append(f"> {task}")
@@ -643,6 +651,36 @@ def run() -> None:
         i = config.MODES.index(config.MODE)
         config.MODE = config.MODES[(i + 1) % len(config.MODES)]
 
+    def _set_role(arg: str) -> None:
+        arg = (arg or '').strip()
+        if arg in ('', 'off', 'none', 'general-purpose'):
+            main.state.active_role = None
+            main.console.print("[green]Role[/green] -> general-purpose")
+            return
+        entry = skills.get(arg)
+        if entry is None or entry.kind != skills.ROLE:
+            avail = ', '.join(skills.names(skills.REGISTRY, skills.ROLE))
+            main.console.print(
+                f"[red]No role '{arg}'.[/red] Roles: {avail}")
+            return
+        main.state.active_role = arg
+        main.console.print(f"[green]Role[/green] -> {arg}")
+
+    def _set_skill(arg: str) -> None:
+        arg = (arg or '').strip()
+        if arg in ('', 'off', 'none'):
+            main.state.active_skill = None
+            main.console.print("[green]Skill[/green] -> none")
+            return
+        entry = skills.get(arg)
+        if entry is None or entry.kind != skills.SKILL:
+            avail = ', '.join(skills.names(skills.REGISTRY, skills.SKILL))
+            main.console.print(
+                f"[red]No skill '{arg}'.[/red] Skills: {avail}")
+            return
+        main.state.active_skill = arg
+        main.console.print(f"[green]Skill[/green] -> {arg}")
+
     def _set_mode(arg: str) -> None:
         """Set the access mode by name (prefix match) or cycle if no arg."""
         if arg:
@@ -666,6 +704,12 @@ def run() -> None:
             return True
         if text == '/mode' or text.startswith('/mode '):
             _set_mode(text[6:].strip())
+            return True
+        if text == '/role' or text.startswith('/role '):
+            _set_role(text[5:].strip())
+            return True
+        if text == '/skill' or text.startswith('/skill '):
+            _set_skill(text[6:].strip())
             return True
         if text in ('/models', '/model'):
             import guru.cli as cli
@@ -751,8 +795,8 @@ def run() -> None:
             "Enter submits · Ctrl+N new agent · Shift+Right view agents"
             " · Shift+Tab cycle access mode · double Ctrl+C exit")
         main.console.print(
-            "[dim]/mode /models /context /adapters /save /resume /compact"
-            " /search[/dim]\n")
+            "[dim]/mode /role /skill /models /context /adapters /save"
+            " /resume /compact /search[/dim]\n")
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()

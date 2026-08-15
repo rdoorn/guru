@@ -8,7 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 
-from guru import config, session, ui
+from guru import config, session, skills, ui
 from guru.domain import files
 
 _STOP_WORDS = {
@@ -41,36 +41,36 @@ def set_spawn_handler(fn) -> None:
     _spawn_handler = fn
 
 
-def spawn(task: str) -> str:
+def spawn(task: str, role: str = '', skill: str = '') -> str:
     """
     Delegate a self-contained task to a new sub-agent that runs in parallel.
 
-    Use this to work on independent subtasks concurrently — e.g. researching
-    several topics, or fetching several sources at once. The sub-agent has the
-    same tools and model and works in its own viewport; it cannot spawn
-    further agents. Returns immediately; the sub-agent's results appear in its
-    own tab, not in your reply.
+    Optionally give it a ``role`` (persona) and/or ``skill`` (method) from the
+    catalog -- e.g. role='security-engineer', skill='code-review'. The
+    sub-agent works in its own viewport and context and returns only its
+    conclusion; it cannot spawn further agents.
     """
     if _spawn_handler is None:
         return (
-            "Spawning sub-agents is not available in --classic (REPL) mode."
-            " Handle this task yourself instead."
-        )
-    return _spawn_handler(task)
+            "Spawning sub-agents is not available in this mode."
+            " Handle this task yourself instead.")
+    return _spawn_handler(task, role, skill)
 
 
 _SPAWN_SPEC = {
     'name': 'spawn',
     'description': (
         'Delegate a self-contained task to a new sub-agent that runs in'
-        ' parallel in its own viewport. Use for independent subtasks you want'
-        ' worked on concurrently. The sub-agent shares your tools and model'
-        ' and cannot spawn further agents. Returns immediately — its result is'
-        ' delivered back to you automatically when it finishes.'
-    ),
+        ' parallel in its own viewport and context. Optionally set role'
+        ' (persona) and skill (method) from the catalog. The sub-agent cannot'
+        ' spawn further agents. Returns immediately -- its result is delivered'
+        ' back to you automatically when it finishes.'),
     'parameters': {
         'task': 'A clear, self-contained instruction for the sub-agent',
+        'role': 'Optional persona name from the catalog (or empty)',
+        'skill': 'Optional method name from the catalog (or empty)',
     },
+    'optional': ['role', 'skill'],
 }
 
 
@@ -139,6 +139,31 @@ _JOIN_SPEC = {
     'parameters': {
         'targets': 'Sub-agent names, space- or comma-separated',
     },
+}
+
+
+def use_skill(name: str) -> str:
+    """
+    Adopt a methodology (skill) from the catalog for the current task, e.g.
+    'code-review' or 'systematic-debugging'. It stays active until you switch
+    skills. Roles (personas) are set with spawn(role=...) or the user's /role.
+    """
+    entry = skills.get(name)
+    if entry is None or entry.kind != skills.SKILL:
+        avail = ', '.join(
+            skills.names(skills.REGISTRY, skills.SKILL)) or 'none'
+        return f"No skill '{name}'. Available skills: {avail}."
+    session.active_skill = name
+    return f"Skill '{name}' is now active for this agent."
+
+
+_USE_SKILL_SPEC = {
+    'name': 'use_skill',
+    'description': (
+        'Adopt a methodology (skill) from the catalog for the current task'
+        ' (e.g. code-review, systematic-debugging). Stays active until'
+        ' switched. Use the catalog names shown in your context.'),
+    'parameters': {'name': 'A skill name from the catalog'},
 }
 
 
@@ -540,7 +565,7 @@ def specs_for(active_tool_names, can_spawn: bool) -> list:
     Lets callers (e.g. the context breakdown) price a specific agent's tool
     schemas without binding that agent's session context.
     """
-    specs = [_SEARCH_TOOLS_SPEC]
+    specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC]
     if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
     for name in TOOL_REGISTRY:
@@ -562,7 +587,7 @@ def reset_active_tools() -> None:
     agents (so the Ollama adapter, which introspects the callables, sees it).
     """
     session.active_tool_names.clear()
-    base = [search_tools]
+    base = [search_tools, use_skill]
     if session.can_spawn:
         base.extend([spawn, check, join])
     session.active_tools[:] = base
@@ -594,6 +619,8 @@ def execute_tool(name: str, arguments: dict) -> str:
         for tn in _match_tools(arguments.get("query", "")):
             activate(tn)
         return result
+    if name == "use_skill":
+        return use_skill(**arguments)
     if name == "spawn":
         return spawn(**arguments)
     if name == "check":

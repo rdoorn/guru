@@ -15,7 +15,10 @@ import shutil
 import stat
 from pathlib import Path
 
-from guru import config, ui
+from guru import config, session, ui
+
+# Most files whose sha we remember for edit-without-re-read (oldest dropped).
+_SHA_LEDGER_CAP = 25
 
 # Directories listed but not descended into by list_tree (pass a noise dir's
 # full path to look inside it).
@@ -137,6 +140,26 @@ def _row(st, name: str) -> str:
 def _sha(text: str) -> str:
     """Short content hash used for optimistic-concurrency on writes."""
     return hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]
+
+
+def _remember_sha(target: Path, sha: str) -> None:
+    """Record ``target``'s current sha for this agent (newest last, capped).
+
+    Surfaced to the model each turn so it can reuse the sha for edit_file
+    without re-reading; the compare-and-swap in edit_file remains the safety
+    net if the recorded sha is stale.
+    """
+    ledger = session.file_shas
+    key = str(target)
+    ledger.pop(key, None)          # move to newest
+    ledger[key] = sha
+    while len(ledger) > _SHA_LEDGER_CAP:
+        del ledger[next(iter(ledger))]
+
+
+def _forget_sha(target: Path) -> None:
+    """Drop ``target`` from the sha ledger (e.g. after deletion)."""
+    session.file_shas.pop(str(target), None)
 
 
 def _resolve(path: str) -> Path:
@@ -274,6 +297,7 @@ def read_file(path: str, lines: str = '') -> str:
         return f"Cannot read {target}: {e}"
 
     sha = _sha(full)
+    _remember_sha(target, sha)
     text_lines = full.splitlines()
     total = len(text_lines)
     if total == 0:
@@ -367,10 +391,11 @@ def search_code(pattern: str, path: str = '.') -> str:
 # --- write tools (gated by the WRITE allow-list + access mode) ---------------
 
 _MAX_DIFF_LINES = 200       # cap diff lines shown in the write prompt
-# Diff row colours: very dark green/red background with light text, so the
-# highlighted block reads clearly (the earlier 256-colour bg was too bright).
-_BG_G = '\x1b[48;2;0;28;0m\x1b[38;5;150m'
-_BG_R = '\x1b[48;2;38;0;0m\x1b[38;5;210m'
+# Diff row colours: dark 256-colour green/red background with light text so
+# the block reads clearly. 256-colour (not truecolour) so it survives the
+# console's colour system, and 22/52 are the darkest saturated shades.
+_BG_G = '\x1b[48;5;22m\x1b[38;5;151m'
+_BG_R = '\x1b[48;5;52m\x1b[38;5;217m'
 _D = '\x1b[2m'              # dim — context lines
 _Z = '\x1b[0m'
 _HUNK = re.compile(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@')
@@ -483,7 +508,9 @@ def write_file(path: str, content: str) -> str:
         return f"Cannot write {target}: {e}"
     if silent:
         _show_change(block)
-    return f"Wrote {len(content)} bytes to {target}. (sha:{_sha(content)})"
+    sha = _sha(content)
+    _remember_sha(target, sha)
+    return f"Wrote {len(content)} bytes to {target}. (sha:{sha})"
 
 
 def edit_file(path: str, old: str, new: str, sha: str) -> str:
@@ -531,8 +558,10 @@ def edit_file(path: str, old: str, new: str, sha: str) -> str:
         return f"Cannot write {target}: {e}"
     if silent:
         _show_change(block)
+    sha = _sha(new_text)
+    _remember_sha(target, sha)
     return (f"Edited {target} (replaced 1 occurrence)."
-            f" (sha:{_sha(new_text)})")
+            f" (sha:{sha})")
 
 
 def delete_file(path: str) -> str:
@@ -556,6 +585,7 @@ def delete_file(path: str) -> str:
         target.unlink()
     except OSError as e:
         return f"Cannot delete {target}: {e}"
+    _forget_sha(target)
     if silent:
         ui.console.print(f"[red]{block}[/red]")
     return f"Deleted {target}."

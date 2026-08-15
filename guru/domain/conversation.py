@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from guru import config, session, ui
+from guru import config, session, skills, ui
 from guru.domain import tools
 
 
@@ -168,6 +168,66 @@ def _summarise_groups(groups: list) -> str:
         return session.adapter.summarise(transcript)
     except Exception as e:
         return f'(summary failed: {e})'
+
+
+# Boundary between the base system prompt and the per-turn dynamic context
+# (catalog, active role/skill overlays, open-files ledger) re-rendered on it.
+_DYN_SEP = "\n\n--- active context ---\n"
+
+
+def _ledger_block() -> str:
+    """The '[open files]' sha list, or '' when nothing is tracked."""
+    ledger = session.file_shas
+    if not ledger:
+        return ''
+    cwd = Path.cwd()
+    lines = ["[open files]"]
+    for key, sha in ledger.items():
+        p = Path(key)
+        try:
+            shown = p.relative_to(cwd)
+        except ValueError:
+            shown = p
+        lines.append(f"- {shown} (sha:{sha})")
+    lines.append(
+        "Reuse a sha for edit_file instead of re-reading; if edit_file"
+        " reports a mismatch, that file changed — re-read it.")
+    return "\n".join(lines)
+
+
+def refresh_system_context() -> None:
+    """Rebuild the dynamic tail of the system prompt (messages[0]) in place.
+
+    Renders, in order, the roles/skills catalog, the active role overlay, the
+    active skill overlay, and the open-files sha ledger -- each a single copy
+    that survives pruning/compaction (message 0 is always kept) and is counted
+    in the 'sys' context bucket. Idempotent: the previous tail is stripped
+    first, so calling it every turn never doubles it.
+    """
+    msgs = session.messages
+    if not msgs or not isinstance(msgs[0], dict) \
+            or msgs[0].get('role') != 'system':
+        return
+    base = (msgs[0].get('content') or '').split(_DYN_SEP)[0]
+
+    sections = []
+    catalog = skills.catalog_block()
+    if catalog:
+        sections.append(catalog)
+    role = skills.get(session.active_role) if session.active_role else None
+    if role is not None and role.kind == skills.ROLE:
+        sections.append(f"[role: {role.name}]\n{role.body}")
+    skill = skills.get(session.active_skill) if session.active_skill else None
+    if skill is not None and skill.kind == skills.SKILL:
+        sections.append(f"[skill: {skill.name}]\n{skill.body}")
+    ledger = _ledger_block()
+    if ledger:
+        sections.append(ledger)
+
+    if sections:
+        msgs[0]['content'] = base + _DYN_SEP + "\n\n".join(sections)
+    else:
+        msgs[0]['content'] = base
 
 
 def prune_tool_exchanges(messages: list) -> None:

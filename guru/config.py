@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 GURU_HOME = Path(os.path.expanduser('~/.guru'))
 GURU_MD_PATH = GURU_HOME / 'GURU.md'                 # global base persona
 ADAPTERS_PATH = GURU_HOME / 'adapters.toml'          # adapter configuration
+GURU_SKILLS_DIR = GURU_HOME / 'skills'               # roles & skills overlays
 
 PROJECT_GURU_DIR = Path.cwd() / '.guru'
 PROJECT_GURU_MD = PROJECT_GURU_DIR / 'GURU.md'       # appended to the global
@@ -127,8 +128,10 @@ tool exists for a request, say so and stop.
 Never state a file's contents from memory — read it. edit_file needs the
 file's sha: reuse the one your most recent read_file, write_file, or edit_file
 of that file returned (they all return it) — you need not re-read if you
-already hold a current sha. If edit_file reports a sha mismatch, the file
-changed underneath you; read it again to refresh the sha, then retry.
+already hold a current sha. An '[open files]' list may be present with current
+shas for files you have touched; reuse those directly for edit_file. If
+edit_file reports a sha mismatch, the file changed underneath you; read it
+again to refresh the sha, then retry.
 """
 
 # Appended to the system prompt of delegation-capable agents (TUI only), to

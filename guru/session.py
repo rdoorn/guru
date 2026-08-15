@@ -43,6 +43,15 @@ class SessionState:
         self.messages: list = []
         self.active_tools: list = []
         self.active_tool_names: set = set()
+        # Current sha of each file this agent has read/written, newest last.
+        # Surfaced to the model each turn so it can reuse a sha for edit_file
+        # instead of re-reading; capped and never pruned (see conversation).
+        self.file_shas: dict = {}
+        # Active persona (role) and methodology (skill) overlay names, or None
+        # for general-purpose / no skill. Rendered onto the system prompt each
+        # turn (see conversation.refresh_system_context).
+        self.active_role = None
+        self.active_skill = None
         # Cooperative cancellation: adapters check this between rounds.
         self.cancel_requested: bool = False
         # Whether this agent may delegate via the spawn tool (main + user-made

@@ -333,7 +333,14 @@ def main() -> None:
         "--num-ctx", type=int, default=0,
         help="Override the context window (0 = auto-detect from the model)",
     )
+    parser.add_argument(
+        "--reset-skills", action="store_true",
+        help="Overwrite the baked-in default roles/skills on startup",
+    )
     args, _ = parser.parse_known_args()
+
+    from guru import skills
+    skills.setup(reset=args.reset_skills)
 
     session.num_ctx_override = args.num_ctx
     global ADAPTERS

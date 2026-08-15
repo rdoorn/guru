@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from guru import cli, config, session, ui
+from guru import cli, config, session, skills, ui
 from guru.adapters import anthropic as anth
 from guru.adapters import litellm as lite
 from guru.adapters.ollama import OllamaAdapter
@@ -321,7 +321,7 @@ class TestActiveSpecs:
     def test_search_tools_always_present(self, monkeypatch) -> None:
         monkeypatch.setattr(session, 'active_tool_names', set())
         specs = tools.active_specs()
-        assert [s['name'] for s in specs] == ['search_tools']
+        assert [s['name'] for s in specs] == ['search_tools', 'use_skill']
 
     def test_activated_tool_included(self, monkeypatch) -> None:
         monkeypatch.setattr(session, 'active_tool_names', {'web_fetch'})
@@ -464,7 +464,7 @@ class TestSpecsFor:
 
     def test_search_tools_always(self) -> None:
         assert [s['name'] for s in tools.specs_for(set(), False)] == [
-            'search_tools']
+            'search_tools', 'use_skill']
 
     def test_can_spawn_and_activated(self) -> None:
         names = {s['name'] for s in tools.specs_for({'web_fetch'}, True)}
@@ -664,6 +664,158 @@ class TestWriteTools:
             files.set_path_asker(None)
 
 
+class TestFileShaLedger:
+    """The file->sha ledger + its rendering into the system prompt."""
+
+    def _write_allowed(self, monkeypatch, *dirs):
+        monkeypatch.setattr(
+            config, 'ALLOWED_WRITE_DIRS',
+            {str(Path(d).resolve()) for d in dirs})
+        monkeypatch.setattr(config, 'persist_write_dir', lambda d: None)
+
+    def test_read_write_edit_populate_ledger(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(session, 'file_shas', {})
+        self._write_allowed(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            config, 'ALLOWED_READ_DIRS', {str(tmp_path.resolve())})
+        p = tmp_path / 'c.py'
+        key = str(p.resolve())
+        files.write_file(str(p), 'hello\n')
+        assert session.file_shas[key] == files._sha('hello\n')
+        files.read_file(str(p))
+        assert session.file_shas[key] == files._sha('hello\n')
+        files.edit_file(str(p), 'hello', 'bye', session.file_shas[key])
+        assert session.file_shas[key] == files._sha('bye\n')
+
+    def test_delete_forgets_sha(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(session, 'file_shas', {})
+        self._write_allowed(monkeypatch, tmp_path)
+        p = tmp_path / 'd.txt'
+        files.write_file(str(p), 'bye')
+        assert str(p.resolve()) in session.file_shas
+        files.delete_file(str(p))
+        assert str(p.resolve()) not in session.file_shas
+
+    def test_ledger_caps_and_drops_oldest(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'file_shas', {})
+        cap = files._SHA_LEDGER_CAP
+        for i in range(cap + 3):
+            files._remember_sha(Path(f'/tmp/f{i}'), f'sha{i}')
+        assert len(session.file_shas) == cap
+        assert '/tmp/f0' not in session.file_shas
+        assert session.file_shas[f'/tmp/f{cap + 2}'] == f'sha{cap + 2}'
+
+    def test_remember_moves_key_to_newest(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'file_shas', {})
+        files._remember_sha(Path('/tmp/a'), '1')
+        files._remember_sha(Path('/tmp/b'), '2')
+        files._remember_sha(Path('/tmp/a'), '3')     # re-touch a
+        assert list(session.file_shas) == ['/tmp/b', '/tmp/a']
+        assert session.file_shas['/tmp/a'] == '3'
+
+    def test_refresh_adds_block_and_is_idempotent(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'file_shas', {'/tmp/x.txt': 'abc123'})
+        monkeypatch.setattr(
+            session, 'messages',
+            [{'role': 'system', 'content': 'BASE'}])
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert body.startswith('BASE')
+        assert '[open files]' in body and 'abc123' in body
+        conversation.refresh_system_context()             # again
+        assert session.messages[0]['content'].count('[open files]') == 1
+
+    def test_refresh_strips_block_when_empty(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'file_shas', {'/tmp/x.txt': 'abc123'})
+        monkeypatch.setattr(
+            session, 'messages',
+            [{'role': 'system', 'content': 'BASE'}])
+        conversation.refresh_system_context()
+        session.file_shas.clear()
+        conversation.refresh_system_context()
+        assert session.messages[0]['content'] == 'BASE'
+
+    def test_refresh_shows_relative_path(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        key = str((tmp_path / 'sub' / 'f.py').resolve())
+        monkeypatch.setattr(session, 'file_shas', {key: 'deadbeef'})
+        monkeypatch.setattr(
+            session, 'messages',
+            [{'role': 'system', 'content': 'BASE'}])
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert 'sub/f.py (sha:deadbeef)' in body
+
+    def test_refresh_noop_without_system_message(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'file_shas', {'/tmp/x': 'y'})
+        monkeypatch.setattr(session, 'messages', [])
+        conversation.refresh_system_context()             # must not raise
+        assert session.messages == []
+
+
+class TestSystemContext:
+    """Catalog + role + skill overlays rendered onto messages[0]."""
+
+    def _reg(self):
+        return {
+            'developer': skills.SkillEntry(
+                'developer', 'role', 'dev', '', 'BE A DEV'),
+            'code-review': skills.SkillEntry(
+                'code-review', 'skill', 'review', '', 'REVIEW METHOD'),
+        }
+
+    def test_catalog_rendered_when_registry_present(
+            self, monkeypatch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', self._reg())
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(session, 'active_role', None)
+        monkeypatch.setattr(session, 'active_skill', None)
+        monkeypatch.setattr(
+            session, 'messages', [{'role': 'system', 'content': 'BASE'}])
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert body.startswith('BASE')
+        assert 'Available specialists' in body and 'developer' in body
+
+    def test_role_and_skill_bodies_rendered(self, monkeypatch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', self._reg())
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(session, 'active_role', 'developer')
+        monkeypatch.setattr(session, 'active_skill', 'code-review')
+        monkeypatch.setattr(
+            session, 'messages', [{'role': 'system', 'content': 'BASE'}])
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert '[role: developer]' in body and 'BE A DEV' in body
+        assert '[skill: code-review]' in body and 'REVIEW METHOD' in body
+
+    def test_idempotent_across_calls(self, monkeypatch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', self._reg())
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(session, 'active_role', 'developer')
+        monkeypatch.setattr(session, 'active_skill', None)
+        monkeypatch.setattr(
+            session, 'messages', [{'role': 'system', 'content': 'BASE'}])
+        conversation.refresh_system_context()
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert body.count('[role: developer]') == 1
+        assert body.startswith('BASE')
+
+    def test_unknown_active_name_ignored(self, monkeypatch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', self._reg())
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(session, 'active_role', 'nonexistent')
+        monkeypatch.setattr(session, 'active_skill', None)
+        monkeypatch.setattr(
+            session, 'messages', [{'role': 'system', 'content': 'BASE'}])
+        conversation.refresh_system_context()      # must not raise
+        assert '[role:' not in session.messages[0]['content']
+
+
 class TestAccessPromptDefaults:
     """Access prompts default to allow on Enter but deny on any error."""
 
@@ -722,11 +874,12 @@ class TestSpawnTool:
     def test_spawn_without_handler_reports_repl(self) -> None:
         tools.set_spawn_handler(None)
         out = tools.spawn('do something')
-        assert '--classic' in out
+        assert 'not available in this mode' in out
 
     def test_spawn_with_handler_delegates(self) -> None:
         seen: list = []
-        tools.set_spawn_handler(lambda t: seen.append(t) or f'ok:{t}')
+        tools.set_spawn_handler(
+            lambda t, r, s: seen.append(t) or f'ok:{t}')
         try:
             assert tools.spawn('research topic') == 'ok:research topic'
             assert seen == ['research topic']
@@ -735,7 +888,7 @@ class TestSpawnTool:
 
     def test_execute_tool_routes_spawn(self) -> None:
         seen: list = []
-        tools.set_spawn_handler(lambda t: seen.append(t) or 'done')
+        tools.set_spawn_handler(lambda t, r, s: seen.append(t) or 'done')
         try:
             assert tools.execute_tool('spawn', {'task': 'go'}) == 'done'
             assert seen == ['go']
@@ -970,3 +1123,115 @@ class TestLiteLLMTranslation:
             base_url='https://p/v1', api_key_env='MY_LLM_KEY',
             api_key='sk-123')
         assert a._key() == 'sk-env'
+
+
+class TestSkillsRegistry:
+    """Frontmatter parsing, seeding, token cap, lookup."""
+
+    def test_parse_entry_reads_frontmatter_and_body(self) -> None:
+        text = (
+            "---\n"
+            "name: developer\n"
+            "kind: role\n"
+            "description: General coding\n"
+            "---\n"
+            "Be a developer.\n")
+        e = skills.parse_entry(text)
+        assert e.name == 'developer' and e.kind == 'role'
+        assert e.description == 'General coding'
+        assert e.body == 'Be a developer.'
+
+    def test_parse_entry_rejects_missing_frontmatter(self) -> None:
+        assert skills.parse_entry("no frontmatter here") is None
+
+    def test_body_is_capped(self) -> None:
+        big = "x" * (skills._MAX_BODY_CHARS + 500)
+        text = f"---\nname: t\nkind: skill\ndescription: d\n---\n{big}"
+        e = skills.parse_entry(text)
+        assert len(e.body) <= skills._MAX_BODY_CHARS + len(skills._TRUNC)
+        assert e.body.endswith(skills._TRUNC)
+
+    def test_seed_writes_missing_then_load(self, tmp_path) -> None:
+        skills.seed_defaults(tmp_path, reset=False)
+        reg = skills.load_registry(tmp_path)
+        assert 'developer' in reg and reg['developer'].kind == 'role'
+        assert 'code-review' in reg and reg['code-review'].kind == 'skill'
+
+    def test_seed_does_not_overwrite_user_edit(self, tmp_path) -> None:
+        skills.seed_defaults(tmp_path, reset=False)
+        f = tmp_path / 'developer.md'
+        f.write_text(f.read_text() + "\nUSER EDIT\n", encoding='utf-8')
+        skills.seed_defaults(tmp_path, reset=False)          # again
+        assert 'USER EDIT' in f.read_text()
+
+    def test_reset_overwrites_defaults_not_extras(self, tmp_path) -> None:
+        skills.seed_defaults(tmp_path, reset=False)
+        dev = tmp_path / 'developer.md'
+        dev.write_text("---\nname: developer\nkind: role\n"
+                       "description: d\n---\nMANGLED\n", encoding='utf-8')
+        extra = tmp_path / 'my-role.md'
+        extra.write_text("---\nname: my-role\nkind: role\n"
+                         "description: mine\n---\nkeep\n", encoding='utf-8')
+        skills.seed_defaults(tmp_path, reset=True)
+        assert 'MANGLED' not in dev.read_text()
+        assert extra.read_text().endswith('keep\n')
+
+    def test_names_by_kind(self, tmp_path) -> None:
+        reg = {'a': skills.SkillEntry('a', 'role', 'd', '', 'b'),
+               'c': skills.SkillEntry('c', 'skill', 'd', '', 'b')}
+        assert skills.names(reg, 'role') == ['a']
+        assert skills.names(reg, 'skill') == ['c']
+
+    def test_setup_populates_registry(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'GURU_SKILLS_DIR', tmp_path / 'skills')
+        skills.setup(reset=True)
+        assert 'architect' in skills.REGISTRY
+        skills.REGISTRY.clear()          # leave global clean for other tests
+
+
+class TestSkillTools:
+    def _reg(self):
+        return {
+            'developer': skills.SkillEntry(
+                'developer', 'role', 'dev', '', 'BE A DEV'),
+            'code-review': skills.SkillEntry(
+                'code-review', 'skill', 'review', '', 'REVIEW'),
+        }
+
+    def test_use_skill_sets_active_skill(self, monkeypatch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', self._reg())
+        monkeypatch.setattr(session, 'active_skill', None)
+        out = tools.use_skill('code-review')
+        assert session.active_skill == 'code-review' and 'code-review' in out
+
+    def test_use_skill_rejects_role_or_unknown(self, monkeypatch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', self._reg())
+        monkeypatch.setattr(session, 'active_skill', None)
+        assert 'No skill' in tools.use_skill('developer')   # wrong kind
+        assert 'No skill' in tools.use_skill('nope')
+        assert session.active_skill is None
+
+    def test_spawn_passes_role_and_skill(self, monkeypatch) -> None:
+        seen = {}
+
+        def handler(task, role, skill):
+            seen.update(task=task, role=role, skill=skill)
+            return "ok"
+        tools.set_spawn_handler(handler)
+        try:
+            tools.spawn('do it', role='developer', skill='code-review')
+            assert seen == {'task': 'do it', 'role': 'developer',
+                            'skill': 'code-review'}
+        finally:
+            tools.set_spawn_handler(None)
+
+    def test_spawn_defaults_role_skill_empty(self, monkeypatch) -> None:
+        seen = {}
+        tools.set_spawn_handler(
+            lambda task, role, skill: seen.update(
+                role=role, skill=skill) or "ok")
+        try:
+            tools.spawn('t')
+            assert seen == {'role': '', 'skill': ''}
+        finally:
+            tools.set_spawn_handler(None)
