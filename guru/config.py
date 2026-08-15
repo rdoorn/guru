@@ -15,6 +15,7 @@ GURU_MD_PATH = GURU_HOME / 'GURU.md'                 # global base persona
 ADAPTERS_PATH = GURU_HOME / 'adapters.toml'          # adapter configuration
 GURU_SKILLS_DIR = GURU_HOME / 'skills'               # roles & skills overlays
 MODEL_CTX_PATH = GURU_HOME / 'model_ctx.json'        # per-model chosen context
+GLOBAL_SETTINGS_PATH = GURU_HOME / 'settings.toml'   # global user settings
 
 PROJECT_GURU_DIR = Path.cwd() / '.guru'
 PROJECT_GURU_MD = PROJECT_GURU_DIR / 'GURU.md'       # appended to the global
@@ -46,6 +47,12 @@ DEFAULT_NUM_CTX = 4096
 COMPACT_AT = 0.85
 # Number of most-recent turn-groups kept verbatim during compaction.
 KEEP_RECENT_GROUPS = 4
+
+# Tool-output retention thresholds (chars). Overridable via settings.toml's
+# [context] section. Below the threshold a tool result is kept verbatim; above
+# it, web results are query-summarized and large code reads are outlined.
+WEB_SUMMARIZE_OVER_CHARS = 6000
+OUTLINE_FILE_OVER_CHARS = 8000
 
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
@@ -293,6 +300,34 @@ def load_adapter_configs() -> list:
     return data.get('adapter', [])
 
 
+def load_context_settings() -> dict:
+    """Return the [context] table from ~/.guru/settings.toml (or {})."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:                       # Python < 3.11
+        import tomli as tomllib                        # type: ignore
+    try:
+        data = tomllib.loads(
+            GLOBAL_SETTINGS_PATH.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    section = data.get('context', {}) if isinstance(data, dict) else {}
+    return section if isinstance(section, dict) else {}
+
+
+def _apply_settings() -> None:
+    """Override the retention thresholds from settings.toml, if present."""
+    global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
+    s = load_context_settings()
+    try:
+        WEB_SUMMARIZE_OVER_CHARS = int(
+            s.get('web_summarize_over_chars', WEB_SUMMARIZE_OVER_CHARS))
+        OUTLINE_FILE_OVER_CHARS = int(
+            s.get('outline_file_over_chars', OUTLINE_FILE_OVER_CHARS))
+    except (TypeError, ValueError):
+        pass
+
+
 def _toml_value(value: object) -> str:
     """Serialize a scalar/list value to TOML."""
     if isinstance(value, bool):
@@ -371,3 +406,4 @@ ALLOWED_DOMAINS = load_allowed_domains()
 # once, then the approval is persisted here.
 ALLOWED_READ_DIRS = load_allowed_read_dirs()
 ALLOWED_WRITE_DIRS = load_allowed_write_dirs()
+_apply_settings()

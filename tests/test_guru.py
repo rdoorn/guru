@@ -698,32 +698,63 @@ class TestContextBreakdown:
         assert more > base            # spawn/check/join schemas add tokens
 
 
-class TestPruneToolExchanges:
-    """Tool output and text-less tool-call steps are dropped after a turn."""
-
-    def test_prunes_tool_and_textless_assistant(self) -> None:
-        msgs = [
+class TestApplyRetention:
+    def _msgs(self):
+        return [
             {'role': 'system', 'content': 'sys'},
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': '', 'tool_calls': [{'x': 1}]},
-            {'role': 'tool', 'tool_name': 'web_fetch', 'content': 'BIGBLOB'},
+            {'role': 'user', 'content': 'find the k8s setting'},
+            {'role': 'assistant', 'content': ''},        # text-less step
+            {'role': 'tool', 'tool_name': 'web_fetch',
+             'content': 'X' * 9000},                      # large -> summarize
+            {'role': 'tool', 'tool_name': 'search_code',
+             'content': 'a.py:1: hit'},                   # keep
             {'role': 'assistant', 'content': 'the answer'},
         ]
-        conversation.prune_tool_exchanges(msgs)
-        assert [m['role'] for m in msgs] == ['system', 'user', 'assistant']
-        assert msgs[-1]['content'] == 'the answer'
-        assert all('BIGBLOB' not in (m.get('content') or '') for m in msgs)
 
-    def test_keeps_assistant_with_text_and_tool_calls(self) -> None:
+    def test_large_web_summarized_small_kept(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'WEB_SUMMARIZE_OVER_CHARS', 6000)
+
+        class _Ad:
+            def summarise(self, t):
+                return 'GIST'
+        monkeypatch.setattr(session, 'adapter', _Ad())
+        msgs = self._msgs()
+        conversation.apply_retention(msgs)
+        assert all(not (m.get('role') == 'assistant'
+                        and not m.get('content')) for m in msgs)
+        web = next(m for m in msgs if m.get('tool_name') == 'web_fetch')
+        assert 'GIST' in web['content'] and len(web['content']) < 9000
+        grep = next(m for m in msgs if m.get('tool_name') == 'search_code')
+        assert grep['content'] == 'a.py:1: hit'
+
+    def test_small_web_not_summarized(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'WEB_SUMMARIZE_OVER_CHARS', 6000)
+
+        class _Ad:
+            def summarise(self, t):
+                raise AssertionError('should not summarise small output')
+        monkeypatch.setattr(session, 'adapter', _Ad())
         msgs = [
             {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': 'thinking then',
-             'tool_calls': [{'x': 1}]},
-            {'role': 'tool', 'tool_name': 't', 'content': 'res'},
-            {'role': 'assistant', 'content': 'final'},
+            {'role': 'tool', 'tool_name': 'web_fetch', 'content': 'short'},
         ]
-        conversation.prune_tool_exchanges(msgs)
-        assert [m['role'] for m in msgs] == ['user', 'assistant', 'assistant']
+        conversation.apply_retention(msgs)
+        assert msgs[-1]['content'] == 'short'
+
+    def test_large_read_file_outlined(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'OUTLINE_FILE_OVER_CHARS', 50)
+        src = "def foo():\n    return 1\n" * 10
+        header = "/tmp/m.py (lines 1-20 of 20, sha:abc):"
+        body = "\n".join(f"{i:>6}\t{ln}"
+                         for i, ln in enumerate(src.splitlines(), 1))
+        msgs = [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'tool', 'tool_name': 'read_file',
+             'content': f"{header}\n{body}"},
+        ]
+        conversation.apply_retention(msgs)
+        assert '[outline]' in msgs[-1]['content']
+        assert 'return 1' not in msgs[-1]['content']
 
 
 class TestWriteTools:
@@ -1462,3 +1493,138 @@ class TestSkillTools:
             assert seen == {'role': '', 'skill': ''}
         finally:
             tools.set_spawn_handler(None)
+
+
+class TestContextSettings:
+    """Global ~/.guru/settings.toml overrides context thresholds."""
+
+    def test_load_missing_returns_empty(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(
+            config, 'GLOBAL_SETTINGS_PATH', tmp_path / 'settings.toml')
+        assert config.load_context_settings() == {}
+
+    def test_load_reads_context_section(
+            self, tmp_path, monkeypatch) -> None:
+        p = tmp_path / 'settings.toml'
+        p.write_text(
+            "[context]\nweb_summarize_over_chars = 1234\n", encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        assert config.load_context_settings() == {
+            'web_summarize_over_chars': 1234}
+
+    def test_load_invalid_returns_empty(
+            self, tmp_path, monkeypatch) -> None:
+        p = tmp_path / 'settings.toml'
+        p.write_text("not = valid = toml", encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        assert config.load_context_settings() == {}
+
+    def test_apply_overrides_defaults(
+            self, tmp_path, monkeypatch) -> None:
+        p = tmp_path / 'settings.toml'
+        p.write_text(
+            "[context]\nweb_summarize_over_chars = 999\n"
+            "outline_file_over_chars = 111\n", encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        monkeypatch.setattr(config, 'WEB_SUMMARIZE_OVER_CHARS', 6000)
+        monkeypatch.setattr(config, 'OUTLINE_FILE_OVER_CHARS', 8000)
+        config._apply_settings()
+        assert config.WEB_SUMMARIZE_OVER_CHARS == 999
+        assert config.OUTLINE_FILE_OVER_CHARS == 111
+
+
+class TestRetainPolicy:
+    def test_web_tools_summarize(self) -> None:
+        assert tools.retain_policy('web_search') == 'summarize'
+        assert tools.retain_policy('web_fetch') == 'summarize'
+
+    def test_read_file_outline(self) -> None:
+        assert tools.retain_policy('read_file') == 'outline'
+
+    def test_local_tools_keep(self) -> None:
+        for name in ('search_code', 'list_dir', 'list_tree',
+                     'write_file', 'edit_file', 'delete_file'):
+            assert tools.retain_policy(name) == 'keep'
+
+    def test_unknown_keeps(self) -> None:
+        assert tools.retain_policy('nope') == 'keep'
+        assert tools.retain_policy('') == 'keep'
+
+
+class TestFocusedSummary:
+    def test_recent_question_scans_backwards(self) -> None:
+        msgs = [
+            {'role': 'system', 'content': 's'},
+            {'role': 'user', 'content': 'first'},
+            {'role': 'assistant', 'content': 'a'},
+            {'role': 'user', 'content': 'the question'},
+            {'role': 'tool', 'tool_name': 'web_fetch', 'content': 'x'},
+        ]
+        assert conversation._recent_question(msgs, 4) == 'the question'
+
+    def test_summarize_relevant_uses_adapter(self, monkeypatch) -> None:
+        seen = {}
+
+        class _Ad:
+            def summarise(self, transcript):
+                seen['t'] = transcript
+                return 'RELEVANT BITS'
+        monkeypatch.setattr(session, 'adapter', _Ad())
+        out = conversation._summarize_relevant(
+            'k8s setting?', 'huge content', 'web_fetch')
+        assert 'RELEVANT BITS' in out
+        assert 'web_fetch summary' in out and 'k8s setting?' in out
+        assert 'huge content' in seen['t'] and 'k8s setting?' in seen['t']
+
+    def test_summarize_relevant_falls_back_on_error(
+            self, monkeypatch) -> None:
+        class _Ad:
+            def summarise(self, transcript):
+                raise RuntimeError('down')
+        monkeypatch.setattr(session, 'adapter', _Ad())
+        out = conversation._summarize_relevant('q', 'A' * 100, 'web_fetch')
+        assert 'truncated' in out and out.count('A') > 0
+
+
+class TestOutlineCode:
+    def _read_output(self, path, source):
+        lines = source.splitlines()
+        header = f"{path} (lines 1-{len(lines)} of {len(lines)}, sha:abc):"
+        body = "\n".join(f"{i:>6}\t{ln}" for i, ln in enumerate(lines, 1))
+        return f"{header}\n{body}"
+
+    def test_outline_python_keeps_signatures_drops_bodies(self) -> None:
+        src = (
+            "import os\n"
+            "\n"
+            "def foo(a, b=2) -> int:\n"
+            "    '''Add things.'''\n"
+            "    return a + b\n"
+            "\n"
+            "class C:\n"
+            "    def method(self, x):\n"
+            "        '''Do it.'''\n"
+            "        return x\n")
+        out = conversation._outline_code(
+            self._read_output('/tmp/m.py', src))
+        assert 'def foo(a, b=2) -> int:' in out
+        assert 'Add things.' in out
+        assert 'class C' in out
+        assert 'def method(self, x):' in out
+        assert 'return a + b' not in out      # body dropped
+        assert '/tmp/m.py' in out             # header kept
+
+    def test_outline_non_python_truncates(self) -> None:
+        src = "\n".join(f"line {i}" for i in range(200))
+        out = conversation._outline_code(
+            self._read_output('/tmp/notes.txt', src))
+        assert '/tmp/notes.txt' in out
+        assert len(out) < len(src)            # shrunk
+
+    def test_outline_unparseable_python_falls_back(self) -> None:
+        src = "def broken(:\n    pass\nimport sys\n"
+        out = conversation._outline_code(
+            self._read_output('/tmp/b.py', src))
+        # regex fallback keeps def/import lines even when AST fails
+        assert 'import sys' in out or 'def broken' in out

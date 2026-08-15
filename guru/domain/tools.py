@@ -316,6 +316,7 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "query": "Search terms to look up on the web",
         },
+        "retain": "summarize",
     },
     "web_fetch": {
         "fn": web_fetch,
@@ -332,6 +333,7 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "url": "Full URL to fetch (e.g. https://example.com/page)",
         },
+        "retain": "summarize",
     },
     "fetch_github_releases": {
         "fn": fetch_github_releases,
@@ -403,6 +405,7 @@ TOOL_REGISTRY: dict = {
             "lines": "Optional line range 'start-end' (e.g. '10-20')",
         },
         "optional": ["lines"],
+        "retain": "outline",
     },
     "search_code": {
         "fn": files.search_code,
@@ -548,6 +551,16 @@ _SEARCH_TOOLS_SPEC = {
         'query': 'A short phrase describing the action you want to perform',
     },
 }
+
+
+def retain_policy(name: str) -> str:
+    """How a tool's output should be retained after a turn: 'keep' (default),
+    'summarize' (query-focused, for bulky web output), or 'outline' (code
+    skeleton, for large file reads)."""
+    info = TOOL_REGISTRY.get(name)
+    if not info:
+        return 'keep'
+    return info.get('retain', 'keep')
 
 
 def active_specs() -> list:

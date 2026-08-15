@@ -4,7 +4,9 @@ The neutral message format is the normalized dict
 ``{role, content, tool_calls?, tool_name?}``. Adapters translate to/from it,
 so these operations are provider-independent.
 """
+import ast
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -230,23 +232,115 @@ def refresh_system_context() -> None:
         msgs[0]['content'] = base
 
 
-def prune_tool_exchanges(messages: list) -> None:
-    """Drop tool results and text-less tool-call steps from history in place.
+def _recent_question(messages: list, index: int) -> str:
+    """The most recent user message at or before ``index`` (the question the
+    tool output was helping answer)."""
+    for j in range(min(index, len(messages) - 1), -1, -1):
+        if msg_role(messages[j]) == 'user':
+            return msg_content(messages[j]).strip()
+    return ''
 
-    Tool output (web pages, file dumps, directory listings) is the largest and
-    least reusable part of the context, and it is otherwise re-sent on every
-    subsequent turn. The assistant's text answer already captures the
-    conclusion; if the raw data is needed again the model can simply re-run
-    the tool. Called after each turn so the next one starts lean. The system
-    prompt, user messages, and every assistant message with text are kept.
-    """
+
+def _summarize_relevant(question: str, content: str, tool_name: str) -> str:
+    """Query-focused compaction: ask the model to keep only the parts of a
+    bulky tool result relevant to the question. Falls back to truncation."""
+    prompt = (
+        "Extract only the parts of the following content that are relevant to"
+        " answering this question. Keep concrete facts, values, and"
+        " identifiers; be concise; output only the extract.\n\n"
+        f"Question: {question}\n\nContent:\n{content}")
+    try:
+        summary = (session.adapter.summarise(prompt) or '').strip()
+    except Exception:                                # noqa: BLE001
+        summary = ''
+    if not summary:
+        summary = content[:config.WEB_SUMMARIZE_OVER_CHARS] + "\n…(truncated)"
+    q = question[:60]
+    return f"[{tool_name} summary · query: {q}]\n{summary}"
+
+
+_OUTLINE_RE = re.compile(r'^\s*(async def |def |class |@|import |from )')
+_NUM_PREFIX = re.compile(r'^\s*\d+\t')
+
+
+def _sig(node) -> str:
+    """A def/class signature line (no body)."""
+    if isinstance(node, ast.ClassDef):
+        bases = ', '.join(ast.unparse(b) for b in node.bases)
+        return f"class {node.name}({bases}):" if bases \
+            else f"class {node.name}:"
+    prefix = 'async def ' if isinstance(node, ast.AsyncFunctionDef) else 'def '
+    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ''
+    return f"{prefix}{node.name}({ast.unparse(node.args)}){ret}:"
+
+
+def _outline_code(read_output: str) -> str:
+    """Compact a large read_file result to a navigable skeleton: header,
+    imports, and def/class signatures + one-line docstrings (bodies dropped).
+    AST for a full .py read; regex/truncate fallback otherwise."""
+    parts = read_output.split('\n')
+    header = parts[0] if parts else ''
+    body = parts[1:]
+    path = header.split(' (lines', 1)[0].strip()
+    source = "\n".join(_NUM_PREFIX.sub('', ln) for ln in body)
+
+    if path.endswith('.py'):
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            tree = None
+        if tree is not None:
+            out = [header, '[outline]']
+            doc = ast.get_docstring(tree)
+            if doc:
+                out.append(f'"""{doc.splitlines()[0]}"""')
+            for node in tree.body:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    out.append(ast.unparse(node))
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                       ast.ClassDef)):
+                    out.append(_sig(node))
+                    d = ast.get_docstring(node)
+                    if d:
+                        out.append(f'    """{d.splitlines()[0]}"""')
+                    if isinstance(node, ast.ClassDef):
+                        for sub in node.body:
+                            if isinstance(sub, (ast.FunctionDef,
+                                                ast.AsyncFunctionDef)):
+                                out.append('    ' + _sig(sub))
+                                sd = ast.get_docstring(sub)
+                                if sd:
+                                    out.append(
+                                        f'        """{sd.splitlines()[0]}"""')
+            return "\n".join(out)
+
+    kept = [ln for ln in body if _OUTLINE_RE.match(_NUM_PREFIX.sub('', ln))]
+    if len(kept) >= 3:
+        return "\n".join([header, '[outline]'] + kept)
+    return "\n".join([header, '[truncated]'] + body[:40])
+
+
+def apply_retention(messages: list) -> None:
+    """Post-turn retention: drop text-less tool-call steps, then compact each
+    tool result per its tool's retain policy (keep / summarize / outline),
+    only when it exceeds the size threshold. Replaces the blanket prune so
+    follow-up questions keep the useful, relevant context."""
     kept = []
-    for m in messages:
+    for i, m in enumerate(messages):
         role = msg_role(m)
-        if role == 'tool':
-            continue
         if role == 'assistant' and not msg_content(m).strip():
             continue
+        if role == 'tool' and isinstance(m, dict):
+            name = m.get('tool_name', '')
+            policy = tools.retain_policy(name)
+            content = m.get('content') or ''
+            if (policy == 'summarize'
+                    and len(content) > config.WEB_SUMMARIZE_OVER_CHARS):
+                q = _recent_question(messages, i)
+                m['content'] = _summarize_relevant(q, content, name)
+            elif (policy == 'outline'
+                    and len(content) > config.OUTLINE_FILE_OVER_CHARS):
+                m['content'] = _outline_code(content)
         kept.append(m)
     messages[:] = kept
 
@@ -284,12 +378,12 @@ def context_breakdown(messages: list, active_tool_names=None,
 def after_turn() -> None:
     """Post-turn context maintenance shared by the TUI and the REPL.
 
-    Prune tool output, refresh the token estimate (including tool schemas),
-    then summarise-compact if the lean history still exceeds the threshold.
-    Using the post-prune estimate to decide avoids compacting just because a
-    turn fetched a large (now-discarded) tool result.
+    Apply per-tool retention, refresh the token estimate (including tool
+    schemas), then summarise-compact if the lean history still exceeds the
+    threshold. Using the post-prune estimate to decide avoids compacting just
+    because a turn fetched a large (now-discarded) tool result.
     """
-    prune_tool_exchanges(session.messages)
+    apply_retention(session.messages)
     session.ctx_used = context_breakdown(
         session.messages, session.active_tool_names,
         session.can_spawn)['total']
