@@ -290,39 +290,49 @@ def _adapter_for(name, built):
 
 def run_benchmark(models, out_dir=BENCH_DIR):
     """Run each (adapter_name, model) through guru on PROMPT, collect metrics,
-    and write bench/results-<timestamp>.json. Returns the file path."""
+    and write bench/results-<timestamp>.json. The file is rewritten after every
+    model, so a Ctrl+C mid-run keeps the results gathered so far. Returns the
+    file path."""
     built = _build_adapters()
-    records = []
-    for adapter_name, model in sort_models(models):
-        adapter = _adapter_for(adapter_name, built)
-        base = session.SessionState()
-        base.adapter = adapter
-        token = session.use(base)
-        try:
-            if adapter is None:
-                raise RuntimeError(f"no adapter for '{adapter_name}'")
-            session.adapter = adapter
-            adapter.activate(model)
-            t0 = time.monotonic()
-            agents = asyncio.run(run_once(base))
-            secs = time.monotonic() - t0
-            rec = collect_metrics(model, base.num_ctx, base.ctx_ceiling,
-                                  secs, agents)
-        except Exception as e:                           # noqa: BLE001
-            rec = collect_metrics(model, base.num_ctx or 0,
-                                  base.ctx_ceiling or 0, 0.0, [],
-                                  error=str(e))
-        finally:
-            session.reset(token)
-        print(f"[bench] {model}: {rec.get('error') or 'ok'}"
-              f" ({rec['seconds']}s, {rec['tool_count']} tools,"
-              f" {rec['agents_used']} agents)")
-        records.append(rec)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     path = out_dir / f'results-{stamp}.json'
-    path.write_text(json.dumps(records, indent=2, ensure_ascii=False),
-                    encoding='utf-8')
+    records = []
+
+    def _flush() -> None:
+        path.write_text(json.dumps(records, indent=2, ensure_ascii=False),
+                        encoding='utf-8')
+
+    try:
+        for adapter_name, model in sort_models(models):
+            adapter = _adapter_for(adapter_name, built)
+            base = session.SessionState()
+            base.adapter = adapter
+            token = session.use(base)
+            try:
+                if adapter is None:
+                    raise RuntimeError(f"no adapter for '{adapter_name}'")
+                session.adapter = adapter
+                adapter.activate(model)
+                t0 = time.monotonic()
+                agents = asyncio.run(run_once(base))
+                secs = time.monotonic() - t0
+                rec = collect_metrics(model, base.num_ctx, base.ctx_ceiling,
+                                      secs, agents)
+            except Exception as e:                       # noqa: BLE001
+                rec = collect_metrics(model, base.num_ctx or 0,
+                                      base.ctx_ceiling or 0, 0.0, [],
+                                      error=str(e))
+            finally:
+                session.reset(token)
+            print(f"[bench] {model}: {rec.get('error') or 'ok'}"
+                  f" ({rec['seconds']}s, {rec['tool_count']} tools,"
+                  f" {rec['agents_used']} agents)")
+            records.append(rec)
+            _flush()          # persist after each model (survives Ctrl+C)
+    except KeyboardInterrupt:
+        print(f"[bench] interrupted — {len(records)} result(s) saved to"
+              f" {path}")
     return path
 
 

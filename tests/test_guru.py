@@ -1905,6 +1905,42 @@ class TestBenchRunner:
         assert data[0]['model'] == 'm1' and data[0]['result'] == 'A'
         assert data[0]['tokens_out'] == 10
 
+    def test_partial_results_saved_on_interrupt(
+            self, tmp_path, monkeypatch) -> None:
+        from guru.agents import Agent
+
+        class FakeAdapter:
+            name = 'fake'
+
+            def activate(self, m):
+                session.current().model = m
+                session.current().num_ctx = 4096
+                session.current().ctx_ceiling = 4096
+
+        monkeypatch.setattr(bench, '_build_adapters',
+                            lambda: [FakeAdapter()])
+        monkeypatch.setattr(bench, '_adapter_for',
+                            lambda name, built: built[0])
+        calls = {'n': 0}
+
+        def flaky_run_once(base):
+            calls['n'] += 1
+            if calls['n'] == 2:            # cancel during the 2nd model
+                raise KeyboardInterrupt
+            a = Agent(id='main', title='main')
+            a.state.model = base.model
+            a.state.messages = [{'role': 'assistant', 'content': 'A'}]
+            return [a]
+        monkeypatch.setattr(bench, 'run_once', flaky_run_once)
+        monkeypatch.setattr(bench.asyncio, 'run', lambda coro: coro)
+
+        path = bench.run_benchmark(
+            [(None, 'm1'), (None, 'm2')], out_dir=tmp_path)
+        import json
+        data = json.loads(path.read_text(encoding='utf-8'))
+        # the first model's result survived the cancel
+        assert len(data) == 1 and data[0]['model'] == 'm1'
+
 
 class TestBenchPlot:
     def test_points_skips_null_accuracy(self) -> None:
