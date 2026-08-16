@@ -189,14 +189,40 @@ again to refresh the sha, then retry.
 # Appended to the system prompt of delegation-capable agents (TUI only), to
 # steer heavy tool output out of the main context and into sub-agents.
 DELEGATION_HINT = (
-    "You can run work in parallel by delegating to sub-agents with the spawn"
-    " tool. Prefer this for any subtask that produces large tool output you"
-    " do not need in full — fetching web pages, reading big files, or broad"
-    " multi-step research. The sub-agent reads the bulk in its own context"
-    " and returns only its conclusion to you, keeping your own context small."
-    " Use check to poll a sub-agent and join to be resumed once a group"
-    " finishes."
+    "When a request spans multiple files or several concerns (correctness,"
+    " security, design, reliability, tests), DECOMPOSE it instead of"
+    " inspecting everything yourself: spawn one sub-agent per concern, in"
+    " parallel, each with the role+skill that fits, then join and synthesise"
+    " their findings. Each sub-agent reads the bulk in its own context and"
+    " returns only its conclusion, keeping yours small.\n"
+    "Example — to review this codebase, spawn in parallel:\n"
+    "  spawn(task='review the code for correctness, readability, tests',"
+    " role='developer', skill='code-review')\n"
+    "  spawn(task='review the code for injection, authz, secrets, path"
+    " traversal, vulnerable deps', role='security-engineer',"
+    " skill='code-review')\n"
+    "then join both and write one consolidated report. Add an architect"
+    " (design) or SRE (reliability) sub-agent when those concerns apply."
+    " Use check to poll and join to be resumed when a group finishes."
+    " Prefer delegating a domain panel over reading many files yourself."
 )
+
+# Deterministic code-review panel (the /review command) and the target of the
+# delegation steering: each entry is (role, skill, focus) — one specialist
+# sub-agent to spawn in parallel. Kept small on purpose; architect/SRE are
+# available in the catalog for the model to add when design/ops matter.
+REVIEW_PANEL = [
+    ('developer', 'code-review',
+     'correctness, readability, tests, and maintainability'),
+    ('security-engineer', 'code-review',
+     'security: injection, authz, secrets, path traversal, vulnerable deps'),
+]
+
+# Delegation nudge: if a delegation-capable MAIN agent answers a broad task
+# (>= this many file reads) having spawned no sub-agent, nudge it once to
+# decompose into a parallel domain panel. Set 0 to disable the nudge.
+DELEGATION_NUDGE_MIN_READS = 3
+DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
 
 # Domains approved for model-initiated web access, loaded at startup.
 ALLOWED_DOMAINS: set = set()

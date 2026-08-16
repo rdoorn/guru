@@ -545,6 +545,50 @@ class TestTurnLoop:
         turn.run_loop(step=step, run_tools=lambda p: None,
                       add_user=lambda t: None)   # returns, no exception
 
+    def _reads(self, n):
+        return [{'role': 'tool', 'tool_name': 'read_file', 'content': 'x'}
+                for _ in range(n)]
+
+    def test_delegation_nudges_broad_task(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 3)
+        monkeypatch.setattr(session, 'messages', self._reads(3))
+        seq = iter([("Here is my full assessment of the code.", []),
+                    ("Consolidated report.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert len(nudges) == 1 and 'decompose' in nudges[0].lower()
+
+    def test_no_delegation_nudge_for_subagent(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        monkeypatch.setattr(session, 'can_spawn', False)      # a sub-agent
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 3)
+        monkeypatch.setattr(session, 'messages', self._reads(3))
+        seq = iter([("An answer.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert nudges == []
+
+    def test_no_delegation_nudge_when_already_spawned(
+            self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 3)
+        msgs = self._reads(3) + [
+            {'role': 'tool', 'tool_name': 'spawn', 'content': 'ok'}]
+        monkeypatch.setattr(session, 'messages', msgs)
+        seq = iter([("An answer after delegating.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert nudges == []
+
 
 class TestGroupMessages:
     """Tests for conversation.group_messages turn-grouping."""

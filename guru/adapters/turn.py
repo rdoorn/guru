@@ -34,7 +34,7 @@ import re
 
 from rich.markdown import Markdown
 
-from guru import session, ui
+from guru import config, session, ui
 
 # A weak model sometimes ends a turn by announcing an action ("Let me read the
 # files…") without calling a tool; without a nudge that would be taken as the
@@ -49,6 +49,37 @@ _NUDGE_TEXT = (
     " this reply (use search_tools first if it is not active). If you are"
     " genuinely finished, give the final answer."
 )
+
+_DELEGATION_TEXT = (
+    "You inspected several files yourself. This task spans multiple concerns —"
+    " decompose it now instead of answering directly: spawn parallel"
+    " sub-agents, one per domain, then join and synthesise. For a review,"
+    " spawn(task='review the code for correctness, readability, tests',"
+    " role='developer', skill='code-review') AND spawn(task='review the code"
+    " for injection, authz, secrets, path traversal, vulnerable deps',"
+    " role='security-engineer', skill='code-review'), then join both and give"
+    " one consolidated report. Add architect/SRE sub-agents if design or"
+    " reliability matter."
+)
+
+
+def _should_delegate() -> bool:
+    """True when a delegation-capable main agent has read enough files to make
+    a domain panel worthwhile but has not spawned a single sub-agent — the cue
+    for the one-time delegation nudge. Gated on file reads so trivial Q&A never
+    triggers it. Disabled when DELEGATION_NUDGE_MIN_READS is 0."""
+    if not session.can_spawn or config.DELEGATION_NUDGE_MIN_READS <= 0:
+        return False
+    reads = 0
+    for m in session.messages:
+        if not isinstance(m, dict) or m.get('role') != 'tool':
+            continue
+        name = m.get('tool_name', '')
+        if name == 'spawn':
+            return False                 # already delegated — leave it alone
+        if name in config.DELEGATION_READ_TOOLS:
+            reads += 1
+    return reads >= config.DELEGATION_NUDGE_MIN_READS
 
 
 def looks_like_preamble(content: str) -> bool:
@@ -77,6 +108,7 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     session.cancel_requested = False
     called: set = set()
     nudged = 0
+    delegation_nudged = False
     while True:
         if session.cancel_requested:
             ui.console.print("[yellow]* cancelled[/yellow]")
@@ -103,6 +135,14 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
                     " — asking it to act"
                 )
                 add_user(_NUDGE_TEXT)
+                continue
+            if (nudge and not delegation_nudged and content
+                    and _should_delegate()):
+                delegation_nudged = True
+                ui.console.print(
+                    "[dim yellow]\\[DELEGATE][/dim yellow] broad task, no"
+                    " sub-agents — asking it to spawn a domain panel")
+                add_user(_DELEGATION_TEXT)
                 continue
             _render_answer(content)
             return
