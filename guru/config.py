@@ -59,6 +59,13 @@ OUTLINE_FILE_OVER_CHARS = 8000
 # doing). Overridable via settings.toml's [tools] preactivate = [...].
 PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
 
+# Flat toolset: when true, EVERY registry tool is pre-activated on each agent,
+# so a capable model gets the whole toolset up front and never needs the
+# search_tools discovery hop. Costs more prompt tokens per turn (all schemas
+# are always sent), so it's off by default and best for large-context models.
+# Overridable via settings.toml's [tools] flat = true.
+FLAT_TOOLS = False
+
 # Sampling overrides applied on top of a model's own modelfile defaults (the
 # authoritative per-model source). Empty by default so each model keeps its
 # author-tuned params. settings.toml [sampling] holds global scalar overrides;
@@ -344,7 +351,7 @@ def _apply_settings() -> None:
     """Apply settings.toml overrides (retention, pre-activation, sampling)."""
     global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
-    global BENCH_MODEL_TIMEOUT
+    global BENCH_MODEL_TIMEOUT, FLAT_TOOLS
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -357,6 +364,7 @@ def _apply_settings() -> None:
     pre = tl.get('preactivate')
     if isinstance(pre, list):
         PREACTIVATE_TOOLS = [str(x) for x in pre]
+    FLAT_TOOLS = bool(tl.get('flat', FLAT_TOOLS))
     sampling = settings_section('sampling')
     # Scalar keys are global overrides; sub-tables are per-model overrides.
     SAMPLING = {k: v for k, v in sampling.items()

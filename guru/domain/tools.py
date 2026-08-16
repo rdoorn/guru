@@ -598,10 +598,14 @@ def specs_for(active_tool_names, can_spawn: bool) -> list:
 
 
 def _core_tool_fns() -> list:
-    """(name, fn) for the config-driven pre-activated core toolset — the tools
-    a weak model can call directly without going through search_tools first."""
+    """(name, fn) for the pre-activated toolset — the tools an agent can call
+    directly without going through search_tools first. Normally the
+    config-driven core set; when [tools] flat = true it is the ENTIRE registry,
+    so a capable model gets the whole toolset up front (no search_tools hop)."""
+    names = (list(TOOL_REGISTRY) if config.FLAT_TOOLS
+             else config.PREACTIVATE_TOOLS)
     out = []
-    for name in config.PREACTIVATE_TOOLS:
+    for name in names:
         info = TOOL_REGISTRY.get(name)
         if info:
             out.append((name, info['fn']))

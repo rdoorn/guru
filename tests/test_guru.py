@@ -2181,6 +2181,14 @@ class TestToolsAndSamplingSettings:
         assert config.SAMPLING_PER_MODEL == {
             'batiai/qwen3.6-27b:q3': {'temperature': 0.6, 'top_p': 0.95}}
 
+    def test_apply_reads_flat_tools(self, tmp_path, monkeypatch) -> None:
+        p = tmp_path / 'settings.toml'
+        p.write_text('[tools]\nflat = true\n', encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        monkeypatch.setattr(config, 'FLAT_TOOLS', False)
+        config._apply_settings()
+        assert config.FLAT_TOOLS is True
+
 
 class TestInitialTools:
     """The pre-activated core toolset lets weak models skip search_tools."""
@@ -2198,6 +2206,13 @@ class TestInitialTools:
         monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', [])
         base, names = tools.initial_tools(can_spawn=True)
         assert tools.spawn in base and names == set()
+
+    def test_flat_activates_entire_registry(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'FLAT_TOOLS', True)
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', [])
+        base, names = tools.initial_tools(can_spawn=False)
+        assert names == set(tools.TOOL_REGISTRY)     # every registry tool
+        assert len(names) > len(['read_file', 'search_code'])
 
 
 class TestSamplingOptions:
