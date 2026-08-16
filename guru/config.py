@@ -66,6 +66,14 @@ PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
 SAMPLING: dict = {}              # global scalar overrides (all models)
 SAMPLING_PER_MODEL: dict = {}    # {model_id: {param: value}}
 
+# Per-model wall-clock ceiling for the headless benchmark (guru.bench). A model
+# that stalls past this is cancelled cooperatively (the adapters' cancel path —
+# Ollama aborts mid-stream) and recorded as a timeout, so one slow/thrashing
+# model can't hang the whole suite. Overridable via settings.toml [bench]
+# model_timeout (seconds). Set above the slowest legitimate run (a real 24B run
+# can take ~400s); 0 disables the guard.
+BENCH_MODEL_TIMEOUT = 600
+
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
 # It is only a default: a stored per-model choice or a manual /context or
@@ -336,6 +344,7 @@ def _apply_settings() -> None:
     """Apply settings.toml overrides (retention, pre-activation, sampling)."""
     global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
+    global BENCH_MODEL_TIMEOUT
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -354,6 +363,12 @@ def _apply_settings() -> None:
                 if not isinstance(v, dict)}
     SAMPLING_PER_MODEL = {k: v for k, v in sampling.items()
                           if isinstance(v, dict)}
+    bench = settings_section('bench')
+    try:
+        BENCH_MODEL_TIMEOUT = int(
+            bench.get('model_timeout', BENCH_MODEL_TIMEOUT))
+    except (TypeError, ValueError):
+        pass
 
 
 def _toml_value(value: object) -> str:

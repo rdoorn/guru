@@ -6,7 +6,9 @@ qwen3:14b
 hf.co/unsloth/Qwen3-14B-128K-GGUF:Q4_K_M
 devstral-small-2:24b
 gpt-oss-20b-32k:latest
-batiai/qwen3.6-27b:q3
+# Dropped batiai/qwen3.6-27b:q3 — q3 is a poor benchmark candidate: slow (27B)
+# and the aggressive quant degrades tool-use, so it thrashes and stalls. Re-add
+# with a better quant (q4/q5) if you want a 27B data point.
 # Cloud baseline via the configured litellm adapter (needs it set up in
 # ~/.guru/adapters.toml). Much faster; we want to see by how much.
 litellm|aws/claude-4-8-opus

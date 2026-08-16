@@ -1886,6 +1886,21 @@ class TestBenchOrchestrator:
             tools.set_check_handler(None)
             tools.set_join_handler(None)
 
+    def test_abort_flags_cancel_on_stalled_agents(self) -> None:
+        import asyncio
+        from guru.agents import Agent
+
+        b = bench._Bench(session.SessionState())
+        stuck = Agent(id='main', title='main')
+        stuck.busy = True                 # never winds down on its own
+        b.manager.agents = [stuck]
+
+        async def drive() -> None:
+            b.loop = asyncio.get_running_loop()
+            await b._abort(grace=0.2)     # gives up after the grace window
+        asyncio.run(drive())
+        assert stuck.state.cancel_requested is True
+
 
 class TestBenchRunner:
     def test_writes_results_json(self, tmp_path, monkeypatch) -> None:
@@ -1920,6 +1935,41 @@ class TestBenchRunner:
         assert len(data) == 1
         assert data[0]['model'] == 'm1' and data[0]['result'] == 'A'
         assert data[0]['tokens_out'] == 10
+
+    def test_records_timeout_when_over_limit(
+            self, tmp_path, monkeypatch) -> None:
+        from guru.agents import Agent
+
+        class FakeAdapter:
+            name = 'fake'
+
+            def activate(self, m):
+                session.current().model = m
+                session.current().num_ctx = 4096
+                session.current().ctx_ceiling = 4096
+
+        monkeypatch.setattr(bench, '_build_adapters',
+                            lambda: [FakeAdapter()])
+        monkeypatch.setattr(bench, '_adapter_for',
+                            lambda name, built: built[0])
+        monkeypatch.setattr(config, 'BENCH_MODEL_TIMEOUT', 600)
+
+        def slow_run_once(base):
+            a = Agent(id='main', title='main')
+            a.state.model = base.model
+            a.state.messages = [{'role': 'assistant', 'content': 'partial'}]
+            return [a]
+        monkeypatch.setattr(bench, 'run_once', slow_run_once)
+        monkeypatch.setattr(bench.asyncio, 'run', lambda coro: coro)
+        # Simulate a run whose wall-clock overran the limit (t0=0, end=700).
+        times = iter([0.0, 700.0])
+        monkeypatch.setattr(bench.time, 'monotonic', lambda: next(times))
+
+        path = bench.run_benchmark([(None, 'm1')], out_dir=tmp_path)
+        data = json.loads(path.read_text(encoding='utf-8'))
+        assert 'timeout' in (data[0]['error'] or '')
+        # partial metrics are still recorded, not discarded
+        assert data[0]['result'] == 'partial'
 
     def test_partial_results_saved_on_interrupt(
             self, tmp_path, monkeypatch) -> None:

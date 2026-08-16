@@ -234,11 +234,27 @@ class _Bench:
         return "[joined]\n" + "\n".join(
             f"[{t}] {tk}\n{ans}" for t, (tk, ans) in results.items())
 
-    async def run(self, prompt) -> list:
+    async def _abort(self, grace: float = 30.0) -> None:
+        """Cooperatively stop a stalled run: flag cancel on every agent (the
+        adapters check it — Ollama aborts mid-stream) and wait briefly for the
+        worker threads to wind down. Threads can't be force-killed, so this is
+        best-effort; mid-stream cancel usually stops generation quickly."""
+        assert self.loop is not None
+        end = self.loop.time() + grace
+        while any(a.busy for a in self.manager.agents):
+            for a in self.manager.agents:
+                a.state.cancel_requested = True
+            if self.loop.time() >= end:
+                break
+            await asyncio.sleep(0.05)
+
+    async def run(self, prompt, timeout=None) -> list:
         self.loop = asyncio.get_running_loop()
         tools.set_spawn_handler(self._spawn)
         tools.set_check_handler(self._check)
         tools.set_join_handler(self._join)
+        deadline = (self.loop.time() + timeout) if timeout and timeout > 0 \
+            else None
         try:
             main = self.manager.active
             self._configure(main, can_spawn=True)
@@ -246,6 +262,9 @@ class _Bench:
             self._launch(main)
             while any(a.busy or a.queue for a in self.manager.agents):
                 await asyncio.sleep(0.05)
+                if deadline is not None and self.loop.time() >= deadline:
+                    await self._abort()
+                    break
         finally:
             tools.set_spawn_handler(None)
             tools.set_check_handler(None)
@@ -255,9 +274,12 @@ class _Bench:
 
 async def run_once(base_state) -> list:
     """Run PROMPT through a fresh main agent (+ any sub-agents it spawns) on
-    base_state's adapter/model/ctx. Returns all agents that ran (main
-    first)."""
-    return await _Bench(base_state).run(PROMPT)
+    base_state's adapter/model/ctx. Returns all agents that ran (main first).
+
+    A per-model wall-clock ceiling (config.BENCH_MODEL_TIMEOUT) cooperatively
+    cancels a stalled run so one slow model can't hang the suite."""
+    return await _Bench(base_state).run(
+        PROMPT, timeout=config.BENCH_MODEL_TIMEOUT)
 
 
 _ADAPTER_CLASS = {
@@ -330,8 +352,11 @@ def run_benchmark(models, out_dir=BENCH_DIR):
                 t0 = time.monotonic()
                 agents = asyncio.run(run_once(base))
                 secs = time.monotonic() - t0
+                limit = config.BENCH_MODEL_TIMEOUT
+                err = (f"timeout after {int(secs)}s (limit {limit}s)"
+                       if limit and secs >= limit else None)
                 rec = collect_metrics(model, base.num_ctx, base.ctx_ceiling,
-                                      secs, agents)
+                                      secs, agents, error=err)
             except Exception as e:                       # noqa: BLE001
                 rec = collect_metrics(model, base.num_ctx or 0,
                                       base.ctx_ceiling or 0, 0.0, [],
