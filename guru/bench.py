@@ -124,7 +124,8 @@ def serialize_transcript(agents) -> list:
                          else getattr(fn, 'name', '')) if fn else '')
                 rec['tool_calls'] = names
             msgs.append(rec)
-        out.append({'title': a.title, 'model': a.state.model, 'messages': msgs})
+        out.append(
+            {'title': a.title, 'model': a.state.model, 'messages': msgs})
     return out
 
 
@@ -354,8 +355,8 @@ def run_benchmark(models, out_dir=BENCH_DIR):
     """Run each (adapter_name, model) through guru on PROMPT, collect metrics,
     and write bench/results-<timestamp>.json plus a companion
     transcript-<timestamp>.json (full message histories, for debugging why an
-    answer was empty). Both are rewritten after every model, so a Ctrl+C mid-run
-    keeps what was gathered. Returns the results file path."""
+    answer was empty). Both are rewritten after every model, so a Ctrl+C
+    mid-run keeps what was gathered. Returns the results file path."""
     built = _build_adapters()
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')

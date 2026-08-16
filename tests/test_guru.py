@@ -2235,3 +2235,50 @@ class TestSamplingOptions:
         assert a._sampling_options('devstral')['temperature'] == 0.7
         opts = a._sampling_options('qwen3:14b')
         assert opts['temperature'] == 0.6 and opts['top_p'] == 0.95
+
+
+class TestRunTurnIntegration:
+    """End-to-end: a real adapter's run_turn drives the shared loop, runs a
+    REAL tool via execute_tool, threads the result, and renders a final
+    answer. Only the network round (_collect_response) is mocked."""
+
+    def test_ollama_calls_tool_then_answers(
+            self, tmp_path, monkeypatch) -> None:
+        import ollama
+        (tmp_path / 'hello.txt').write_text('hi', encoding='utf-8')
+        # allow reading the temp dir; run non-interactively
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', {str(tmp_path)})
+        monkeypatch.setattr(files, 'set_path_asker', lambda fn: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'num_ctx', 4096)
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'active_tool_names', {'list_dir'})
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'list the directory'}])
+
+        a = OllamaAdapter()
+        monkeypatch.setattr(a, '_fit_after_load', lambda: None)
+        # Two rounds: a tool call, then a final answer.
+        seq = [
+            ollama.Message(role='assistant', content='', tool_calls=[{
+                'function': {'name': 'list_dir',
+                             'arguments': {'path': str(tmp_path)}}}]),
+            ollama.Message(role='assistant',
+                           content='The directory has one file.',
+                           tool_calls=None),
+        ]
+        it = iter(seq)
+        monkeypatch.setattr(a, '_collect_response', lambda: next(it))
+
+        a.run_turn()
+
+        tool_msgs = [m for m in session.messages
+                     if isinstance(m, dict) and m.get('role') == 'tool']
+        assert tool_msgs and tool_msgs[0]['tool_name'] == 'list_dir'
+        assert 'hello.txt' in tool_msgs[0]['content']
+        finals = [m for m in session.messages
+                  if conversation.msg_role(m) == 'assistant'
+                  and 'one file' in conversation.msg_content(m)]
+        assert finals            # a real final answer was rendered

@@ -601,7 +601,8 @@ def _core_tool_fns() -> list:
     """(name, fn) for the pre-activated toolset — the tools an agent can call
     directly without going through search_tools first. Normally the
     config-driven core set; when [tools] flat = true it is the ENTIRE registry,
-    so a capable model gets the whole toolset up front (no search_tools hop)."""
+    so a capable model gets the whole toolset up front (no search_tools
+    hop)."""
     names = (list(TOOL_REGISTRY) if config.FLAT_TOOLS
              else config.PREACTIVATE_TOOLS)
     out = []
