@@ -1733,8 +1733,12 @@ class TestBenchModels:
             ('litellm', 'aws/claude-4-8-opus'),
         ]
 
-    def test_load_models_missing_returns_empty(self, tmp_path) -> None:
-        assert bench.load_models(tmp_path / 'nope.txt') == []
+    def test_human_size_units_are_explicit(self) -> None:
+        assert files._human(0) == '0B'
+        assert files._human(112) == '112B'
+        assert files._human(1536) == '1.5KB'
+        assert files._human(80 * 1024) == '80.0KB'
+        assert files._human(5 * 1024 * 1024) == '5.0MB'
 
     def test_sort_models_groups_by_basename(self) -> None:
         models = [

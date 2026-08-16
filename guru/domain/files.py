@@ -121,14 +121,17 @@ def _octal(mode: int) -> str:
 
 
 def _human(size: int) -> str:
+    """Human byte size with an explicit two-letter unit (KB/MB/GB, and B for
+    bytes) so models don't misread the unit — e.g. '112B', '4.8KB', '2.1MB'.
+    Kept as a single token so the 'perm size path' columns stay parseable."""
     value = float(size)
-    for unit in ('B', 'K', 'M', 'G', 'T'):
-        if value < 1024 or unit == 'T':
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if value < 1024 or unit == 'TB':
             if unit == 'B':
                 return f"{int(value)}{unit}"
             return f"{value:.1f}{unit}"
         value /= 1024
-    return f"{value:.1f}T"
+    return f"{value:.1f}TB"
 
 
 def _row(st, name: str) -> str:
