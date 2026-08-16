@@ -7,6 +7,7 @@ reused by that UI.
 import argparse
 
 from guru import config, session, ui
+from guru.adapters.base import Adapter
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
@@ -71,7 +72,7 @@ def _enabled_adapters() -> list:
     return [a for a in ADAPTERS if a.enabled] or ADAPTERS
 
 
-def _select_model(adapter: object, model_id: str) -> None:
+def _select_model(adapter: Adapter, model_id: str) -> None:
     """Make (adapter, model_id) the active provider + model and persist it."""
     session.adapter = adapter
     adapter.activate(model_id)
@@ -304,7 +305,7 @@ def _handle_slash_search(query: str) -> None:
         [r for r in scored if tools._relevance_score(query, r) > 0][:5]
         or scored[:3]
     )
-    urls = [r.get('href') for r in relevant if r.get('href')]
+    urls: list = [h for r in relevant if (h := r.get('href'))]
     if not urls:
         return
 

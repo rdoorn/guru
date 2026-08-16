@@ -194,15 +194,17 @@ def run() -> None:
         if fn not in main.state.active_tools:
             main.state.active_tools.append(fn)
 
-    state = {'loop': None, 'view': 'main', 'quit': False, 'closing': False}
+    state: dict = {
+        'loop': None, 'view': 'main', 'quit': False, 'closing': False}
     cols = shutil.get_terminal_size((100, 30)).columns
     barriers: dict = {}
     ask_lock = threading.Lock()
 
     main_writer = _MainWriter(main, state)
     main.console = Console(
-        file=main_writer, force_terminal=True,
-        color_system='256', width=cols)
+        # _MainWriter is a duck-typed file-like sink, not a real IO[str].
+        file=main_writer,  # type: ignore[arg-type]
+        force_terminal=True, color_system='256', width=cols)
 
     # --- permission asker (run_in_terminal; works in either view) -----------
 
@@ -248,8 +250,9 @@ def run() -> None:
         writer.target = agent
         writer.refresh = _invalidate
         agent.console = Console(
-            file=writer, force_terminal=True,
-            color_system='256', width=cols)
+            # _BufferWriter is a duck-typed file-like sink, not a real IO[str].
+            file=writer,  # type: ignore[arg-type]
+            force_terminal=True, color_system='256', width=cols)
 
     # --- background execution (workers only run the blocking turn) ----------
 
@@ -574,7 +577,7 @@ def run() -> None:
         statusline,
         tabline,
     ])
-    tui_app = Application(
+    tui_app: Application = Application(
         layout=Layout(root, focused_element=input_area),
         key_bindings=tui_kb,
         full_screen=True,
@@ -624,7 +627,7 @@ def run() -> None:
         _cycle_mode()
         event.app.invalidate()   # refresh the mode shown in the status bar
 
-    ps = PromptSession(
+    ps: PromptSession = PromptSession(
         history=FileHistory(str(config.GURU_HOME / 'history')),
         multiline=True,
         key_bindings=merge_key_bindings([ui._kb, main_kb]),

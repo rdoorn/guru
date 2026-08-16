@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
@@ -145,22 +146,22 @@ _kb = KeyBindings()
 
 
 @_kb.add('f13')
-def _shift_enter(event: object) -> None:
+def _shift_enter(event: Any) -> None:
     event.current_buffer.insert_text('\n')
 
 
 @_kb.add('f14')
-def _mk_enter(event: object) -> None:
+def _mk_enter(event: Any) -> None:
     event.current_buffer.validate_and_handle()
 
 
 @_kb.add('escape', 'enter')
-def _escape_enter(event: object) -> None:
+def _escape_enter(event: Any) -> None:
     event.current_buffer.validate_and_handle()
 
 
 @_kb.add('enter')
-def _enter(event: object) -> None:
+def _enter(event: Any) -> None:
     if event.app.key_processor.input_queue:
         event.current_buffer.insert_text('\n')
     else:
@@ -168,11 +169,11 @@ def _enter(event: object) -> None:
 
 
 @_kb.add('c-j')
-def _linefeed(event: object) -> None:
+def _linefeed(event: Any) -> None:
     event.current_buffer.insert_text('\n')
 
 
-prompt_session = PromptSession(
+prompt_session: PromptSession = PromptSession(
     history=FileHistory(str(config.GURU_HOME / 'history')),
     multiline=True,
     key_bindings=_kb,
@@ -257,25 +258,25 @@ def pick(title: str, options: list, active_idx: int = -1,
     kb = KeyBindings()
 
     @kb.add('up')
-    def _up(event: object) -> None:
+    def _up(event: Any) -> None:
         state['idx'] = _first_selectable(
             (state['idx'] - 1) % len(options), -1)
 
     @kb.add('down')
-    def _down(event: object) -> None:
+    def _down(event: Any) -> None:
         state['idx'] = _first_selectable(
             (state['idx'] + 1) % len(options), 1)
 
     @kb.add('enter')
-    def _select(event: object) -> None:
+    def _select(event: Any) -> None:
         event.app.exit(result=state['idx'])
 
     @kb.add('escape')
     @kb.add('c-c')
-    def _cancel(event: object) -> None:
+    def _cancel(event: Any) -> None:
         event.app.exit(result=None)
 
-    app = Application(
+    app: Application = Application(
         layout=Layout(
             Window(
                 FormattedTextControl(_text, focusable=True),
@@ -321,27 +322,27 @@ def pick_multi(title: str, options: list, states: list):
     kb = KeyBindings()
 
     @kb.add('up')
-    def _up(event: object) -> None:
+    def _up(event: Any) -> None:
         state['idx'] = (state['idx'] - 1) % len(options)
 
     @kb.add('down')
-    def _down(event: object) -> None:
+    def _down(event: Any) -> None:
         state['idx'] = (state['idx'] + 1) % len(options)
 
     @kb.add('space')
-    def _toggle(event: object) -> None:
+    def _toggle(event: Any) -> None:
         states[state['idx']] = not states[state['idx']]
 
     @kb.add('enter')
-    def _confirm(event: object) -> None:
+    def _confirm(event: Any) -> None:
         event.app.exit(result=states)
 
     @kb.add('escape')
     @kb.add('c-c')
-    def _cancel(event: object) -> None:
+    def _cancel(event: Any) -> None:
         event.app.exit(result=None)
 
-    app = Application(
+    app: Application = Application(
         layout=Layout(
             Window(
                 FormattedTextControl(_text, focusable=True),

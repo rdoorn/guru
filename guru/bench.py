@@ -6,6 +6,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from rich.console import Console
 
@@ -104,7 +105,7 @@ class _Bench:
     def __init__(self, base) -> None:
         self.base = base
         self.manager = AgentManager()
-        self.loop = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.barriers: dict = {}
 
     def _agent_for_state(self, st):
@@ -144,10 +145,12 @@ class _Bench:
         finally:
             ui.reset_console(ct)
             session.reset(tok)
+            assert self.loop is not None      # set in run() before any work
             self.loop.call_soon_threadsafe(self._on_done, agent)
 
     def _launch(self, agent) -> None:
         agent.busy = True
+        assert self.loop is not None          # set in run() before any launch
         self.loop.run_in_executor(None, self._work, agent)
 
     def _final_answer(self, agent) -> str:
@@ -201,6 +204,7 @@ class _Bench:
             self.manager.agents.append(child)
             self._launch(child)
 
+        assert self.loop is not None          # set in run() before any spawn
         self.loop.call_soon_threadsafe(_add_start)
         return f"Spawned {title}; its result is delivered when it finishes."
 

@@ -71,19 +71,22 @@ class OllamaAdapter(Adapter):
             log.exc('ollama.list models failed')
             return []
         infos = []
+        # Skip any entry without a model name (the client types it Optional).
+        named = [m for m in models if m.model]
         # Sort by the name after the last '/' so related models line up in the
         # picker regardless of their prefix (batiai/, hf.co/…, huihui_ai/…).
-        for m in sorted(models, key=lambda x: x.model.rsplit('/', 1)[-1]
+        for m in sorted(named, key=lambda x: (x.model or '').rsplit('/', 1)[-1]
                         .lower()):
-            num_ctx, ceiling = self._resolve_context_window(m.model)
+            model_id: str = m.model or ''
+            num_ctx, ceiling = self._resolve_context_window(model_id)
             infos.append(ModelInfo(
                 adapter=self.name,
-                model_id=m.model,
-                label=m.model,
+                model_id=model_id,
+                label=model_id,
                 # Report the model's architecture max so /models and /context
                 # agree; the running context is shown in the status bar.
                 context_window=ceiling or num_ctx,
-                size=self._param_size(m.model),
+                size=self._param_size(model_id),
                 # On-disk weight size is a good proxy for the RAM needed to
                 # run the model; used to flag models that won't fit memory.
                 memory=int(getattr(m, 'size', 0) or 0),

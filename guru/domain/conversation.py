@@ -17,16 +17,20 @@ from guru.domain import tools
 
 def message_to_dict(msg: object) -> dict:
     """Normalise a message (dict or provider object) to a clean JSON dict."""
-    if not isinstance(msg, dict):
-        msg = msg.model_dump() if hasattr(msg, 'model_dump') else dict(msg)
+    if isinstance(msg, dict):
+        data: dict = msg
+    elif hasattr(msg, 'model_dump'):
+        data = msg.model_dump()
+    else:
+        data = dict(msg)  # type: ignore[call-overload]
     out: dict = {
-        'role': msg.get('role', 'user'),
-        'content': msg.get('content') or '',
+        'role': data.get('role', 'user'),
+        'content': data.get('content') or '',
     }
-    if msg.get('tool_name'):
-        out['tool_name'] = msg['tool_name']
-    if msg.get('tool_calls'):
-        out['tool_calls'] = msg['tool_calls']
+    if data.get('tool_name'):
+        out['tool_name'] = data['tool_name']
+    if data.get('tool_calls'):
+        out['tool_calls'] = data['tool_calls']
     return out
 
 
