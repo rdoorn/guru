@@ -224,6 +224,27 @@ REVIEW_PANEL = [
 DELEGATION_NUDGE_MIN_READS = 3
 DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
 
+
+def review_prompt(area: str = 'the repository') -> str:
+    """A delegation-first review instruction built from REVIEW_PANEL: spawn the
+    fixed domain panel in parallel, then join and synthesise one report. Used
+    by the /review command so the multi-agent path is exercised on demand
+    without the user hand-writing the spawn calls."""
+    lines = [
+        f"Review {area}. Delegate a domain panel — spawn these sub-agents in"
+        " parallel, then join them and write ONE consolidated report grouped"
+        " by severity. Spawn exactly:"]
+    for role, skill, focus in REVIEW_PANEL:
+        lines.append(
+            f"- spawn(task='Review {area} for {focus}. Give concrete findings"
+            f" with file:line and a suggested fix.', role='{role}',"
+            f" skill='{skill}')")
+    lines.append(
+        "Spawn all of them now, then join and synthesise their findings."
+        " Do not review everything yourself.")
+    return "\n".join(lines)
+
+
 # Domains approved for model-initiated web access, loaded at startup.
 ALLOWED_DOMAINS: set = set()
 # Directories approved for model-initiated file READS (resolved absolute

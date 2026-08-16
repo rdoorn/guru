@@ -748,6 +748,10 @@ def run() -> None:
             import guru.cli as cli
             await _in_terminal(cli._handle_slash_search, text[8:].strip())
             return True
+        if text == '/review' or text.startswith('/review '):
+            area = text[7:].strip() or 'the repository'
+            _submit(main, config.review_prompt(area))
+            return True
         if text == '/save':
             conversation.save_conversation()
             return True
@@ -813,7 +817,7 @@ def run() -> None:
             "Enter submits · Ctrl+N new agent · Shift+Right view agents"
             " · Shift+Tab cycle access mode · double Ctrl+C exit")
         main.console.print(
-            "[dim]/mode /role /skill /models /context /adapters /save"
+            "[dim]/mode /role /skill /review /models /context /adapters /save"
             " /resume /compact /search[/dim]\n")
 
     async def _amain() -> None:

@@ -487,6 +487,22 @@ class TestStreamingCancel:
         assert closed['v'] is True        # stream closed -> generation aborted
 
 
+class TestReviewPrompt:
+    """The /review command's data-driven panel instruction."""
+
+    def test_review_prompt_lists_the_panel(self) -> None:
+        p = config.review_prompt('the repo')
+        assert 'the repo' in p
+        # one spawn(...) line per panel member, with role + skill
+        assert p.count('spawn(') == len(config.REVIEW_PANEL)
+        for role, skill, _focus in config.REVIEW_PANEL:
+            assert f"role='{role}'" in p and f"skill='{skill}'" in p
+        assert 'join' in p.lower() and 'yourself' in p.lower()
+
+    def test_review_prompt_default_area(self) -> None:
+        assert 'the repository' in config.review_prompt()
+
+
 class TestTurnLoop:
     """The shared, provider-agnostic tool-calling loop (guru.adapters.turn).
 
