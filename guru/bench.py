@@ -44,6 +44,13 @@ def load_models(path: Path = MODELS_FILE) -> list:
     return out
 
 
+def sort_models(models: list) -> list:
+    """Order (adapter, model) tuples by the name after the last '/', so related
+    models line up regardless of their path prefix (e.g. all the qwen* group
+    together whether they're 'qwen3:14b' or 'hf.co/unsloth/Qwen3-14B-...')."""
+    return sorted(models, key=lambda am: am[1].rsplit('/', 1)[-1].lower())
+
+
 def _final_answer(agent) -> str:
     for m in reversed(agent.state.messages):
         if conversation.msg_role(m) == 'assistant' \
@@ -286,7 +293,7 @@ def run_benchmark(models, out_dir=BENCH_DIR):
     and write bench/results-<timestamp>.json. Returns the file path."""
     built = _build_adapters()
     records = []
-    for adapter_name, model in models:
+    for adapter_name, model in sort_models(models):
         adapter = _adapter_for(adapter_name, built)
         base = session.SessionState()
         base.adapter = adapter

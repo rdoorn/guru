@@ -1715,6 +1715,24 @@ class TestBenchModels:
     def test_load_models_missing_returns_empty(self, tmp_path) -> None:
         assert bench.load_models(tmp_path / 'nope.txt') == []
 
+    def test_sort_models_groups_by_basename(self) -> None:
+        models = [
+            (None, 'gpt-oss-20b-32k:latest'),
+            (None, 'qwen3:14b'),
+            ('litellm', 'aws/claude-4-8-opus'),
+            (None, 'hf.co/unsloth/Qwen3-14B-128K-GGUF:Q4_K_M'),
+            (None, 'batiai/qwen3.6-27b:q3'),
+        ]
+        ordered = [m for _, m in bench.sort_models(models)]
+        # all qwen* adjacent; sorted by the name after the last '/'
+        assert ordered == [
+            'aws/claude-4-8-opus',                      # claude-...
+            'gpt-oss-20b-32k:latest',                   # gpt-oss-...
+            'hf.co/unsloth/Qwen3-14B-128K-GGUF:Q4_K_M',  # qwen3-14b-128k
+            'batiai/qwen3.6-27b:q3',                    # qwen3.6-...
+            'qwen3:14b',                                # qwen3:14b
+        ]
+
 
 class TestBenchMetrics:
     def _agent(self, title, model, tool_names, tin, tout,
