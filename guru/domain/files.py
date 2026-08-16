@@ -326,7 +326,10 @@ def read_file(path: str, lines: str = '') -> str:
 
 
 def _walk_files(root: Path):
-    """Yield files under root (breadth-ish), skipping noise directories."""
+    """Yield files under root (breadth-ish), skipping noise directories and any
+    symlink whose target escapes ``root`` — so a link inside an allowed tree
+    can't leak files from outside it (search_code reads what this yields)."""
+    root_real = root.resolve()
     stack = [root]
     while stack:
         d = stack.pop()
@@ -335,6 +338,11 @@ def _walk_files(root: Path):
         except OSError:
             continue
         for p in children:
+            if p.is_symlink():
+                try:
+                    p.resolve().relative_to(root_real)
+                except (ValueError, OSError):
+                    continue          # target escapes the tree — skip
             if p.is_dir():
                 if p.name not in _NOISE_DIRS:
                     stack.append(p)

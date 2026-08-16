@@ -727,6 +727,22 @@ class TestFileTools:
         finally:
             files.set_path_asker(None)
 
+    def test_search_code_skips_escaping_symlink(
+            self, tmp_path, monkeypatch) -> None:
+        proj = tmp_path / 'proj'
+        proj.mkdir()
+        secret = tmp_path / 'secret.txt'           # outside the searched tree
+        secret.write_text('NEEDLE_SECRET\n')
+        (proj / 'real.py').write_text('NEEDLE_OK\n')
+        try:
+            (proj / 'link.txt').symlink_to(secret)
+        except (OSError, NotImplementedError):
+            import pytest
+            pytest.skip('symlinks not supported here')
+        self._only(monkeypatch, proj)
+        out = files.search_code('NEEDLE', str(proj))
+        assert 'real.py' in out and 'SECRET' not in out
+
     def test_search_code_smart_case(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch, tmp_path)
         (tmp_path / 'a.py').write_text('class Widget:\n    Thing = 1\n')
