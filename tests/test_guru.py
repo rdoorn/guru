@@ -1941,6 +1941,39 @@ class TestBenchRunner:
         # the first model's result survived the cancel
         assert len(data) == 1 and data[0]['model'] == 'm1'
 
+    def test_auto_denies_escalation_and_restores(
+            self, tmp_path, monkeypatch) -> None:
+        from guru.agents import Agent
+        from guru.domain import files as F
+
+        class FakeAdapter:
+            name = 'fake'
+
+            def activate(self, m):
+                session.current().num_ctx = 4096
+                session.current().ctx_ceiling = 4096
+
+        monkeypatch.setattr(bench, '_build_adapters',
+                            lambda: [FakeAdapter()])
+        monkeypatch.setattr(bench, '_adapter_for',
+                            lambda name, built: built[0])
+        seen = {}
+
+        def run_once(base):
+            # during the run, any permission prompt must be auto-denied
+            seen['path'] = F._path_asker('Allow WRITE?')
+            seen['domain'] = tools._domain_asker('Allow web?')
+            a = Agent(id='main', title='main')
+            a.state.messages = [{'role': 'assistant', 'content': 'x'}]
+            return [a]
+        monkeypatch.setattr(bench, 'run_once', run_once)
+        monkeypatch.setattr(bench.asyncio, 'run', lambda coro: coro)
+
+        bench.run_benchmark([(None, 'm1')], out_dir=tmp_path)
+        assert seen['path'] is False and seen['domain'] is False
+        # askers are restored (not left denying) after the run
+        assert tools._domain_asker is None and F._path_asker is None
+
 
 class TestBenchPlot:
     def test_points_skips_null_accuracy(self) -> None:

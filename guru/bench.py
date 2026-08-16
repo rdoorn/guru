@@ -14,7 +14,7 @@ from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
 from guru.agents import Agent, AgentManager
-from guru.domain import conversation, tools
+from guru.domain import conversation, files, tools
 
 PROMPT = ("i want you to inspect current code in this repository, and tell me"
           " something about code quality")
@@ -303,6 +303,14 @@ def run_benchmark(models, out_dir=BENCH_DIR):
         path.write_text(json.dumps(records, indent=2, ensure_ascii=False),
                         encoding='utf-8')
 
+    # Sandbox: allow reading the repo (the task needs it) but AUTO-DENY every
+    # escalation (writes, new dirs, web) — an unattended run must never sit on
+    # or grant a permission prompt, and a model asking for more rights is
+    # denied (which is itself part of what we measure).
+    config.ALLOWED_READ_DIRS.add(str(Path.cwd().resolve()))
+    tools.set_domain_asker(lambda q: False)
+    files.set_path_asker(lambda q: False)
+
     try:
         for adapter_name, model in sort_models(models):
             adapter = _adapter_for(adapter_name, built)
@@ -333,6 +341,9 @@ def run_benchmark(models, out_dir=BENCH_DIR):
     except KeyboardInterrupt:
         print(f"[bench] interrupted — {len(records)} result(s) saved to"
               f" {path}")
+    finally:
+        tools.set_domain_asker(None)
+        files.set_path_asker(None)
     return path
 
 
