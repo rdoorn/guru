@@ -77,6 +77,12 @@ def collect_metrics(model, num_ctx, ceiling, seconds, agents,
     tokens_in = sum(a.state.session_in for a in agents)
     tokens_out = sum(a.state.session_out for a in agents)
     tps = round(tokens_out / seconds, 1) if seconds > 0 else 0.0
+    result = _final_answer(agents[0]) if agents else ''
+    # A blank final answer is a run that explored (or errored) but never
+    # synthesised — flag it so it is visibly distinct from a real result and
+    # accuracy scoring can skip it. A caller-supplied error (timeout) wins.
+    if error is None and not result.strip():
+        error = 'empty answer'
     return {
         'model': model, 'num_ctx': num_ctx, 'ctx_ceiling': ceiling,
         'seconds': round(seconds, 1),
@@ -88,9 +94,38 @@ def collect_metrics(model, num_ctx, ceiling, seconds, agents,
                     'role': a.state.active_role,
                     'skill': a.state.active_skill} for a in agents],
         'spawn_calls': sum(1 for n in tools_called if n == 'spawn'),
-        'result': _final_answer(agents[0]) if agents else '',
+        'result': result,
         'accuracy': None, 'error': error,
     }
+
+
+def serialize_transcript(agents) -> list:
+    """Flatten agents' message histories to JSON-safe records for debugging a
+    run (why an answer was empty, which tools ran in what order). Normalises
+    both dict messages and provider Message objects to role/content, keeping
+    tool names and the names of any tool calls."""
+    out = []
+    for a in agents:
+        msgs = []
+        for m in a.state.messages:
+            rec: dict = {'role': conversation.msg_role(m),
+                         'content': conversation.msg_content(m)}
+            if isinstance(m, dict) and m.get('tool_name'):
+                rec['tool_name'] = m['tool_name']
+            tcs = (m.get('tool_calls') if isinstance(m, dict)
+                   else getattr(m, 'tool_calls', None))
+            if tcs:
+                names = []
+                for tc in tcs:
+                    fn = (tc.get('function') if isinstance(tc, dict)
+                          else getattr(tc, 'function', None))
+                    names.append(
+                        (fn.get('name') if isinstance(fn, dict)
+                         else getattr(fn, 'name', '')) if fn else '')
+                rec['tool_calls'] = names
+            msgs.append(rec)
+        out.append({'title': a.title, 'model': a.state.model, 'messages': msgs})
+    return out
 
 
 def _quiet_console() -> Console:
@@ -317,18 +352,24 @@ def _adapter_for(name, built):
 
 def run_benchmark(models, out_dir=BENCH_DIR):
     """Run each (adapter_name, model) through guru on PROMPT, collect metrics,
-    and write bench/results-<timestamp>.json. The file is rewritten after every
-    model, so a Ctrl+C mid-run keeps the results gathered so far. Returns the
-    file path."""
+    and write bench/results-<timestamp>.json plus a companion
+    transcript-<timestamp>.json (full message histories, for debugging why an
+    answer was empty). Both are rewritten after every model, so a Ctrl+C mid-run
+    keeps what was gathered. Returns the results file path."""
     built = _build_adapters()
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     path = out_dir / f'results-{stamp}.json'
+    tpath = out_dir / f'transcript-{stamp}.json'
     records = []
+    transcripts = []
 
     def _flush() -> None:
         path.write_text(json.dumps(records, indent=2, ensure_ascii=False),
                         encoding='utf-8')
+        tpath.write_text(
+            json.dumps(transcripts, indent=2, ensure_ascii=False),
+            encoding='utf-8')
 
     # Sandbox: allow reading the repo (the task needs it) but AUTO-DENY every
     # escalation (writes, new dirs, web) — an unattended run must never sit on
@@ -357,6 +398,8 @@ def run_benchmark(models, out_dir=BENCH_DIR):
                        if limit and secs >= limit else None)
                 rec = collect_metrics(model, base.num_ctx, base.ctx_ceiling,
                                       secs, agents, error=err)
+                transcripts.append(
+                    {'model': model, 'agents': serialize_transcript(agents)})
             except Exception as e:                       # noqa: BLE001
                 rec = collect_metrics(model, base.num_ctx or 0,
                                       base.ctx_ceiling or 0, 0.0, [],

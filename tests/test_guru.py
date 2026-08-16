@@ -1905,6 +1905,38 @@ class TestBenchMetrics:
         assert rec['agents_used'] == 0 and rec['result'] == ''
         assert rec['error'] == 'boom' and rec['tokens_per_sec'] == 0.0
 
+    def test_blank_answer_is_flagged_empty(self) -> None:
+        a = self._agent('main', 'm', ['read_file'], 10, 5)
+        a.state.messages[-1]['content'] = '   '     # blank final answer
+        rec = bench.collect_metrics('m', 4096, 4096, 1.0, [a])
+        assert rec['error'] == 'empty answer' and rec['tool_count'] == 1
+
+    def test_caller_error_wins_over_empty_flag(self) -> None:
+        a = self._agent('main', 'm', [], 10, 5)
+        a.state.messages[-1]['content'] = ''        # also blank
+        rec = bench.collect_metrics('m', 4096, 4096, 1.0, [a],
+                                    error='timeout after 600s')
+        assert rec['error'] == 'timeout after 600s'
+
+    def test_serialize_transcript(self) -> None:
+        from guru.agents import Agent
+        a = Agent(id='main', title='main')
+        a.state.model = 'm'
+        a.state.messages = [
+            {'role': 'user', 'content': 'q'},
+            SimpleNamespace(role='assistant', content='thinking', tool_calls=[
+                SimpleNamespace(function=SimpleNamespace(name='read_file'))]),
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'data'},
+            {'role': 'assistant', 'content': 'ANSWER'},
+        ]
+        out = bench.serialize_transcript([a])
+        assert out[0]['title'] == 'main' and out[0]['model'] == 'm'
+        msgs = out[0]['messages']
+        assert msgs[0] == {'role': 'user', 'content': 'q'}
+        assert msgs[1]['tool_calls'] == ['read_file']
+        assert msgs[2]['tool_name'] == 'read_file'
+        assert msgs[3]['content'] == 'ANSWER'
+
 
 class TestBenchOrchestrator:
     def test_spawn_runs_child_and_counts_agents(self, monkeypatch) -> None:
@@ -1994,6 +2026,11 @@ class TestBenchRunner:
         assert len(data) == 1
         assert data[0]['model'] == 'm1' and data[0]['result'] == 'A'
         assert data[0]['tokens_out'] == 10
+        # a per-run transcript file is written alongside the results
+        tfile = next(tmp_path.glob('transcript-*.json'))
+        tdata = json.loads(tfile.read_text(encoding='utf-8'))
+        assert tdata[0]['model'] == 'm1'
+        assert tdata[0]['agents'][0]['messages'][0]['content'] == 'A'
 
     def test_records_timeout_when_over_limit(
             self, tmp_path, monkeypatch) -> None:
