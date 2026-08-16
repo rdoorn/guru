@@ -1,7 +1,14 @@
-.PHONY: bench bench-plot test lint
+.PHONY: bench bench-plot test lint yarn
 
 VENV ?= .venv/bin
 RESULTS ?= $(shell ls -t bench/results-*.json 2>/dev/null | head -1)
+
+# YaRN long-context build. Ollama cannot enable YaRN on an existing model
+# (its Modelfile rejects rope-scaling params), so we pull a GGUF that already
+# has YaRN baked in; guru then auto-detects the extended (128K) ceiling.
+# Override to extend other models: make yarn YARN_REPO=... YARN_QUANT=...
+YARN_REPO  ?= hf.co/unsloth/Qwen3-14B-128K-GGUF
+YARN_QUANT ?= Q4_K_M
 
 bench:            ## Run the coding-model benchmark -> bench/results-<ts>.json
 	$(VENV)/python -m guru.bench
@@ -15,3 +22,6 @@ test:             ## Run the test suite
 
 lint:             ## Lint with flake8
 	$(VENV)/flake8 guru bench tests
+
+yarn:             ## Pull a YaRN-baked (128K) build: make yarn [YARN_REPO=.. YARN_QUANT=..]
+	ollama pull $(YARN_REPO):$(YARN_QUANT)
