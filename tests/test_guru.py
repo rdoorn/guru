@@ -348,6 +348,27 @@ class TestGpuAutoFit:
         infos = a.list_models()
         assert infos[0].context_window == 40960
 
+    def test_list_models_sorted_by_basename(self, monkeypatch) -> None:
+        names = ['batiai/qwen3.6-27b:q3', 'devstral-small-2:24b',
+                 'hf.co/unsloth/Qwen3-14B-128K-GGUF:Q4_K_M',
+                 'huihui_ai/qwen3-abliterated:8b', 'gpt-oss-20b-32k:latest']
+        models = SimpleNamespace(models=[
+            SimpleNamespace(model=n, size=1) for n in names])
+        monkeypatch.setattr(
+            'guru.adapters.ollama.ollama.list', lambda: models)
+        a = self._adapter()
+        monkeypatch.setattr(
+            a, '_resolve_context_window', lambda m: (4096, 4096))
+        monkeypatch.setattr(a, '_param_size', lambda m: '?')
+        order = [mi.model_id for mi in a.list_models()]
+        assert order == [
+            'devstral-small-2:24b',
+            'gpt-oss-20b-32k:latest',
+            'hf.co/unsloth/Qwen3-14B-128K-GGUF:Q4_K_M',   # qwen3-14b-128k
+            'huihui_ai/qwen3-abliterated:8b',             # qwen3-abliterated
+            'batiai/qwen3.6-27b:q3',                      # qwen3.6
+        ]
+
 
 class TestModelCtxStore:
     """Per-model context persistence (~/.guru/model_ctx.json)."""

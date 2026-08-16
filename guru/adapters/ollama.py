@@ -69,7 +69,10 @@ class OllamaAdapter(Adapter):
         except Exception:
             return []
         infos = []
-        for m in sorted(models, key=lambda x: x.model):
+        # Sort by the name after the last '/' so related models line up in the
+        # picker regardless of their prefix (batiai/, hf.co/…, huihui_ai/…).
+        for m in sorted(models, key=lambda x: x.model.rsplit('/', 1)[-1]
+                        .lower()):
             num_ctx, ceiling = self._resolve_context_window(m.model)
             infos.append(ModelInfo(
                 adapter=self.name,
