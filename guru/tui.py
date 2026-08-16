@@ -35,7 +35,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
-from guru import config, session, skills, ui
+from guru import config, log, session, skills, ui
 from guru.agents import Agent, AgentManager
 from guru.domain import conversation, files, tools
 
@@ -99,6 +99,7 @@ class _MainWriter:
                 sys.stdout.flush()
                 return
             except Exception:                            # noqa: BLE001
+                log.exc('stdout emit failed')
                 pass
         self._pending.append(line)
 
@@ -122,6 +123,7 @@ class _MainWriter:
                 try:
                     sys.stdout.write(line + '\n')
                 except Exception:                        # noqa: BLE001
+                    log.exc('drain write failed')
                     pass
             sys.stdout.flush()
             self._pending.clear()
@@ -133,6 +135,7 @@ def _app_cols() -> int:
     try:
         return get_app().output.get_size().columns
     except Exception:                                    # noqa: BLE001
+        log.exc('app cols read failed')
         return shutil.get_terminal_size((100, 30)).columns
 
 
@@ -232,6 +235,7 @@ def run() -> None:
                     _prompt(), state['loop'])
                 return bool(fut.result())
             except Exception:                            # noqa: BLE001
+                log.exc('access asker prompt failed')
                 return False
 
     tools.set_domain_asker(_access_asker)

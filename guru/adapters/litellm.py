@@ -20,7 +20,7 @@ import os
 import requests
 from rich.markdown import Markdown
 
-from guru import session, ui
+from guru import log, session, ui
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
@@ -168,6 +168,7 @@ class LiteLLMAdapter(Adapter):
             r.raise_for_status()
             data = r.json().get('data', [])
         except Exception:
+            log.exc('litellm models.list failed')
             return []
         infos = []
         for m in data:

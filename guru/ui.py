@@ -26,7 +26,7 @@ from rich.console import Console
 from rich.text import Text
 from rich.theme import Theme
 
-from guru import config, session
+from guru import config, log, session
 
 # Teach prompt_toolkit to recognise Shift+Enter and keyboard Enter under
 # modifyOtherKeys. See the key-binding notes below for why F13/F14 are used.
@@ -376,6 +376,7 @@ def total_memory_bytes() -> int:
             capture_output=True, text=True, timeout=1)
         return int(out.stdout.strip())
     except Exception:
+        log.exc('hw.memsize read failed')
         return 0
 
 
@@ -400,6 +401,7 @@ def refresh_git_branch() -> None:
         session.git_branch = (
             branch if proc.returncode == 0 and branch else None)
     except Exception:
+        log.exc('git branch read failed')
         session.git_branch = None
 
 

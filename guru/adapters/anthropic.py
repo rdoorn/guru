@@ -18,7 +18,7 @@ import subprocess
 
 from rich.markdown import Markdown
 
-from guru import session, ui
+from guru import log, session, ui
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
@@ -156,6 +156,7 @@ class AnthropicAdapter(Adapter):
         try:
             import anthropic  # noqa: F401
         except Exception:
+            log.exc('anthropic SDK import failed')
             return False
         if self.auth not in ('api_key', 'oauth'):
             return False
@@ -224,6 +225,7 @@ class AnthropicAdapter(Adapter):
                 ))
             return out
         except Exception:
+            log.exc('anthropic models.list failed')
             return []
 
     def activate(self, model_id: str) -> None:
@@ -240,6 +242,7 @@ class AnthropicAdapter(Adapter):
             info = self._client().models.retrieve(model_id)
             return getattr(info, 'max_input_tokens', 0) or _DEFAULT_CONTEXT
         except Exception:
+            log.exc('anthropic context retrieve failed')
             return _DEFAULT_CONTEXT
 
     # --- turn loop -----------------------------------------------------------

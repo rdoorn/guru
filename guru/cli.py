@@ -340,6 +340,9 @@ def main() -> None:
     )
     args, _ = parser.parse_known_args()
 
+    from guru import log
+    log.setup()
+
     from guru import skills
     skills.setup(reset=args.reset_skills)
 

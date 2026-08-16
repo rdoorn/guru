@@ -11,7 +11,7 @@ import subprocess
 import ollama
 from rich.markdown import Markdown
 
-from guru import config, session, ui
+from guru import config, log, session, ui
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
@@ -56,6 +56,7 @@ class OllamaAdapter(Adapter):
             ollama.list()
             return True
         except Exception:
+            log.exc('ollama.list availability check failed')
             return False
 
     def verify(self) -> tuple:
@@ -67,6 +68,7 @@ class OllamaAdapter(Adapter):
         try:
             models = ollama.list().models
         except Exception:
+            log.exc('ollama.list models failed')
             return []
         infos = []
         # Sort by the name after the last '/' so related models line up in the
@@ -125,6 +127,7 @@ class OllamaAdapter(Adapter):
         try:
             info = ollama.show(model)
         except Exception:
+            log.exc('ollama.show context resolve failed')
             return (session.num_ctx_override or config.DEFAULT_NUM_CTX, 0)
 
         modelinfo = info.modelinfo or {}
@@ -153,6 +156,7 @@ class OllamaAdapter(Adapter):
                 caps = ollama.show(model).capabilities or []
                 self._thinks[model] = 'thinking' in caps
             except Exception:
+                log.exc('ollama.show capabilities failed')
                 self._thinks[model] = False
         return self._thinks[model]
 
@@ -172,6 +176,7 @@ class OllamaAdapter(Adapter):
             info = ollama.show(model)
             return getattr(info.details, 'parameter_size', '') or '?'
         except Exception:
+            log.exc('ollama.show param size failed')
             return '?'
 
     def _ensure_daemon(self) -> None:
@@ -187,6 +192,7 @@ class OllamaAdapter(Adapter):
         try:
             present = {m.model for m in ollama.list().models}
         except Exception:
+            log.exc('ollama.list present-models failed')
             return
         if model_id in present:
             return
@@ -206,6 +212,7 @@ class OllamaAdapter(Adapter):
                     return (int(getattr(m, 'size', 0) or 0),
                             int(getattr(m, 'size_vram', 0) or 0))
         except Exception:                                # noqa: BLE001
+            log.exc('ollama.ps stats failed')
             pass
         return (0, 0)
 
@@ -317,6 +324,7 @@ class OllamaAdapter(Adapter):
                 mib = int(out.stdout.strip().splitlines()[0])
                 return mib * 1024 * 1024
         except Exception:                                # noqa: BLE001
+            log.exc('nvidia-smi total memory failed')
             pass
         # Apple Silicon: unified memory; the GPU working set is a fraction.
         if platform.system() == 'Darwin':
@@ -328,6 +336,7 @@ class OllamaAdapter(Adapter):
                     ram = int(out.stdout.strip())
                     return int(ram * config.MAC_GPU_FRACTION)
             except Exception:                            # noqa: BLE001
+                log.exc('sysctl hw.memsize failed')
                 pass
         return 0
 
@@ -336,6 +345,7 @@ class OllamaAdapter(Adapter):
         try:
             mi = ollama.show(model).modelinfo or {}
         except Exception:                                # noqa: BLE001
+            log.exc('ollama.show kv metadata failed')
             return 0
         arch = mi.get('general.architecture', '')
 
@@ -360,6 +370,7 @@ class OllamaAdapter(Adapter):
                 if m.model == model:
                     return int(getattr(m, 'size', 0) or 0)
         except Exception:                                # noqa: BLE001
+            log.exc('ollama.list weight bytes failed')
             pass
         return 0
 
@@ -401,6 +412,7 @@ class OllamaAdapter(Adapter):
             )
             return True
         except Exception:
+            log.exc('ollama.generate reload failed')
             return False
 
     def _preload_and_fit(self) -> None:
@@ -427,6 +439,7 @@ class OllamaAdapter(Adapter):
                     vram = getattr(m, 'size_vram', 0) or 0
                     return total <= 0 or vram >= total
         except Exception:
+            log.exc('ollama.ps gpu-fit check failed')
             pass
         return True
 
@@ -484,6 +497,7 @@ class OllamaAdapter(Adapter):
                 try:
                     stream.close()
                 except Exception:                        # noqa: BLE001
+                    log.exc('stream close failed')
                     pass
                 return None
             m = getattr(chunk, 'message', None)

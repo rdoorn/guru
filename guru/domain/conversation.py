@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from guru import config, session, skills, ui
+from guru import config, log, session, skills, ui
 from guru.domain import tools
 
 
@@ -252,6 +252,7 @@ def _summarize_relevant(question: str, content: str, tool_name: str) -> str:
     try:
         summary = (session.adapter.summarise(prompt) or '').strip()
     except Exception:                                # noqa: BLE001
+        log.exc('tool-result summarise failed')
         summary = ''
     if not summary:
         summary = content[:config.WEB_SUMMARIZE_OVER_CHARS] + "\n…(truncated)"

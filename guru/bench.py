@@ -9,7 +9,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from guru import config, session, ui
+from guru import config, log, session, ui
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
@@ -139,6 +139,7 @@ class _Bench:
                 conversation.refresh_system_context()
                 session.adapter.run_turn()
         except Exception:                                # noqa: BLE001
+            log.exc('bench agent work failed')
             pass
         finally:
             ui.reset_console(ct)

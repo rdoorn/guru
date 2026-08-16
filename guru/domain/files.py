@@ -16,7 +16,7 @@ import stat
 from fnmatch import fnmatch
 from pathlib import Path
 
-from guru import config, session, ui
+from guru import config, log, session, ui
 
 # Most files whose sha we remember for edit-without-re-read (oldest dropped).
 _SHA_LEDGER_CAP = 25
@@ -505,6 +505,7 @@ def _show_change(diff: str) -> None:
         from rich.text import Text
         ui.console.print(Text.from_ansi(diff))
     except Exception:                                    # noqa: BLE001
+        log.exc('ansi diff render failed')
         ui.console.print(diff)
 
 
