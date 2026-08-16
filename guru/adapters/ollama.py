@@ -153,6 +153,17 @@ class OllamaAdapter(Adapter):
                 self._thinks[model] = False
         return self._thinks[model]
 
+    def _sampling_options(self, model: str) -> dict:
+        """Sampling params to apply ON TOP of the model's own modelfile
+        defaults (which are the authoritative, per-model, author-tuned source
+        and Ollama applies them automatically). Empty by default — we do not
+        guess, since correct sampling differs per Qwen variant and per mode.
+        settings.toml provides a global [sampling] table and per-model
+        [sampling."<model>"] tables for the exceptions; per-model wins."""
+        opts = dict(config.SAMPLING)
+        opts.update(config.SAMPLING_PER_MODEL.get(model, {}))
+        return opts
+
     def _param_size(self, model: str) -> str:
         try:
             info = ollama.show(model)
@@ -455,12 +466,14 @@ class OllamaAdapter(Adapter):
         content: list = []
         tool_calls: list = []
         prompt_ct = eval_ct = 0
+        options = {'num_ctx': session.num_ctx}
+        options.update(self._sampling_options(session.model))
         stream = ollama.chat(
             model=session.model,
             messages=session.messages,
             think=self._supports_thinking(session.model),
             tools=session.active_tools,
-            options={'num_ctx': session.num_ctx},
+            options=options,
             stream=True,
         )
         for chunk in stream:

@@ -108,11 +108,9 @@ class _Bench:
         st = agent.state
         st.messages = [{'role': 'system',
                         'content': config.build_system_prompt()}]
-        st.active_tools = [tools.search_tools, tools.use_skill]
         if can_spawn:
             st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
-            st.active_tools += [tools.spawn, tools.check, tools.join]
-        st.active_tool_names = set()
+        st.active_tools, st.active_tool_names = tools.initial_tools(can_spawn)
         st.active_role = role or None
         st.active_skill = skill or None
         st.can_spawn = can_spawn

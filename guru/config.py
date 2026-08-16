@@ -54,6 +54,18 @@ KEEP_RECENT_GROUPS = 4
 WEB_SUMMARIZE_OVER_CHARS = 6000
 OUTLINE_FILE_OVER_CHARS = 8000
 
+# Tools pre-activated on every agent so weaker models can call them directly
+# without first calling search_tools (which they often "announce" instead of
+# doing). Overridable via settings.toml's [tools] preactivate = [...].
+PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
+
+# Sampling overrides applied on top of a model's own modelfile defaults (the
+# authoritative per-model source). Empty by default so each model keeps its
+# author-tuned params. settings.toml [sampling] holds global scalar overrides;
+# [sampling."<model>"] sub-tables hold per-model overrides (per-model wins).
+SAMPLING: dict = {}              # global scalar overrides (all models)
+SAMPLING_PER_MODEL: dict = {}    # {model_id: {param: value}}
+
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
 # It is only a default: a stored per-model choice or a manual /context or
@@ -300,8 +312,8 @@ def load_adapter_configs() -> list:
     return data.get('adapter', [])
 
 
-def load_context_settings() -> dict:
-    """Return the [context] table from ~/.guru/settings.toml (or {})."""
+def settings_section(name: str) -> dict:
+    """Return a top-level table from ~/.guru/settings.toml (or {})."""
     try:
         import tomllib
     except ModuleNotFoundError:                       # Python < 3.11
@@ -311,21 +323,37 @@ def load_context_settings() -> dict:
             GLOBAL_SETTINGS_PATH.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return {}
-    section = data.get('context', {}) if isinstance(data, dict) else {}
+    section = data.get(name, {}) if isinstance(data, dict) else {}
     return section if isinstance(section, dict) else {}
 
 
+def load_context_settings() -> dict:
+    """Return the [context] table from ~/.guru/settings.toml (or {})."""
+    return settings_section('context')
+
+
 def _apply_settings() -> None:
-    """Override the retention thresholds from settings.toml, if present."""
+    """Apply settings.toml overrides (retention, pre-activation, sampling)."""
     global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
-    s = load_context_settings()
+    global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
+    ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
-            s.get('web_summarize_over_chars', WEB_SUMMARIZE_OVER_CHARS))
+            ctx.get('web_summarize_over_chars', WEB_SUMMARIZE_OVER_CHARS))
         OUTLINE_FILE_OVER_CHARS = int(
-            s.get('outline_file_over_chars', OUTLINE_FILE_OVER_CHARS))
+            ctx.get('outline_file_over_chars', OUTLINE_FILE_OVER_CHARS))
     except (TypeError, ValueError):
         pass
+    tl = settings_section('tools')
+    pre = tl.get('preactivate')
+    if isinstance(pre, list):
+        PREACTIVATE_TOOLS = [str(x) for x in pre]
+    sampling = settings_section('sampling')
+    # Scalar keys are global overrides; sub-tables are per-model overrides.
+    SAMPLING = {k: v for k, v in sampling.items()
+                if not isinstance(v, dict)}
+    SAMPLING_PER_MODEL = {k: v for k, v in sampling.items()
+                          if isinstance(v, dict)}
 
 
 def _toml_value(value: object) -> str:

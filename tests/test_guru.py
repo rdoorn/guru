@@ -1855,3 +1855,65 @@ class TestBenchPlot:
         assert len(paths) == 2
         for p in paths:
             assert p.exists() and p.stat().st_size > 0
+
+
+class TestToolsAndSamplingSettings:
+    """settings.toml [tools] preactivate + [sampling] global/per-model."""
+
+    def test_apply_reads_preactivate_and_sampling(
+            self, tmp_path, monkeypatch) -> None:
+        p = tmp_path / 'settings.toml'
+        p.write_text(
+            '[tools]\npreactivate = ["read_file", "search_code"]\n\n'
+            '[sampling]\ntemperature = 0.7\n\n'
+            '[sampling."batiai/qwen3.6-27b:q3"]\n'
+            'temperature = 0.6\ntop_p = 0.95\n', encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['x'])
+        monkeypatch.setattr(config, 'SAMPLING', {})
+        monkeypatch.setattr(config, 'SAMPLING_PER_MODEL', {})
+        config._apply_settings()
+        assert config.PREACTIVATE_TOOLS == ['read_file', 'search_code']
+        assert config.SAMPLING == {'temperature': 0.7}
+        assert config.SAMPLING_PER_MODEL == {
+            'batiai/qwen3.6-27b:q3': {'temperature': 0.6, 'top_p': 0.95}}
+
+
+class TestInitialTools:
+    """The pre-activated core toolset lets weak models skip search_tools."""
+
+    def test_initial_tools_includes_core(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            config, 'PREACTIVATE_TOOLS', ['read_file', 'search_code'])
+        base, names = tools.initial_tools(can_spawn=False)
+        assert names == {'read_file', 'search_code'}
+        assert tools.search_tools in base and tools.use_skill in base
+        assert tools.spawn not in base
+        assert tools.TOOL_REGISTRY['read_file']['fn'] in base
+
+    def test_initial_tools_spawn_and_empty_core(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', [])
+        base, names = tools.initial_tools(can_spawn=True)
+        assert tools.spawn in base and names == set()
+
+
+class TestSamplingOptions:
+    """Sampling respects modelfile defaults; overrides come from settings."""
+
+    def _adapter(self) -> OllamaAdapter:
+        return OllamaAdapter()
+
+    def test_empty_by_default(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'SAMPLING', {})
+        monkeypatch.setattr(config, 'SAMPLING_PER_MODEL', {})
+        assert self._adapter()._sampling_options('qwen3:14b') == {}
+
+    def test_global_and_per_model_merge(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'SAMPLING', {'temperature': 0.7})
+        monkeypatch.setattr(
+            config, 'SAMPLING_PER_MODEL',
+            {'qwen3:14b': {'temperature': 0.6, 'top_p': 0.95}})
+        a = self._adapter()
+        assert a._sampling_options('devstral')['temperature'] == 0.7
+        opts = a._sampling_options('qwen3:14b')
+        assert opts['temperature'] == 0.6 and opts['top_p'] == 0.95

@@ -594,17 +594,43 @@ def specs_for(active_tool_names, can_spawn: bool) -> list:
     return specs
 
 
-def reset_active_tools() -> None:
-    """Reset the active tool set to the always-on tools for this agent.
+def _core_tool_fns() -> list:
+    """(name, fn) for the config-driven pre-activated core toolset — the tools
+    a weak model can call directly without going through search_tools first."""
+    out = []
+    for name in config.PREACTIVATE_TOOLS:
+        info = TOOL_REGISTRY.get(name)
+        if info:
+            out.append((name, info['fn']))
+    return out
 
-    search_tools is always present; spawn is added for delegation-capable
-    agents (so the Ollama adapter, which introspects the callables, sees it).
-    """
-    session.active_tool_names.clear()
+
+def initial_tools(can_spawn: bool) -> tuple:
+    """The active tool list + activated-name set an agent starts a turn with:
+    the always-on tools (search_tools, use_skill, and spawn/check/join when
+    delegation-capable) plus the pre-activated core toolset."""
     base = [search_tools, use_skill]
-    if session.can_spawn:
+    if can_spawn:
         base.extend([spawn, check, join])
+    names = set()
+    for name, fn in _core_tool_fns():
+        base.append(fn)
+        names.add(name)
+    return base, names
+
+
+def reset_active_tools() -> None:
+    """Reset the active tool set to the always-on + pre-activated core tools.
+
+    search_tools/use_skill are always present; spawn/check/join are added for
+    delegation-capable agents (so the Ollama adapter, which introspects the
+    callables, sees them); the pre-activated core toolset is added so common
+    file tools can be called without a search_tools hop.
+    """
+    base, names = initial_tools(session.can_spawn)
     session.active_tools[:] = base
+    session.active_tool_names.clear()
+    session.active_tool_names.update(names)
 
 
 def activate(name: str) -> None:
