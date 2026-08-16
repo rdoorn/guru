@@ -5,34 +5,18 @@ model listing, context-window resolution, the tool-calling turn loop, and a
 daemon-reachable check with an on-demand model pull (moved from start.sh).
 """
 import platform
-import re
 import subprocess
 
 import ollama
-from rich.markdown import Markdown
 
 from guru import config, log, session, ui
+from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
-# A weak model sometimes ends a turn by announcing an action ("Let me read the
-# files…") without calling a tool; guru would treat that as the final answer.
-# _looks_like_preamble catches that stall so run_turn can nudge it to act.
-_NUDGE_CAP = 2
-_PREAMBLE_RE = re.compile(
-    r"\b(let me|i'?ll|i will|let'?s|i'?m going to|i am going to|going to|"
-    r"start by|next[,]? i|first[,]? i)\b", re.IGNORECASE)
-
-
-def _looks_like_preamble(content: str) -> bool:
-    """True if text announces an action instead of answering — a short
-    'Let me… / I'll…' preamble, or one trailing off into a promised list.
-    Long substantive answers (the real result) do not match."""
-    if len(content) > 600:
-        return False
-    if content.rstrip().endswith((':', '…', '...')):
-        return True
-    return bool(_PREAMBLE_RE.search(content))
+# Re-exported for callers/tests that reference it here; the shared turn loop
+# owns the act-nudge heuristic now (see guru.adapters.turn).
+_looks_like_preamble = turn.looks_like_preamble
 
 
 # Smallest context to fall back to before giving up on fitting into memory.
@@ -522,80 +506,39 @@ class OllamaAdapter(Adapter):
         )
 
     def run_turn(self) -> None:
-        session.cancel_requested = False
-        called: set = set()
-        nudged = 0
-        while True:
-            if session.cancel_requested:
-                ui.console.print("[yellow]* cancelled[/yellow]")
-                return
-            ui.note_thinking()
-            msg = self._collect_response()
-            if msg is None:                  # cancelled mid-generation
-                ui.console.print("[yellow]* cancelled[/yellow]")
-                return
-            # The model is now loaded — check for CPU spill and scale down.
-            self._fit_after_load()
-            ui.status_draw()
+        turn.run_loop(step=self._step, run_tools=self._run_tools,
+                      add_user=self._add_user)
 
-            ui.debug(
-                f"content={msg.content!r} tool_calls={msg.tool_calls}")
+    def _step(self):
+        """One Ollama round: stream the reply, fit context to memory, append
+        the assistant message, and return (text, [(name, args, call), ...]).
+        None on a mid-stream cancel (the shared loop reports it)."""
+        msg = self._collect_response()
+        if msg is None:                      # cancelled mid-generation
+            return None
+        # The model is now loaded — check for CPU spill and scale down.
+        self._fit_after_load()
+        ui.debug(f"content={msg.content!r} tool_calls={msg.tool_calls}")
+        session.messages.append(msg)
+        calls = [(c.function.name, c.function.arguments, c)
+                 for c in (msg.tool_calls or [])]
+        return (msg.content or '', calls)
 
-            session.messages.append(msg)
+    def _run_tools(self, pending) -> None:
+        for name, arguments, _ref, duplicate in pending:
+            if duplicate:
+                ui.console.print(
+                    f"[yellow]\\[SKIP][/yellow] duplicate:"
+                    f" {name}({arguments})")
+                content = (f"Already called {name} with these arguments."
+                           " Use the previous result.")
+            else:
+                content = tools.execute_tool(name, arguments)
+            session.messages.append(
+                {"role": "tool", "tool_name": name, "content": content})
 
-            if not msg.tool_calls:
-                content = (msg.content or '').strip()
-                stalled = not content or _looks_like_preamble(content)
-                if stalled and nudged < _NUDGE_CAP:
-                    nudged += 1
-                    reason = ("empty response" if not content
-                              else "announced an action but called no tool")
-                    ui.console.print(
-                        f"[dim yellow]\\[NUDGE][/dim yellow] {reason}"
-                        " — asking it to act"
-                    )
-                    session.messages.append({
-                        "role": "user",
-                        "content": (
-                            "Do not describe what you will do — do it now."
-                            " Call the tool you need in this reply (use"
-                            " search_tools first if it is not active). If you"
-                            " are genuinely finished, give the final answer."
-                        ),
-                    })
-                    continue
-                ui.console.print("\n[bold green]answer>[/bold green]")
-                ui.console.print(Markdown(content))
-                ui.console.print()
-                break
-
-            for call in msg.tool_calls:
-                name = call.function.name
-                arguments = call.function.arguments
-
-                call_key = (name, tuple(sorted(arguments.items())))
-                if call_key in called:
-                    ui.console.print(
-                        f"[yellow]\\[SKIP][/yellow]"
-                        f" duplicate: {name}({arguments})"
-                    )
-                    session.messages.append({
-                        "role": "tool",
-                        "tool_name": name,
-                        "content": (
-                            f"Already called {name} with these"
-                            " arguments. Use the previous result."
-                        ),
-                    })
-                    continue
-                called.add(call_key)
-
-                result = tools.execute_tool(name, arguments)
-                session.messages.append({
-                    "role": "tool",
-                    "tool_name": name,
-                    "content": result,
-                })
+    def _add_user(self, text: str) -> None:
+        session.messages.append({"role": "user", "content": text})
 
     # --- summarisation -------------------------------------------------------
 

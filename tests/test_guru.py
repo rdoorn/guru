@@ -487,6 +487,65 @@ class TestStreamingCancel:
         assert closed['v'] is True        # stream closed -> generation aborted
 
 
+class TestTurnLoop:
+    """The shared, provider-agnostic tool-calling loop (guru.adapters.turn).
+
+    Every adapter drives its turn through run_loop, so these lock the nudge,
+    duplicate-suppression, and cancel behaviour that all providers now share.
+    """
+
+    def _quiet(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'messages', [])
+        monkeypatch.setattr(session, 'cancel_requested', False)
+
+    def test_nudges_stalled_then_answers(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        seq = iter([("Let me look into it.", []),
+                    ("It is well tested.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq),
+                      run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert len(nudges) == 1 and 'do it now' in nudges[0].lower()
+
+    def test_runs_tools_then_answers(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        seq = iter([("", [("read_file", {"path": "x"}, "r1")]),
+                    ("done", [])])
+        ran: list = []
+        turn.run_loop(step=lambda: next(seq),
+                      run_tools=lambda p: ran.extend(p),
+                      add_user=lambda t: None)
+        assert ran == [("read_file", {"path": "x"}, "r1", False)]
+
+    def test_marks_duplicate_calls(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        call = ("read_file", {"path": "x"}, "r")
+        seq = iter([("", [call]), ("", [call]), ("done", [])])
+        seen: list = []
+        turn.run_loop(step=lambda: next(seq),
+                      run_tools=lambda p: seen.append(p[0][3]),
+                      add_user=lambda t: None)
+        assert seen == [False, True]     # 2nd identical call flagged duplicate
+
+    def test_stops_on_cancel_without_raising(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+
+        def step():
+            session.cancel_requested = True
+            return None
+        turn.run_loop(step=step, run_tools=lambda p: None,
+                      add_user=lambda t: None)   # returns, no exception
+
+
 class TestGroupMessages:
     """Tests for conversation.group_messages turn-grouping."""
 

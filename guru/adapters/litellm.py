@@ -18,9 +18,9 @@ import json
 import os
 
 import requests
-from rich.markdown import Markdown
 
 from guru import log, session, ui
+from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
@@ -189,16 +189,13 @@ class LiteLLMAdapter(Adapter):
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
-        session.cancel_requested = False
         client = self._client()
         native = to_openai_messages(session.messages)
         oa_tools = openai_tool_defs(tools.active_specs())
 
-        while True:
-            if session.cancel_requested:
-                ui.console.print("[yellow]* cancelled[/yellow]")
-                return
-            ui.note_thinking()
+        def step():
+            """One chat-completions round; returns (text, [(name, args, id)])
+            or None on error (printed) — the shared loop handles cancel."""
             try:
                 resp = client.chat.completions.create(
                     model=session.model,
@@ -208,7 +205,7 @@ class LiteLLMAdapter(Adapter):
                 )
             except Exception as e:
                 ui.console.print(f"[red]LiteLLM error: {e}[/red]")
-                return
+                return None
 
             usage = getattr(resp, 'usage', None)
             if usage:
@@ -217,7 +214,6 @@ class LiteLLMAdapter(Adapter):
                     getattr(usage, 'completion_tokens', 0) or 0)
                 session.ctx_used = (
                     getattr(usage, 'prompt_tokens', 0) or session.ctx_used)
-                ui.status_draw()
 
             msg = resp.choices[0].message
             text = msg.content or ''
@@ -243,34 +239,37 @@ class LiteLLMAdapter(Adapter):
                 ]
             native.append(assistant)
 
-            parsed = []
+            calls = []
             for tc in tool_calls:
                 try:
                     args = json.loads(tc.function.arguments or '{}')
                 except json.JSONDecodeError:
                     args = {}
-                parsed.append((tc.id, tc.function.name, args))
+                calls.append((tc.function.name, args, tc.id))
             session.messages.append(neutral_assistant(
-                text, [(name, args) for _, name, args in parsed]))
+                text, [(name, args) for name, args, _ in calls]))
+            return (text, calls)
 
-            if not tool_calls:
-                ui.console.print("\n[bold green]answer>[/bold green]")
-                ui.console.print(Markdown(text.strip()))
-                ui.console.print()
-                return
-
-            for call_id, name, args in parsed:
-                result = tools.execute_tool(name, args)
+        def run_tools(pending):
+            for name, args, call_id, duplicate in pending:
+                if duplicate:
+                    ui.console.print(
+                        f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
+                    content = (f"Already called {name} with these arguments."
+                               " Use the previous result.")
+                else:
+                    content = tools.execute_tool(name, args)
                 native.append({
-                    'role': 'tool',
-                    'tool_call_id': call_id,
-                    'content': result,
-                })
+                    'role': 'tool', 'tool_call_id': call_id,
+                    'content': content})
                 session.messages.append({
-                    'role': 'tool',
-                    'tool_name': name,
-                    'content': result,
-                })
+                    'role': 'tool', 'tool_name': name, 'content': content})
+
+        def add_user(text):
+            native.append({'role': 'user', 'content': text})
+            session.messages.append({'role': 'user', 'content': text})
+
+        turn.run_loop(step=step, run_tools=run_tools, add_user=add_user)
 
     # --- summarisation -------------------------------------------------------
 
