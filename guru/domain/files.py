@@ -13,6 +13,7 @@ import hashlib
 import re
 import shutil
 import stat
+from fnmatch import fnmatch
 from pathlib import Path
 
 from guru import config, session, ui
@@ -30,7 +31,8 @@ _MAX_ENTRIES = 400          # cap on entries emitted by list_tree
 _DEFAULT_TREE_DEPTH = 3     # levels list_tree recurses when depth is unset
 _MAX_READ_LINES = 400       # cap when read_file is given no range
 _MAX_RANGE_SPAN = 2000      # cap on an explicit read_file range
-_MAX_MATCHES = 100          # cap on rows returned by search_code
+_MAX_MATCHES = 100          # global cap on rows returned by search_code
+_MAX_PER_FILE = 20          # per-file cap so one big file can't eat the budget
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than this in search_code
 
 
@@ -340,23 +342,28 @@ def _walk_files(root: Path):
                 yield p
 
 
-def search_code(pattern: str, path: str = '.') -> str:
+def search_code(pattern: str, path: str = '.', glob: str = '') -> str:
     """
     Search file contents for a string or regular expression under a directory
-    (like grep), returning matching 'relpath:line: text' rows. Use this to
+    (like grep), returning matching 'relpath:line: text' rows. Smart-case: the
+    search is case-insensitive unless ``pattern`` contains an uppercase letter.
+    Pass ``glob`` (e.g. '*.py') to limit which files are searched. Use this to
     find where something is defined or used — e.g. 'def compact_messages' or
     'web_fetch' — before concluding code or a feature is missing. Noise dirs
-    (.git, node_modules, …) and binary/oversized files are skipped.
+    (.git, node_modules, …) and binary/oversized files are skipped; matches are
+    capped per file and overall so one big file can't crowd out the rest.
     """
     root = _resolve(path)
     if not ensure_path_allowed(root):
         return f"Access to '{root}' was denied by the user."
     if not root.exists():
         return f"No such path: {root}"
+    # Smart-case: case-insensitive unless the pattern has an uppercase letter.
+    flags = 0 if any(c.isupper() for c in pattern) else re.IGNORECASE
     try:
-        rx = re.compile(pattern)
+        rx = re.compile(pattern, flags)
     except re.error:
-        rx = re.compile(re.escape(pattern))
+        rx = re.compile(re.escape(pattern), flags)
 
     files = [root] if root.is_file() else _walk_files(root)
     rows: list = []
@@ -365,6 +372,9 @@ def search_code(pattern: str, path: str = '.') -> str:
         if len(rows) >= _MAX_MATCHES:
             truncated = True
             break
+        rel = f.name if root.is_file() else f.relative_to(root)
+        if glob and not (fnmatch(f.name, glob) or fnmatch(str(rel), glob)):
+            continue
         try:
             if f.stat().st_size > _MAX_FILE_BYTES:
                 continue
@@ -374,16 +384,23 @@ def search_code(pattern: str, path: str = '.') -> str:
             text = f.read_text(encoding='utf-8', errors='replace')
         except OSError:
             continue
-        rel = f.name if root.is_file() else f.relative_to(root)
+        file_hits = 0
         for i, line in enumerate(text.splitlines(), 1):
             if rx.search(line):
                 rows.append(f"{rel}:{i}: {line.strip()[:200]}")
+                file_hits += 1
                 if len(rows) >= _MAX_MATCHES:
                     truncated = True
                     break
+                if file_hits >= _MAX_PER_FILE:
+                    rows.append(
+                        f"{rel}: … more matches (showing first"
+                        f" {_MAX_PER_FILE}; narrow the pattern)")
+                    break
 
     if not rows:
-        return f"No matches for {pattern!r} under {root}."
+        extra = f" matching {glob!r}" if glob else ""
+        return f"No matches for {pattern!r} under {root}{extra}."
     out = [f"{root} — matches for {pattern!r}:"] + rows
     if truncated:
         out.append(

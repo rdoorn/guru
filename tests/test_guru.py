@@ -727,6 +727,35 @@ class TestFileTools:
         finally:
             files.set_path_asker(None)
 
+    def test_search_code_smart_case(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'a.py').write_text('class Widget:\n    Thing = 1\n')
+        # all-lowercase pattern -> case-insensitive (matches 'Widget')
+        assert 'a.py:1:' in files.search_code('widget', str(tmp_path))
+        # uppercase in pattern -> case-sensitive ('WIDGET' != 'Widget')
+        assert 'No matches' in files.search_code('WIDGET', str(tmp_path))
+        assert 'a.py:2:' in files.search_code('Thing', str(tmp_path))
+
+    def test_search_code_glob_filter(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'a.py').write_text('needle\n')
+        (tmp_path / 'b.txt').write_text('needle\n')
+        out = files.search_code('needle', str(tmp_path), glob='*.py')
+        assert 'a.py:1:' in out and 'b.txt' not in out
+
+    def test_search_code_per_file_cap(self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        from guru.domain.files import _MAX_PER_FILE
+        big = "\n".join('hit' for _ in range(_MAX_PER_FILE + 10))
+        (tmp_path / 'big.py').write_text(big + '\n')
+        (tmp_path / 'small.py').write_text('hit\n')
+        out = files.search_code('hit', str(tmp_path))
+        # capped at _MAX_PER_FILE lines from big.py, with a 'more' note...
+        assert out.count('big.py:') == _MAX_PER_FILE + 1   # +1 = more note
+        assert 'more matches' in out
+        # ...and small.py still gets searched (not crowded out)
+        assert 'small.py:1:' in out
+
 
 class TestSpecsFor:
     """tools.specs_for builds tool specs without session routing."""

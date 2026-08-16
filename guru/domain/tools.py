@@ -411,9 +411,11 @@ TOOL_REGISTRY: dict = {
         "fn": files.search_code,
         "description": (
             "Search file contents for a string or regex under a directory"
-            " (like grep), returning 'relpath:line: text' rows. Use to find"
-            " where something is defined or used before concluding code is"
-            " missing. Skips noise dirs. Restricted to allowed directories."
+            " (like grep), returning 'relpath:line: text' rows. Case-"
+            "insensitive unless your pattern has an uppercase letter. Pass"
+            " glob (e.g. '*.py') to limit which files are searched. Use to"
+            " find where something is defined or used before concluding code"
+            " is missing. Skips noise dirs. Restricted to allowed directories."
         ),
         "tags": [
             "grep", "search", "find", "code", "definition", "symbol",
@@ -423,8 +425,9 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "pattern": "String or regex to search for (e.g. 'def my_func')",
             "path": "Directory or file to search (default: current directory)",
+            "glob": "Optional filename glob to limit files, e.g. '*.py'",
         },
-        "optional": ["path"],
+        "optional": ["path", "glob"],
     },
     "write_file": {
         "fn": files.write_file,
