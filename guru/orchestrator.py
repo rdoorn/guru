@@ -170,8 +170,10 @@ class Orchestrator:
             bar['results'][child.title] = (child.task, answer)
             if not bar['remaining']:
                 del self.barriers[parent]
-                self.deliver(parent, "[inbox] join complete",
-                             self._format_join(bar['results']))
+                payload = self._format_join(bar['results'])
+                if bar.get('synthesis'):
+                    payload = bar['synthesis'] + "\n\n" + payload
+                self.deliver(parent, "[inbox] join complete", payload)
         else:
             self.deliver(
                 parent,
@@ -215,6 +217,44 @@ class Orchestrator:
         return (
             f"Spawned {title} to work on this task in parallel. Its result"
             f" will be delivered back to you automatically when it finishes.")
+
+    def spawn_panel(self, parent, tasks, synthesis: str = '') -> list:
+        """Deterministically spawn a fixed panel of sub-agents parented to
+        ``parent`` and open a join barrier, so guru itself runs the multi-agent
+        path even for a model that would never delegate. ``tasks`` is a list of
+        ``(task, role, skill)``; when all finish, their combined findings (with
+        an optional ``synthesis`` lead-in) are delivered back to ``parent``.
+        Returns the child titles."""
+        base = parent.state
+        children = []
+        for i, (task, role, skill) in enumerate(tasks):
+            title = f"agent{len(self.manager.agents) + i}"
+            child = Agent(id=title, title=title)
+            self.configure(child, base, can_spawn=False, role=role,
+                           skill=skill)
+            child.task = task
+            child.parent = parent
+            self.notice(child, f"[{title}] spawned · task: {task}")
+            self.notice(child, f"> {task}")
+            child.queue.append(task)
+            children.append(child)
+        titles = [c.title for c in children]
+
+        def _start() -> None:
+            for c in children:
+                self.manager.agents.append(c)
+            # Open the barrier BEFORE launching, so a fast child can't report
+            # into a not-yet-existing barrier.
+            self.barriers[parent] = {
+                'remaining': set(titles), 'results': {},
+                'synthesis': synthesis}
+            for c in children:
+                self.launch(c)
+            self.invalidate()
+
+        assert self.loop is not None
+        self.loop.call_soon_threadsafe(_start)
+        return titles
 
     def do_check(self, caller_state, target: str) -> str:
         caller = self.agent_for_state(caller_state)

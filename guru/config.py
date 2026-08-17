@@ -225,24 +225,23 @@ DELEGATION_NUDGE_MIN_READS = 3
 DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
 
 
-def review_prompt(area: str = 'the repository') -> str:
-    """A delegation-first review instruction built from REVIEW_PANEL: spawn the
-    fixed domain panel in parallel, then join and synthesise one report. Used
-    by the /review command so the multi-agent path is exercised on demand
-    without the user hand-writing the spawn calls."""
-    lines = [
-        f"Review {area}. Delegate a domain panel — spawn these sub-agents in"
-        " parallel, then join them and write ONE consolidated report grouped"
-        " by severity. Spawn exactly:"]
-    for role, skill, focus in REVIEW_PANEL:
-        lines.append(
-            f"- spawn(task='Review {area} for {focus}. Give concrete findings"
-            f" with file:line and a suggested fix.', role='{role}',"
-            f" skill='{skill}')")
-    lines.append(
-        "Spawn all of them now, then join and synthesise their findings."
-        " Do not review everything yourself.")
-    return "\n".join(lines)
+def review_tasks(area: str = 'the repository') -> list:
+    """The (task, role, skill) list for the /review panel, one per REVIEW_PANEL
+    member. guru spawns these directly (see orchestrator.spawn_panel), so the
+    multi-agent path runs deterministically rather than depending on the model
+    choosing to delegate."""
+    return [
+        (f"Review {area} for {focus}. Give concrete findings with file:line"
+         f" and a suggested fix; be specific.", role, skill)
+        for role, skill, focus in REVIEW_PANEL]
+
+
+def review_synthesis(area: str = 'the repository') -> str:
+    """The synthesis lead-in delivered to the parent once the panel joins."""
+    return (
+        f"Below are independent sub-agent reviews of {area}. Synthesise them"
+        " into ONE consolidated report grouped by severity (blocker, major,"
+        " minor, nit), de-duplicating overlaps and keeping file:line refs.")
 
 
 # Domains approved for model-initiated web access, loaded at startup.

@@ -487,20 +487,20 @@ class TestStreamingCancel:
         assert closed['v'] is True        # stream closed -> generation aborted
 
 
-class TestReviewPrompt:
-    """The /review command's data-driven panel instruction."""
+class TestReviewPanel:
+    """The /review command's deterministic panel (config helpers)."""
 
-    def test_review_prompt_lists_the_panel(self) -> None:
-        p = config.review_prompt('the repo')
-        assert 'the repo' in p
-        # one spawn(...) line per panel member, with role + skill
-        assert p.count('spawn(') == len(config.REVIEW_PANEL)
-        for role, skill, _focus in config.REVIEW_PANEL:
-            assert f"role='{role}'" in p and f"skill='{skill}'" in p
-        assert 'join' in p.lower() and 'yourself' in p.lower()
+    def test_review_tasks_one_per_panel_member(self) -> None:
+        tasks = config.review_tasks('the repo')
+        assert len(tasks) == len(config.REVIEW_PANEL)
+        for (task, role, skill), (prole, pskill, _focus) in zip(
+                tasks, config.REVIEW_PANEL):
+            assert role == prole and skill == pskill
+            assert 'the repo' in task and 'file:line' in task
 
-    def test_review_prompt_default_area(self) -> None:
-        assert 'the repository' in config.review_prompt()
+    def test_review_synthesis_mentions_area(self) -> None:
+        s = config.review_synthesis('the repo')
+        assert 'the repo' in s and 'consolidate' in s.lower()
 
 
 class TestTurnLoop:
@@ -1935,6 +1935,64 @@ class TestOrchestrator:
         joined = main.queue[-1]
         assert 'A1' in joined and 'A2' in joined \
             and 'joined results' in joined
+
+    def test_barrier_synthesis_prefixes_joined_payload(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        c1 = self._agent('agent1', parent=main, busy=False, answer='A1')
+        o.manager.agents.append(c1)
+        o.barriers[main] = {'remaining': {'agent1'}, 'results': {},
+                            'synthesis': 'SYNTH-LEAD'}
+        o.report(c1)
+        assert main.queue[-1].startswith('SYNTH-LEAD')
+        assert 'A1' in main.queue[-1]
+
+    def test_spawn_panel_runs_children_and_synthesises(self) -> None:
+        import asyncio
+        from guru.adapters.base import Adapter
+        from guru.orchestrator import Orchestrator
+
+        class FakeAdapter(Adapter):
+            name = 'fake'
+            def available(self): return True
+            def list_models(self): return []
+            def activate(self, m): pass
+            def summarise(self, t): return 's'
+
+            def run_turn(self):
+                st = session.current()
+                st.messages.append(
+                    {'role': 'assistant', 'content': 'ok:' + (
+                        st.active_role or 'main')})
+
+        async def drive():
+            o = Orchestrator()
+            o.loop = asyncio.get_running_loop()
+            main = o.manager.active
+            main.state.adapter = FakeAdapter()
+            main.state.model = 'fake'
+            o.attach_console(main)
+            tasks = [('review X for correctness', 'developer', 'code-review'),
+                     ('review X for security', 'security-engineer',
+                      'code-review')]
+            o.spawn_panel(main, tasks, synthesis='SYNTH')
+            for _ in range(300):
+                await asyncio.sleep(0.02)
+                if not any(a.busy or a.queue for a in o.manager.agents):
+                    break
+            return o
+
+        o = asyncio.run(drive())
+        assert len(o.manager.agents) == 3            # main + 2 panel agents
+        main = o.manager.agents[0]
+        # main ran a synthesis turn triggered by the joined delivery…
+        assert any(conversation.msg_content(m) == 'ok:main'
+                   for m in main.state.messages)
+        # …and the joined delivery carried the synthesis lead-in
+        assert any(isinstance(m, dict) and 'SYNTH' in (m.get('content') or '')
+                   for m in main.state.messages)
 
 
 class TestBenchModels:

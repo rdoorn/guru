@@ -600,7 +600,11 @@ def run() -> None:
             return True
         if text == '/review' or text.startswith('/review '):
             area = text[7:].strip() or 'the repository'
-            _submit(main, config.review_prompt(area))
+            tasks = config.review_tasks(area)
+            main.append(
+                f"[review] spawning a {len(tasks)}-agent panel on {area}…")
+            orch.spawn_panel(main, tasks,
+                             synthesis=config.review_synthesis(area))
             return True
         if text == '/save':
             conversation.save_conversation()
