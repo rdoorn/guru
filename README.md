@@ -262,6 +262,8 @@ Run it with `./start.sh` or `python -m guru`.
 |------|---------|
 | `guru/cli.py` | Entry point: adapter wiring, model selection, slash-command helpers |
 | `guru/tui.py` | Hybrid multi-agent UI (main agent in the normal buffer, sub-agents in a full-screen viewer) |
+| `guru/tui_io.py` | TUI output writers and status-bar formatting (split out of `tui.py`) |
+| `guru/orchestrator.py` | Shared spawn/check/join mailbox for the TUI and the benchmark |
 | `guru/agents.py` | `Agent` / `AgentManager` — viewports and sub-agent spawning |
 | `guru/session.py` | Per-context runtime state (adapter, model, context, conversation), routed for parallelism |
 | `guru/config.py` | Paths, `adapters.toml`, `settings.toml`, GPU-fit constants, GURU.md assembly, allow-lists |
