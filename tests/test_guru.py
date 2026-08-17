@@ -487,6 +487,125 @@ class TestStreamingCancel:
         assert closed['v'] is True        # stream closed -> generation aborted
 
 
+class TestReviewPanel:
+    """The /review command's deterministic panel (config helpers)."""
+
+    def test_review_tasks_one_per_panel_member(self) -> None:
+        tasks = config.review_tasks('the repo')
+        assert len(tasks) == len(config.REVIEW_PANEL)
+        for (task, role, skill), (prole, pskill, _focus) in zip(
+                tasks, config.REVIEW_PANEL):
+            assert role == prole and skill == pskill
+            assert 'the repo' in task and 'file:line' in task
+
+    def test_review_synthesis_mentions_area(self) -> None:
+        s = config.review_synthesis('the repo')
+        assert 'the repo' in s and 'consolidate' in s.lower()
+
+
+class TestTurnLoop:
+    """The shared, provider-agnostic tool-calling loop (guru.adapters.turn).
+
+    Every adapter drives its turn through run_loop, so these lock the nudge,
+    duplicate-suppression, and cancel behaviour that all providers now share.
+    """
+
+    def _quiet(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'messages', [])
+        monkeypatch.setattr(session, 'cancel_requested', False)
+
+    def test_nudges_stalled_then_answers(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        seq = iter([("Let me look into it.", []),
+                    ("It is well tested.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq),
+                      run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert len(nudges) == 1 and 'do it now' in nudges[0].lower()
+
+    def test_runs_tools_then_answers(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        seq = iter([("", [("read_file", {"path": "x"}, "r1")]),
+                    ("done", [])])
+        ran: list = []
+        turn.run_loop(step=lambda: next(seq),
+                      run_tools=lambda p: ran.extend(p),
+                      add_user=lambda t: None)
+        assert ran == [("read_file", {"path": "x"}, "r1", False)]
+
+    def test_marks_duplicate_calls(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        call = ("read_file", {"path": "x"}, "r")
+        seq = iter([("", [call]), ("", [call]), ("done", [])])
+        seen: list = []
+        turn.run_loop(step=lambda: next(seq),
+                      run_tools=lambda p: seen.append(p[0][3]),
+                      add_user=lambda t: None)
+        assert seen == [False, True]     # 2nd identical call flagged duplicate
+
+    def test_stops_on_cancel_without_raising(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+
+        def step():
+            session.cancel_requested = True
+            return None
+        turn.run_loop(step=step, run_tools=lambda p: None,
+                      add_user=lambda t: None)   # returns, no exception
+
+    def _reads(self, n):
+        return [{'role': 'tool', 'tool_name': 'read_file', 'content': 'x'}
+                for _ in range(n)]
+
+    def test_delegation_nudges_broad_task(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 3)
+        monkeypatch.setattr(session, 'messages', self._reads(3))
+        seq = iter([("Here is my full assessment of the code.", []),
+                    ("Consolidated report.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert len(nudges) == 1 and 'decompose' in nudges[0].lower()
+
+    def test_no_delegation_nudge_for_subagent(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        monkeypatch.setattr(session, 'can_spawn', False)      # a sub-agent
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 3)
+        monkeypatch.setattr(session, 'messages', self._reads(3))
+        seq = iter([("An answer.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert nudges == []
+
+    def test_no_delegation_nudge_when_already_spawned(
+            self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 3)
+        msgs = self._reads(3) + [
+            {'role': 'tool', 'tool_name': 'spawn', 'content': 'ok'}]
+        monkeypatch.setattr(session, 'messages', msgs)
+        seq = iter([("An answer after delegating.", [])])
+        nudges: list = []
+        turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
+                      add_user=lambda t: nudges.append(t))
+        assert nudges == []
+
+
 class TestGroupMessages:
     """Tests for conversation.group_messages turn-grouping."""
 
@@ -726,6 +845,22 @@ class TestFileTools:
             assert 'denied' in files.search_code('x', str(tmp_path)).lower()
         finally:
             files.set_path_asker(None)
+
+    def test_search_code_skips_escaping_symlink(
+            self, tmp_path, monkeypatch) -> None:
+        proj = tmp_path / 'proj'
+        proj.mkdir()
+        secret = tmp_path / 'secret.txt'           # outside the searched tree
+        secret.write_text('NEEDLE_SECRET\n')
+        (proj / 'real.py').write_text('NEEDLE_OK\n')
+        try:
+            (proj / 'link.txt').symlink_to(secret)
+        except (OSError, NotImplementedError):
+            import pytest
+            pytest.skip('symlinks not supported here')
+        self._only(monkeypatch, proj)
+        out = files.search_code('NEEDLE', str(proj))
+        assert 'real.py' in out and 'SECRET' not in out
 
     def test_search_code_smart_case(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch, tmp_path)
@@ -1749,6 +1884,117 @@ class TestOutlineCode:
         assert 'import sys' in out or 'def broken' in out
 
 
+class TestOrchestrator:
+    """The shared spawn/check/join mailbox (guru.orchestrator.Orchestrator)."""
+
+    def _agent(self, title, parent=None, busy=False, answer='done'):
+        from guru.agents import Agent
+        a = Agent(id=title, title=title)
+        a.parent = parent
+        a.busy = busy
+        a.task = f'task-{title}'
+        a.state.messages = [{'role': 'assistant', 'content': answer}]
+        return a
+
+    def test_do_check_lists_children(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        o.manager.agents += [
+            self._agent('agent1', parent=main, busy=True),
+            self._agent('agent2', parent=main, busy=False)]
+        out = o.do_check(main.state, 'all')
+        assert 'agent1: running' in out and 'agent2: done' in out
+
+    def test_do_join_all_done_delivers_immediately(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True             # busy -> deliver only queues (no launch)
+        o.manager.agents.append(
+            self._agent('agent1', parent=main, busy=False, answer='A1'))
+        msg = o.do_join(main.state, ['agent1'])
+        assert 'resuming' in msg.lower()
+        assert any('A1' in p for p in main.queue)
+
+    def test_report_barrier_waits_then_delivers_joined(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True             # busy -> deliver only queues (no launch)
+        c1 = self._agent('agent1', parent=main, busy=True, answer='A1')
+        c2 = self._agent('agent2', parent=main, busy=True, answer='A2')
+        o.manager.agents += [c1, c2]
+        o.barriers[main] = {'remaining': {'agent1', 'agent2'}, 'results': {}}
+        c1.busy = False
+        o.report(c1)
+        assert main in o.barriers and main.queue == []   # still waiting
+        c2.busy = False
+        o.report(c2)
+        assert main not in o.barriers                     # barrier resolved
+        joined = main.queue[-1]
+        assert 'A1' in joined and 'A2' in joined \
+            and 'joined results' in joined
+
+    def test_barrier_synthesis_prefixes_joined_payload(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        c1 = self._agent('agent1', parent=main, busy=False, answer='A1')
+        o.manager.agents.append(c1)
+        o.barriers[main] = {'remaining': {'agent1'}, 'results': {},
+                            'synthesis': 'SYNTH-LEAD'}
+        o.report(c1)
+        assert main.queue[-1].startswith('SYNTH-LEAD')
+        assert 'A1' in main.queue[-1]
+
+    def test_spawn_panel_runs_children_and_synthesises(self) -> None:
+        import asyncio
+        from guru.adapters.base import Adapter
+        from guru.orchestrator import Orchestrator
+
+        class FakeAdapter(Adapter):
+            name = 'fake'
+            def available(self): return True
+            def list_models(self): return []
+            def activate(self, m): pass
+            def summarise(self, t): return 's'
+
+            def run_turn(self):
+                st = session.current()
+                st.messages.append(
+                    {'role': 'assistant', 'content': 'ok:' + (
+                        st.active_role or 'main')})
+
+        async def drive():
+            o = Orchestrator()
+            o.loop = asyncio.get_running_loop()
+            main = o.manager.active
+            main.state.adapter = FakeAdapter()
+            main.state.model = 'fake'
+            o.attach_console(main)
+            tasks = [('review X for correctness', 'developer', 'code-review'),
+                     ('review X for security', 'security-engineer',
+                      'code-review')]
+            o.spawn_panel(main, tasks, synthesis='SYNTH')
+            for _ in range(300):
+                await asyncio.sleep(0.02)
+                if not any(a.busy or a.queue for a in o.manager.agents):
+                    break
+            return o
+
+        o = asyncio.run(drive())
+        assert len(o.manager.agents) == 3            # main + 2 panel agents
+        main = o.manager.agents[0]
+        # main ran a synthesis turn triggered by the joined delivery…
+        assert any(conversation.msg_content(m) == 'ok:main'
+                   for m in main.state.messages)
+        # …and the joined delivery carried the synthesis lead-in
+        assert any(isinstance(m, dict) and 'SYNTH' in (m.get('content') or '')
+                   for m in main.state.messages)
+
+
 class TestBenchModels:
     def test_load_models_parses_adapter_and_filters(
             self, tmp_path) -> None:
@@ -1830,6 +2076,38 @@ class TestBenchMetrics:
         assert rec['agents_used'] == 0 and rec['result'] == ''
         assert rec['error'] == 'boom' and rec['tokens_per_sec'] == 0.0
 
+    def test_blank_answer_is_flagged_empty(self) -> None:
+        a = self._agent('main', 'm', ['read_file'], 10, 5)
+        a.state.messages[-1]['content'] = '   '     # blank final answer
+        rec = bench.collect_metrics('m', 4096, 4096, 1.0, [a])
+        assert rec['error'] == 'empty answer' and rec['tool_count'] == 1
+
+    def test_caller_error_wins_over_empty_flag(self) -> None:
+        a = self._agent('main', 'm', [], 10, 5)
+        a.state.messages[-1]['content'] = ''        # also blank
+        rec = bench.collect_metrics('m', 4096, 4096, 1.0, [a],
+                                    error='timeout after 600s')
+        assert rec['error'] == 'timeout after 600s'
+
+    def test_serialize_transcript(self) -> None:
+        from guru.agents import Agent
+        a = Agent(id='main', title='main')
+        a.state.model = 'm'
+        a.state.messages = [
+            {'role': 'user', 'content': 'q'},
+            SimpleNamespace(role='assistant', content='thinking', tool_calls=[
+                SimpleNamespace(function=SimpleNamespace(name='read_file'))]),
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'data'},
+            {'role': 'assistant', 'content': 'ANSWER'},
+        ]
+        out = bench.serialize_transcript([a])
+        assert out[0]['title'] == 'main' and out[0]['model'] == 'm'
+        msgs = out[0]['messages']
+        assert msgs[0] == {'role': 'user', 'content': 'q'}
+        assert msgs[1]['tool_calls'] == ['read_file']
+        assert msgs[2]['tool_name'] == 'read_file'
+        assert msgs[3]['content'] == 'ANSWER'
+
 
 class TestBenchOrchestrator:
     def test_spawn_runs_child_and_counts_agents(self, monkeypatch) -> None:
@@ -1870,6 +2148,21 @@ class TestBenchOrchestrator:
             tools.set_check_handler(None)
             tools.set_join_handler(None)
 
+    def test_abort_flags_cancel_on_stalled_agents(self) -> None:
+        import asyncio
+        from guru.agents import Agent
+
+        b = bench._Bench(session.SessionState())
+        stuck = Agent(id='main', title='main')
+        stuck.busy = True                 # never winds down on its own
+        b.manager.agents = [stuck]
+
+        async def drive() -> None:
+            b.loop = asyncio.get_running_loop()
+            await b._abort(grace=0.2)     # gives up after the grace window
+        asyncio.run(drive())
+        assert stuck.state.cancel_requested is True
+
 
 class TestBenchRunner:
     def test_writes_results_json(self, tmp_path, monkeypatch) -> None:
@@ -1904,6 +2197,46 @@ class TestBenchRunner:
         assert len(data) == 1
         assert data[0]['model'] == 'm1' and data[0]['result'] == 'A'
         assert data[0]['tokens_out'] == 10
+        # a per-run transcript file is written alongside the results
+        tfile = next(tmp_path.glob('transcript-*.json'))
+        tdata = json.loads(tfile.read_text(encoding='utf-8'))
+        assert tdata[0]['model'] == 'm1'
+        assert tdata[0]['agents'][0]['messages'][0]['content'] == 'A'
+
+    def test_records_timeout_when_over_limit(
+            self, tmp_path, monkeypatch) -> None:
+        from guru.agents import Agent
+
+        class FakeAdapter:
+            name = 'fake'
+
+            def activate(self, m):
+                session.current().model = m
+                session.current().num_ctx = 4096
+                session.current().ctx_ceiling = 4096
+
+        monkeypatch.setattr(bench, '_build_adapters',
+                            lambda: [FakeAdapter()])
+        monkeypatch.setattr(bench, '_adapter_for',
+                            lambda name, built: built[0])
+        monkeypatch.setattr(config, 'BENCH_MODEL_TIMEOUT', 600)
+
+        def slow_run_once(base):
+            a = Agent(id='main', title='main')
+            a.state.model = base.model
+            a.state.messages = [{'role': 'assistant', 'content': 'partial'}]
+            return [a]
+        monkeypatch.setattr(bench, 'run_once', slow_run_once)
+        monkeypatch.setattr(bench.asyncio, 'run', lambda coro: coro)
+        # Simulate a run whose wall-clock overran the limit (t0=0, end=700).
+        times = iter([0.0, 700.0])
+        monkeypatch.setattr(bench.time, 'monotonic', lambda: next(times))
+
+        path = bench.run_benchmark([(None, 'm1')], out_dir=tmp_path)
+        data = json.loads(path.read_text(encoding='utf-8'))
+        assert 'timeout' in (data[0]['error'] or '')
+        # partial metrics are still recorded, not discarded
+        assert data[0]['result'] == 'partial'
 
     def test_partial_results_saved_on_interrupt(
             self, tmp_path, monkeypatch) -> None:
@@ -2019,6 +2352,14 @@ class TestToolsAndSamplingSettings:
         assert config.SAMPLING_PER_MODEL == {
             'batiai/qwen3.6-27b:q3': {'temperature': 0.6, 'top_p': 0.95}}
 
+    def test_apply_reads_flat_tools(self, tmp_path, monkeypatch) -> None:
+        p = tmp_path / 'settings.toml'
+        p.write_text('[tools]\nflat = true\n', encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        monkeypatch.setattr(config, 'FLAT_TOOLS', False)
+        config._apply_settings()
+        assert config.FLAT_TOOLS is True
+
 
 class TestInitialTools:
     """The pre-activated core toolset lets weak models skip search_tools."""
@@ -2036,6 +2377,13 @@ class TestInitialTools:
         monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', [])
         base, names = tools.initial_tools(can_spawn=True)
         assert tools.spawn in base and names == set()
+
+    def test_flat_activates_entire_registry(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'FLAT_TOOLS', True)
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', [])
+        base, names = tools.initial_tools(can_spawn=False)
+        assert names == set(tools.TOOL_REGISTRY)     # every registry tool
+        assert len(names) > len(['read_file', 'search_code'])
 
 
 class TestSamplingOptions:
@@ -2058,3 +2406,50 @@ class TestSamplingOptions:
         assert a._sampling_options('devstral')['temperature'] == 0.7
         opts = a._sampling_options('qwen3:14b')
         assert opts['temperature'] == 0.6 and opts['top_p'] == 0.95
+
+
+class TestRunTurnIntegration:
+    """End-to-end: a real adapter's run_turn drives the shared loop, runs a
+    REAL tool via execute_tool, threads the result, and renders a final
+    answer. Only the network round (_collect_response) is mocked."""
+
+    def test_ollama_calls_tool_then_answers(
+            self, tmp_path, monkeypatch) -> None:
+        import ollama
+        (tmp_path / 'hello.txt').write_text('hi', encoding='utf-8')
+        # allow reading the temp dir; run non-interactively
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', {str(tmp_path)})
+        monkeypatch.setattr(files, 'set_path_asker', lambda fn: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'num_ctx', 4096)
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'active_tool_names', {'list_dir'})
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'list the directory'}])
+
+        a = OllamaAdapter()
+        monkeypatch.setattr(a, '_fit_after_load', lambda: None)
+        # Two rounds: a tool call, then a final answer.
+        seq = [
+            ollama.Message(role='assistant', content='', tool_calls=[{
+                'function': {'name': 'list_dir',
+                             'arguments': {'path': str(tmp_path)}}}]),
+            ollama.Message(role='assistant',
+                           content='The directory has one file.',
+                           tool_calls=None),
+        ]
+        it = iter(seq)
+        monkeypatch.setattr(a, '_collect_response', lambda: next(it))
+
+        a.run_turn()
+
+        tool_msgs = [m for m in session.messages
+                     if isinstance(m, dict) and m.get('role') == 'tool']
+        assert tool_msgs and tool_msgs[0]['tool_name'] == 'list_dir'
+        assert 'hello.txt' in tool_msgs[0]['content']
+        finals = [m for m in session.messages
+                  if conversation.msg_role(m) == 'assistant'
+                  and 'one file' in conversation.msg_content(m)]
+        assert finals            # a real final answer was rendered

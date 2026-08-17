@@ -59,12 +59,27 @@ OUTLINE_FILE_OVER_CHARS = 8000
 # doing). Overridable via settings.toml's [tools] preactivate = [...].
 PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
 
+# Flat toolset: when true, EVERY registry tool is pre-activated on each agent,
+# so a capable model gets the whole toolset up front and never needs the
+# search_tools discovery hop. Costs more prompt tokens per turn (all schemas
+# are always sent), so it's off by default and best for large-context models.
+# Overridable via settings.toml's [tools] flat = true.
+FLAT_TOOLS = False
+
 # Sampling overrides applied on top of a model's own modelfile defaults (the
 # authoritative per-model source). Empty by default so each model keeps its
 # author-tuned params. settings.toml [sampling] holds global scalar overrides;
 # [sampling."<model>"] sub-tables hold per-model overrides (per-model wins).
 SAMPLING: dict = {}              # global scalar overrides (all models)
 SAMPLING_PER_MODEL: dict = {}    # {model_id: {param: value}}
+
+# Per-model wall-clock ceiling for the headless benchmark (guru.bench). A model
+# that stalls past this is cancelled cooperatively (the adapters' cancel path —
+# Ollama aborts mid-stream) and recorded as a timeout, so one slow/thrashing
+# model can't hang the whole suite. Overridable via settings.toml [bench]
+# model_timeout (seconds). Set above the slowest legitimate run (a real 24B run
+# can take ~400s); 0 disables the guard.
+BENCH_MODEL_TIMEOUT = 600
 
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
@@ -174,14 +189,60 @@ again to refresh the sha, then retry.
 # Appended to the system prompt of delegation-capable agents (TUI only), to
 # steer heavy tool output out of the main context and into sub-agents.
 DELEGATION_HINT = (
-    "You can run work in parallel by delegating to sub-agents with the spawn"
-    " tool. Prefer this for any subtask that produces large tool output you"
-    " do not need in full — fetching web pages, reading big files, or broad"
-    " multi-step research. The sub-agent reads the bulk in its own context"
-    " and returns only its conclusion to you, keeping your own context small."
-    " Use check to poll a sub-agent and join to be resumed once a group"
-    " finishes."
+    "When a request spans multiple files or several concerns (correctness,"
+    " security, design, reliability, tests), DECOMPOSE it instead of"
+    " inspecting everything yourself: spawn one sub-agent per concern, in"
+    " parallel, each with the role+skill that fits, then join and synthesise"
+    " their findings. Each sub-agent reads the bulk in its own context and"
+    " returns only its conclusion, keeping yours small.\n"
+    "Example — to review this codebase, spawn in parallel:\n"
+    "  spawn(task='review the code for correctness, readability, tests',"
+    " role='developer', skill='code-review')\n"
+    "  spawn(task='review the code for injection, authz, secrets, path"
+    " traversal, vulnerable deps', role='security-engineer',"
+    " skill='code-review')\n"
+    "then join both and write one consolidated report. Add an architect"
+    " (design) or SRE (reliability) sub-agent when those concerns apply."
+    " Use check to poll and join to be resumed when a group finishes."
+    " Prefer delegating a domain panel over reading many files yourself."
 )
+
+# Deterministic code-review panel (the /review command) and the target of the
+# delegation steering: each entry is (role, skill, focus) — one specialist
+# sub-agent to spawn in parallel. Kept small on purpose; architect/SRE are
+# available in the catalog for the model to add when design/ops matter.
+REVIEW_PANEL = [
+    ('developer', 'code-review',
+     'correctness, readability, tests, and maintainability'),
+    ('security-engineer', 'code-review',
+     'security: injection, authz, secrets, path traversal, vulnerable deps'),
+]
+
+# Delegation nudge: if a delegation-capable MAIN agent answers a broad task
+# (>= this many file reads) having spawned no sub-agent, nudge it once to
+# decompose into a parallel domain panel. Set 0 to disable the nudge.
+DELEGATION_NUDGE_MIN_READS = 3
+DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
+
+
+def review_tasks(area: str = 'the repository') -> list:
+    """The (task, role, skill) list for the /review panel, one per REVIEW_PANEL
+    member. guru spawns these directly (see orchestrator.spawn_panel), so the
+    multi-agent path runs deterministically rather than depending on the model
+    choosing to delegate."""
+    return [
+        (f"Review {area} for {focus}. Give concrete findings with file:line"
+         f" and a suggested fix; be specific.", role, skill)
+        for role, skill, focus in REVIEW_PANEL]
+
+
+def review_synthesis(area: str = 'the repository') -> str:
+    """The synthesis lead-in delivered to the parent once the panel joins."""
+    return (
+        f"Below are independent sub-agent reviews of {area}. Synthesise them"
+        " into ONE consolidated report grouped by severity (blocker, major,"
+        " minor, nit), de-duplicating overlaps and keeping file:line refs.")
+
 
 # Domains approved for model-initiated web access, loaded at startup.
 ALLOWED_DOMAINS: set = set()
@@ -336,6 +397,7 @@ def _apply_settings() -> None:
     """Apply settings.toml overrides (retention, pre-activation, sampling)."""
     global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
+    global BENCH_MODEL_TIMEOUT, FLAT_TOOLS
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -348,12 +410,19 @@ def _apply_settings() -> None:
     pre = tl.get('preactivate')
     if isinstance(pre, list):
         PREACTIVATE_TOOLS = [str(x) for x in pre]
+    FLAT_TOOLS = bool(tl.get('flat', FLAT_TOOLS))
     sampling = settings_section('sampling')
     # Scalar keys are global overrides; sub-tables are per-model overrides.
     SAMPLING = {k: v for k, v in sampling.items()
                 if not isinstance(v, dict)}
     SAMPLING_PER_MODEL = {k: v for k, v in sampling.items()
                           if isinstance(v, dict)}
+    bench = settings_section('bench')
+    try:
+        BENCH_MODEL_TIMEOUT = int(
+            bench.get('model_timeout', BENCH_MODEL_TIMEOUT))
+    except (TypeError, ValueError):
+        pass
 
 
 def _toml_value(value: object) -> str:

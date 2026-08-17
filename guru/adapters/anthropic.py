@@ -16,9 +16,8 @@ import pathlib
 import shutil
 import subprocess
 
-from rich.markdown import Markdown
-
-from guru import session, ui
+from guru import log, session, ui
+from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
@@ -156,6 +155,7 @@ class AnthropicAdapter(Adapter):
         try:
             import anthropic  # noqa: F401
         except Exception:
+            log.exc('anthropic SDK import failed')
             return False
         if self.auth not in ('api_key', 'oauth'):
             return False
@@ -224,6 +224,7 @@ class AnthropicAdapter(Adapter):
                 ))
             return out
         except Exception:
+            log.exc('anthropic models.list failed')
             return []
 
     def activate(self, model_id: str) -> None:
@@ -240,6 +241,7 @@ class AnthropicAdapter(Adapter):
             info = self._client().models.retrieve(model_id)
             return getattr(info, 'max_input_tokens', 0) or _DEFAULT_CONTEXT
         except Exception:
+            log.exc('anthropic context retrieve failed')
             return _DEFAULT_CONTEXT
 
     # --- turn loop -----------------------------------------------------------
@@ -250,15 +252,12 @@ class AnthropicAdapter(Adapter):
         except Exception as e:
             ui.console.print(f"[red]Anthropic auth error: {e}[/red]")
             return
-        session.cancel_requested = False
         system, native = to_anthropic_messages(session.messages)
         anth_tools = tool_defs(tools.active_specs())
 
-        while True:
-            if session.cancel_requested:
-                ui.console.print("[yellow]* cancelled[/yellow]")
-                return
-            ui.note_thinking()
+        def step():
+            """One Messages API round; returns (text, [(name, input, block)])
+            or None on error (printed) — the shared loop handles cancel."""
             kwargs: dict = {
                 'model': session.model,
                 'max_tokens': _MAX_TOKENS,
@@ -274,14 +273,13 @@ class AnthropicAdapter(Adapter):
                 resp = client.messages.create(**kwargs)
             except Exception as e:
                 ui.console.print(f"[red]Anthropic error: {e}[/red]")
-                return
+                return None
 
             usage = resp.usage
             session.session_in += getattr(usage, 'input_tokens', 0) or 0
             session.session_out += getattr(usage, 'output_tokens', 0) or 0
             session.ctx_used = (
                 getattr(usage, 'input_tokens', 0) or session.ctx_used)
-            ui.status_draw()
 
             text_parts: list = []
             tool_uses: list = []
@@ -301,28 +299,34 @@ class AnthropicAdapter(Adapter):
                 ''.join(text_parts),
                 [(b.name, dict(b.input)) for b in tool_uses],
             ))
+            calls = [(b.name, dict(b.input), b) for b in tool_uses]
+            return (''.join(text_parts), calls)
 
-            if resp.stop_reason != 'tool_use':
-                final = ''.join(text_parts).strip()
-                ui.console.print("\n[bold green]answer>[/bold green]")
-                ui.console.print(Markdown(final))
-                ui.console.print()
-                return
-
+        def run_tools(pending):
+            # All tool_results for a round must go back in ONE user turn.
             results = []
-            for block in tool_uses:
-                result = tools.execute_tool(block.name, dict(block.input))
+            for name, args, block, duplicate in pending:
+                if duplicate:
+                    ui.console.print(
+                        f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
+                    content = (f"Already called {name} with these arguments."
+                               " Use the previous result.")
+                else:
+                    content = tools.execute_tool(name, args)
                 results.append({
                     'type': 'tool_result',
                     'tool_use_id': block.id,
-                    'content': result,
+                    'content': content,
                 })
                 session.messages.append({
-                    'role': 'tool',
-                    'tool_name': block.name,
-                    'content': result,
-                })
+                    'role': 'tool', 'tool_name': name, 'content': content})
             native.append({'role': 'user', 'content': results})
+
+        def add_user(text):
+            native.append({'role': 'user', 'content': text})
+            session.messages.append({'role': 'user', 'content': text})
+
+        turn.run_loop(step=step, run_tools=run_tools, add_user=add_user)
 
     # --- summarisation -------------------------------------------------------
 

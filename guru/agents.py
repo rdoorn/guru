@@ -8,6 +8,7 @@ This module is pure state — no UI, no I/O — so it is unit-testable and can b
 built up before the full TUI wiring lands.
 """
 from dataclasses import dataclass, field
+from typing import Any
 
 from guru.session import SessionState
 
@@ -33,7 +34,9 @@ class Agent:
     state: SessionState = field(default_factory=SessionState)
     # Per-agent rich Console writing into this viewport's buffer; bound via
     # ``ui.use_console(agent.console)`` while the turn runs.
-    console: object = None
+    # Assigned a rich Console at runtime (see tui); Any so its dynamic
+    # ``.print``/``.file`` surface type-checks without importing rich here.
+    console: Any = None
     # Delegation: the agent that spawned this one (None for main and
     # user-created agents), and the task it was spawned to do. Used to deliver
     # results back to the parent's mailbox when the turn finishes.

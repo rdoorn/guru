@@ -21,8 +21,18 @@ exclude-newer = "2026-08-06T00:00:00Z"
 [dependency-groups]
 dev = [
     "flake8>=7.3.0",
+    "mypy>=2.3.0",
     "pytest>=9.1.1",
 ]
+
+[tool.mypy]
+files = ["guru"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+# Pragmatic: this codebase is intentionally lightly annotated; we want mypy to
+# catch real errors, not force annotations everywhere.
+check_untyped_defs = false
+disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

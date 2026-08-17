@@ -5,34 +5,18 @@ model listing, context-window resolution, the tool-calling turn loop, and a
 daemon-reachable check with an on-demand model pull (moved from start.sh).
 """
 import platform
-import re
 import subprocess
 
 import ollama
-from rich.markdown import Markdown
 
-from guru import config, session, ui
+from guru import config, log, session, ui
+from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import tools
 
-# A weak model sometimes ends a turn by announcing an action ("Let me read the
-# files…") without calling a tool; guru would treat that as the final answer.
-# _looks_like_preamble catches that stall so run_turn can nudge it to act.
-_NUDGE_CAP = 2
-_PREAMBLE_RE = re.compile(
-    r"\b(let me|i'?ll|i will|let'?s|i'?m going to|i am going to|going to|"
-    r"start by|next[,]? i|first[,]? i)\b", re.IGNORECASE)
-
-
-def _looks_like_preamble(content: str) -> bool:
-    """True if text announces an action instead of answering — a short
-    'Let me… / I'll…' preamble, or one trailing off into a promised list.
-    Long substantive answers (the real result) do not match."""
-    if len(content) > 600:
-        return False
-    if content.rstrip().endswith((':', '…', '...')):
-        return True
-    return bool(_PREAMBLE_RE.search(content))
+# Re-exported for callers/tests that reference it here; the shared turn loop
+# owns the act-nudge heuristic now (see guru.adapters.turn).
+_looks_like_preamble = turn.looks_like_preamble
 
 
 # Smallest context to fall back to before giving up on fitting into memory.
@@ -56,6 +40,7 @@ class OllamaAdapter(Adapter):
             ollama.list()
             return True
         except Exception:
+            log.exc('ollama.list availability check failed')
             return False
 
     def verify(self) -> tuple:
@@ -67,21 +52,25 @@ class OllamaAdapter(Adapter):
         try:
             models = ollama.list().models
         except Exception:
+            log.exc('ollama.list models failed')
             return []
         infos = []
+        # Skip any entry without a model name (the client types it Optional).
+        named = [m for m in models if m.model]
         # Sort by the name after the last '/' so related models line up in the
         # picker regardless of their prefix (batiai/, hf.co/…, huihui_ai/…).
-        for m in sorted(models, key=lambda x: x.model.rsplit('/', 1)[-1]
+        for m in sorted(named, key=lambda x: (x.model or '').rsplit('/', 1)[-1]
                         .lower()):
-            num_ctx, ceiling = self._resolve_context_window(m.model)
+            model_id: str = m.model or ''
+            num_ctx, ceiling = self._resolve_context_window(model_id)
             infos.append(ModelInfo(
                 adapter=self.name,
-                model_id=m.model,
-                label=m.model,
+                model_id=model_id,
+                label=model_id,
                 # Report the model's architecture max so /models and /context
                 # agree; the running context is shown in the status bar.
                 context_window=ceiling or num_ctx,
-                size=self._param_size(m.model),
+                size=self._param_size(model_id),
                 # On-disk weight size is a good proxy for the RAM needed to
                 # run the model; used to flag models that won't fit memory.
                 memory=int(getattr(m, 'size', 0) or 0),
@@ -125,6 +114,7 @@ class OllamaAdapter(Adapter):
         try:
             info = ollama.show(model)
         except Exception:
+            log.exc('ollama.show context resolve failed')
             return (session.num_ctx_override or config.DEFAULT_NUM_CTX, 0)
 
         modelinfo = info.modelinfo or {}
@@ -153,6 +143,7 @@ class OllamaAdapter(Adapter):
                 caps = ollama.show(model).capabilities or []
                 self._thinks[model] = 'thinking' in caps
             except Exception:
+                log.exc('ollama.show capabilities failed')
                 self._thinks[model] = False
         return self._thinks[model]
 
@@ -172,6 +163,7 @@ class OllamaAdapter(Adapter):
             info = ollama.show(model)
             return getattr(info.details, 'parameter_size', '') or '?'
         except Exception:
+            log.exc('ollama.show param size failed')
             return '?'
 
     def _ensure_daemon(self) -> None:
@@ -187,6 +179,7 @@ class OllamaAdapter(Adapter):
         try:
             present = {m.model for m in ollama.list().models}
         except Exception:
+            log.exc('ollama.list present-models failed')
             return
         if model_id in present:
             return
@@ -206,6 +199,7 @@ class OllamaAdapter(Adapter):
                     return (int(getattr(m, 'size', 0) or 0),
                             int(getattr(m, 'size_vram', 0) or 0))
         except Exception:                                # noqa: BLE001
+            log.exc('ollama.ps stats failed')
             pass
         return (0, 0)
 
@@ -317,6 +311,7 @@ class OllamaAdapter(Adapter):
                 mib = int(out.stdout.strip().splitlines()[0])
                 return mib * 1024 * 1024
         except Exception:                                # noqa: BLE001
+            log.exc('nvidia-smi total memory failed')
             pass
         # Apple Silicon: unified memory; the GPU working set is a fraction.
         if platform.system() == 'Darwin':
@@ -328,6 +323,7 @@ class OllamaAdapter(Adapter):
                     ram = int(out.stdout.strip())
                     return int(ram * config.MAC_GPU_FRACTION)
             except Exception:                            # noqa: BLE001
+                log.exc('sysctl hw.memsize failed')
                 pass
         return 0
 
@@ -336,6 +332,7 @@ class OllamaAdapter(Adapter):
         try:
             mi = ollama.show(model).modelinfo or {}
         except Exception:                                # noqa: BLE001
+            log.exc('ollama.show kv metadata failed')
             return 0
         arch = mi.get('general.architecture', '')
 
@@ -360,6 +357,7 @@ class OllamaAdapter(Adapter):
                 if m.model == model:
                     return int(getattr(m, 'size', 0) or 0)
         except Exception:                                # noqa: BLE001
+            log.exc('ollama.list weight bytes failed')
             pass
         return 0
 
@@ -401,6 +399,7 @@ class OllamaAdapter(Adapter):
             )
             return True
         except Exception:
+            log.exc('ollama.generate reload failed')
             return False
 
     def _preload_and_fit(self) -> None:
@@ -427,6 +426,7 @@ class OllamaAdapter(Adapter):
                     vram = getattr(m, 'size_vram', 0) or 0
                     return total <= 0 or vram >= total
         except Exception:
+            log.exc('ollama.ps gpu-fit check failed')
             pass
         return True
 
@@ -484,6 +484,7 @@ class OllamaAdapter(Adapter):
                 try:
                     stream.close()
                 except Exception:                        # noqa: BLE001
+                    log.exc('stream close failed')
                     pass
                 return None
             m = getattr(chunk, 'message', None)
@@ -505,80 +506,39 @@ class OllamaAdapter(Adapter):
         )
 
     def run_turn(self) -> None:
-        session.cancel_requested = False
-        called: set = set()
-        nudged = 0
-        while True:
-            if session.cancel_requested:
-                ui.console.print("[yellow]* cancelled[/yellow]")
-                return
-            ui.note_thinking()
-            msg = self._collect_response()
-            if msg is None:                  # cancelled mid-generation
-                ui.console.print("[yellow]* cancelled[/yellow]")
-                return
-            # The model is now loaded — check for CPU spill and scale down.
-            self._fit_after_load()
-            ui.status_draw()
+        turn.run_loop(step=self._step, run_tools=self._run_tools,
+                      add_user=self._add_user)
 
-            ui.debug(
-                f"content={msg.content!r} tool_calls={msg.tool_calls}")
+    def _step(self):
+        """One Ollama round: stream the reply, fit context to memory, append
+        the assistant message, and return (text, [(name, args, call), ...]).
+        None on a mid-stream cancel (the shared loop reports it)."""
+        msg = self._collect_response()
+        if msg is None:                      # cancelled mid-generation
+            return None
+        # The model is now loaded — check for CPU spill and scale down.
+        self._fit_after_load()
+        ui.debug(f"content={msg.content!r} tool_calls={msg.tool_calls}")
+        session.messages.append(msg)
+        calls = [(c.function.name, c.function.arguments, c)
+                 for c in (msg.tool_calls or [])]
+        return (msg.content or '', calls)
 
-            session.messages.append(msg)
+    def _run_tools(self, pending) -> None:
+        for name, arguments, _ref, duplicate in pending:
+            if duplicate:
+                ui.console.print(
+                    f"[yellow]\\[SKIP][/yellow] duplicate:"
+                    f" {name}({arguments})")
+                content = (f"Already called {name} with these arguments."
+                           " Use the previous result.")
+            else:
+                content = tools.execute_tool(name, arguments)
+            session.messages.append(
+                {"role": "tool", "tool_name": name, "content": content})
 
-            if not msg.tool_calls:
-                content = (msg.content or '').strip()
-                stalled = not content or _looks_like_preamble(content)
-                if stalled and nudged < _NUDGE_CAP:
-                    nudged += 1
-                    reason = ("empty response" if not content
-                              else "announced an action but called no tool")
-                    ui.console.print(
-                        f"[dim yellow]\\[NUDGE][/dim yellow] {reason}"
-                        " — asking it to act"
-                    )
-                    session.messages.append({
-                        "role": "user",
-                        "content": (
-                            "Do not describe what you will do — do it now."
-                            " Call the tool you need in this reply (use"
-                            " search_tools first if it is not active). If you"
-                            " are genuinely finished, give the final answer."
-                        ),
-                    })
-                    continue
-                ui.console.print("\n[bold green]answer>[/bold green]")
-                ui.console.print(Markdown(content))
-                ui.console.print()
-                break
-
-            for call in msg.tool_calls:
-                name = call.function.name
-                arguments = call.function.arguments
-
-                call_key = (name, tuple(sorted(arguments.items())))
-                if call_key in called:
-                    ui.console.print(
-                        f"[yellow]\\[SKIP][/yellow]"
-                        f" duplicate: {name}({arguments})"
-                    )
-                    session.messages.append({
-                        "role": "tool",
-                        "tool_name": name,
-                        "content": (
-                            f"Already called {name} with these"
-                            " arguments. Use the previous result."
-                        ),
-                    })
-                    continue
-                called.add(call_key)
-
-                result = tools.execute_tool(name, arguments)
-                session.messages.append({
-                    "role": "tool",
-                    "tool_name": name,
-                    "content": result,
-                })
+    def _add_user(self, text: str) -> None:
+        session.messages.append({"role": "user", "content": text})
 
     # --- summarisation -------------------------------------------------------
 

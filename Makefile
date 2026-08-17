@@ -1,4 +1,4 @@
-.PHONY: bench bench-plot test lint yarn
+.PHONY: bench bench-plot test lint typecheck yarn
 
 VENV ?= .venv/bin
 RESULTS ?= $(shell ls -t bench/results-*.json 2>/dev/null | head -1)
@@ -22,6 +22,9 @@ test:             ## Run the test suite
 
 lint:             ## Lint with flake8
 	$(VENV)/flake8 guru bench tests
+
+typecheck:        ## Type-check with mypy (local; there is no CI)
+	$(VENV)/python -m mypy guru
 
 yarn:             ## Pull a YaRN-baked (128K) build: make yarn [YARN_REPO=.. YARN_QUANT=..]
 	ollama pull $(YARN_REPO):$(YARN_QUANT)
