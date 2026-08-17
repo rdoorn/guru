@@ -36,8 +36,9 @@ from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
 from guru import config, log, session, skills, ui
-from guru.agents import Agent, AgentManager
+from guru.agents import AgentManager
 from guru.domain import conversation, files, tools
+from guru.orchestrator import Orchestrator
 
 _CTX_COLOUR = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 _CHROME_ROWS = 5   # 2 rules + prompt + status + tabs
@@ -197,7 +198,6 @@ def run() -> None:
     state: dict = {
         'loop': None, 'view': 'main', 'quit': False, 'closing': False}
     cols = shutil.get_terminal_size((100, 30)).columns
-    barriers: dict = {}
     ask_lock = threading.Lock()
 
     main_writer = _MainWriter(main, state)
@@ -254,96 +254,12 @@ def run() -> None:
             file=writer,  # type: ignore[arg-type]
             force_terminal=True, color_system='256', width=cols)
 
-    # --- background execution (workers only run the blocking turn) ----------
-
-    def _work(agent) -> None:
-        token = session.use(agent.state)
-        ctoken = ui.use_console(agent.console)
-        try:
-            while agent.queue:
-                message = agent.queue.pop(0)
-                agent.state.messages.append(
-                    {'role': 'user', 'content': message})
-                conversation.refresh_system_context()
-                start = time.monotonic()
-                session.adapter.run_turn()
-                conversation.after_turn()
-                elapsed = time.monotonic() - start
-                verb = ('stopped after' if agent.state.cancel_requested
-                        else 'answered in')
-                agent.console.print(f"[dim]({verb} {elapsed:.1f}s)[/dim]")
-        except Exception as e:                           # noqa: BLE001
-            agent.append(f"[error] {e}")
-        finally:
-            agent.console.file.flush()
-            ui.reset_console(ctoken)
-            session.reset(token)
-            state['loop'].call_soon_threadsafe(_on_done, agent)
-
-    def _launch(agent) -> None:
-        agent.busy = True
-        agent.status = 'thinking'
-        state['loop'].run_in_executor(None, _work, agent)
-
-    def _submit(agent, text: str) -> None:
-        agent.append(f"> {text}")
-        agent.queue.append(text)
-        if not agent.busy:
-            _launch(agent)
-
-    def _agent_for_state(st):
-        return next((a for a in manager.agents if a.state is st), None)
-
-    def _final_answer(agent) -> str:
-        for m in reversed(agent.state.messages):
-            role = (m.get('role') if isinstance(m, dict)
-                    else getattr(m, 'role', ''))
-            content = (m.get('content') if isinstance(m, dict)
-                       else getattr(m, 'content', '')) or ''
-            if role == 'assistant' and content.strip():
-                return content.strip()
-        return '(no answer produced)'
-
-    def _format_join(results: dict) -> str:
-        parts = ["[joined results]"]
-        for tid, (task, ans) in results.items():
-            parts.append(f"\n— {tid} · task: {task}\n{ans}")
-        return "\n".join(parts)
-
-    def _deliver(parent, notice: str, payload: str) -> None:
-        parent.append(notice)
-        parent.queue.append(payload)
-        if not parent.busy:
-            _launch(parent)
-        _invalidate()
-
-    def _report(child) -> None:
-        parent = child.parent
-        answer = _final_answer(child)
-        bar = barriers.get(parent)
-        if bar is not None and child.title in bar['remaining']:
-            bar['remaining'].discard(child.title)
-            bar['results'][child.title] = (child.task, answer)
-            if not bar['remaining']:
-                del barriers[parent]
-                _deliver(parent, "[inbox] join complete",
-                         _format_join(bar['results']))
-        else:
-            _deliver(
-                parent,
-                f"[inbox] result from {child.title}",
-                f"[result from {child.title} · task: {child.task}]\n{answer}")
-
-    def _on_done(agent) -> None:
-        agent.busy = False
-        agent.status = 'idle'
-        if agent.queue:
-            _launch(agent)
-            _invalidate()
-            return
-        if agent.parent is not None:
-            _report(agent)
-        _invalidate()
+    # --- background execution (shared orchestrator + TUI surface) -----------
+    #
+    # The spawn/check/join mailbox lives in guru.orchestrator; this subclass
+    # supplies the TUI surface — buffered viewport consoles, redraws, mailbox
+    # notices written into viewports, a per-turn retention+timing footer, and
+    # the loop-thread hop that check/join need (they mutate shared state).
 
     def _on_loop(fn):
         done = threading.Event()
@@ -363,108 +279,42 @@ def run() -> None:
             raise box['error']
         return box['result']
 
-    def _configure(agent, base, can_spawn: bool,
-                   role=None, skill=None) -> None:
-        st = agent.state
-        st.messages = [
-            {'role': 'system', 'content': config.build_system_prompt()}]
-        if can_spawn:
-            st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
-        st.active_tools, st.active_tool_names = tools.initial_tools(can_spawn)
-        st.active_role = role or None
-        st.active_skill = skill or None
-        st.model = base.model
-        st.adapter = base.adapter
-        st.num_ctx = base.num_ctx
-        st.ctx_ceiling = base.ctx_ceiling
-        st.model_size = base.model_size
-        st.git_branch = base.git_branch
-        st.can_spawn = can_spawn
-        _attach_console(agent)
+    class _TuiOrchestrator(Orchestrator):
+        def attach_console(self, agent) -> None:
+            _attach_console(agent)
+
+        def invalidate(self) -> None:
+            _invalidate()
+
+        def notice(self, agent, text: str) -> None:
+            agent.append(text)
+
+        def post_turn(self, agent, start: float) -> None:
+            conversation.after_turn()
+            elapsed = time.monotonic() - start
+            verb = ('stopped after' if agent.state.cancel_requested
+                    else 'answered in')
+            agent.console.print(f"[dim]({verb} {elapsed:.1f}s)[/dim]")
+
+        def on_worker_error(self, agent, exc) -> None:
+            agent.append(f"[error] {exc}")
+
+        def run_on_loop(self, fn):
+            return _on_loop(fn)
+
+    orch = _TuiOrchestrator(manager)
+
+    def _submit(agent, text: str) -> None:
+        orch.submit(agent, text)
 
     def _new_agent() -> None:
         base = manager.active.state
         agent = manager.add(f"agent{len(manager.agents)}")
-        _configure(agent, base, can_spawn=True)
+        orch.configure(agent, base, can_spawn=True)
         agent.append(f"[{agent.title}] new agent · model {agent.state.model}")
         manager.active_index = len(manager.agents) - 1
 
-    def _spawn_agent(task: str, role: str = '', skill: str = '') -> str:
-        base = session.current()
-        title = f"agent{len(manager.agents)}"
-        child = Agent(id=title, title=title)
-        _configure(child, base, can_spawn=False, role=role, skill=skill)
-        child.task = task
-        child.append(f"[{title}] spawned · task: {task}")
-        child.append(f"> {task}")
-        child.queue.append(task)
-
-        def _add_and_start() -> None:
-            child.parent = _agent_for_state(base)
-            manager.agents.append(child)
-            _launch(child)
-            _invalidate()
-
-        state['loop'].call_soon_threadsafe(_add_and_start)
-        return (
-            f"Spawned {title} to work on this task in parallel. Its result"
-            f" will be delivered back to you automatically when it finishes."
-        )
-
-    def _do_check(caller_state, target: str) -> str:
-        caller = _agent_for_state(caller_state)
-        children = [a for a in manager.agents if a.parent is caller]
-        if not children:
-            return "You have no sub-agents."
-        target = (target or 'all').strip()
-        if target in ('all', '*', ''):
-            lines = [
-                f"{a.title}: {'running' if a.busy else 'done'}"
-                for a in children]
-            return "Sub-agents:\n" + "\n".join(lines)
-        match = next((a for a in children if a.title == target), None)
-        if match is None:
-            names = ', '.join(a.title for a in children)
-            return f"No sub-agent named '{target}'. Yours: {names}."
-        if match.busy:
-            return f"{match.title}: running (task: {match.task})"
-        return (f"{match.title}: done\ntask: {match.task}\n"
-                f"{_final_answer(match)}")
-
-    def _do_join(caller_state, titles: list) -> str:
-        caller = _agent_for_state(caller_state)
-        children = {a.title: a for a in manager.agents if a.parent is caller}
-        targets = [children[t] for t in titles if t in children]
-        if not targets:
-            have = ', '.join(children) or 'none'
-            return f"None of those are your sub-agents. Yours: {have}."
-        remaining: set = set()
-        results: dict = {}
-        for a in targets:
-            if a.busy:
-                remaining.add(a.title)
-            else:
-                results[a.title] = (a.task, _final_answer(a))
-        if remaining:
-            barriers[caller] = {'remaining': remaining, 'results': results}
-            waiting = ', '.join(sorted(remaining))
-            return (f"Waiting for {waiting} to finish; I'll be resumed"
-                    f" automatically with their combined results.")
-        _deliver(caller, "[inbox] join complete", _format_join(results))
-        return "Those sub-agents already finished; resuming with results now."
-
-    def _check(target: str) -> str:
-        st = session.current()
-        return _on_loop(lambda: _do_check(st, target))
-
-    def _join(targets: str) -> str:
-        st = session.current()
-        titles = [t for t in targets.replace(',', ' ').split() if t]
-        return _on_loop(lambda: _do_join(st, titles))
-
-    tools.set_spawn_handler(_spawn_agent)
-    tools.set_check_handler(_check)
-    tools.set_join_handler(_join)
+    orch.install_handlers()
 
     # --- sub-agent full-screen viewer (alternate screen) --------------------
 
@@ -822,6 +672,7 @@ def run() -> None:
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()
+        orch.loop = state['loop']
         _greet()
         try:
             while not state['quit']:

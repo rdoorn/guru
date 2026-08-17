@@ -200,6 +200,7 @@ class Orchestrator:
         child.task = task
         child.parent = parent
         self.notice(child, f"[{title}] spawned · task: {task}")
+        self.notice(child, f"> {task}")
         child.queue.append(task)
 
         # Append to the agent list on the loop thread — never mutate it from a
