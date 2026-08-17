@@ -1884,6 +1884,59 @@ class TestOutlineCode:
         assert 'import sys' in out or 'def broken' in out
 
 
+class TestOrchestrator:
+    """The shared spawn/check/join mailbox (guru.orchestrator.Orchestrator)."""
+
+    def _agent(self, title, parent=None, busy=False, answer='done'):
+        from guru.agents import Agent
+        a = Agent(id=title, title=title)
+        a.parent = parent
+        a.busy = busy
+        a.task = f'task-{title}'
+        a.state.messages = [{'role': 'assistant', 'content': answer}]
+        return a
+
+    def test_do_check_lists_children(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        o.manager.agents += [
+            self._agent('agent1', parent=main, busy=True),
+            self._agent('agent2', parent=main, busy=False)]
+        out = o.do_check(main.state, 'all')
+        assert 'agent1: running' in out and 'agent2: done' in out
+
+    def test_do_join_all_done_delivers_immediately(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True             # busy -> deliver only queues (no launch)
+        o.manager.agents.append(
+            self._agent('agent1', parent=main, busy=False, answer='A1'))
+        msg = o.do_join(main.state, ['agent1'])
+        assert 'resuming' in msg.lower()
+        assert any('A1' in p for p in main.queue)
+
+    def test_report_barrier_waits_then_delivers_joined(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True             # busy -> deliver only queues (no launch)
+        c1 = self._agent('agent1', parent=main, busy=True, answer='A1')
+        c2 = self._agent('agent2', parent=main, busy=True, answer='A2')
+        o.manager.agents += [c1, c2]
+        o.barriers[main] = {'remaining': {'agent1', 'agent2'}, 'results': {}}
+        c1.busy = False
+        o.report(c1)
+        assert main in o.barriers and main.queue == []   # still waiting
+        c2.busy = False
+        o.report(c2)
+        assert main not in o.barriers                     # barrier resolved
+        joined = main.queue[-1]
+        assert 'A1' in joined and 'A2' in joined \
+            and 'joined results' in joined
+
+
 class TestBenchModels:
     def test_load_models_parses_adapter_and_filters(
             self, tmp_path) -> None:

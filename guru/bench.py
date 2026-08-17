@@ -1,21 +1,17 @@
 """Headless benchmark: run coding models through guru on one prompt and record
 cost/behavior metrics for a speed-vs-accuracy comparison."""
 import asyncio
-import io
 import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from rich.console import Console
-
-from guru import config, log, session, ui
+from guru import config, session
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
-from guru.agents import Agent, AgentManager
 from guru.domain import conversation, files, tools
+from guru.orchestrator import Orchestrator
 
 PROMPT = ("i want you to inspect current code in this repository, and tell me"
           " something about code quality")
@@ -129,146 +125,14 @@ def serialize_transcript(agents) -> list:
     return out
 
 
-def _quiet_console() -> Console:
-    """A console that discards output (headless benchmark, no TUI)."""
-    return Console(file=io.StringIO(), force_terminal=False)
-
-
-class _Bench:
-    """Compact headless coordinator: mirrors the TUI spawn/check/join mailbox
-    with no UI, so sub-agents actually run and can be measured."""
+class _Bench(Orchestrator):
+    """Headless coordinator: the shared spawn/check/join orchestrator with the
+    default quiet console and no per-turn retention/timing, so sub-agents
+    actually run and their raw behaviour can be measured."""
 
     def __init__(self, base) -> None:
+        super().__init__()
         self.base = base
-        self.manager = AgentManager()
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.barriers: dict = {}
-
-    def _agent_for_state(self, st):
-        return next(
-            (a for a in self.manager.agents if a.state is st), None)
-
-    def _configure(self, agent, can_spawn, role=None, skill=None) -> None:
-        st = agent.state
-        st.messages = [{'role': 'system',
-                        'content': config.build_system_prompt()}]
-        if can_spawn:
-            st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
-        st.active_tools, st.active_tool_names = tools.initial_tools(can_spawn)
-        st.active_role = role or None
-        st.active_skill = skill or None
-        st.can_spawn = can_spawn
-        st.model = self.base.model
-        st.adapter = self.base.adapter
-        st.num_ctx = self.base.num_ctx
-        st.ctx_ceiling = self.base.ctx_ceiling
-        st.model_size = self.base.model_size
-        agent.console = _quiet_console()
-
-    def _work(self, agent) -> None:
-        tok = session.use(agent.state)
-        ct = ui.use_console(agent.console)
-        try:
-            while agent.queue:
-                msg = agent.queue.pop(0)
-                agent.state.messages.append(
-                    {'role': 'user', 'content': msg})
-                conversation.refresh_system_context()
-                session.adapter.run_turn()
-        except Exception:                                # noqa: BLE001
-            log.exc('bench agent work failed')
-            pass
-        finally:
-            ui.reset_console(ct)
-            session.reset(tok)
-            assert self.loop is not None      # set in run() before any work
-            self.loop.call_soon_threadsafe(self._on_done, agent)
-
-    def _launch(self, agent) -> None:
-        agent.busy = True
-        assert self.loop is not None          # set in run() before any launch
-        self.loop.run_in_executor(None, self._work, agent)
-
-    def _final_answer(self, agent) -> str:
-        for m in reversed(agent.state.messages):
-            if conversation.msg_role(m) == 'assistant' \
-                    and conversation.msg_content(m).strip():
-                return conversation.msg_content(m).strip()
-        return ''
-
-    def _deliver(self, parent, payload) -> None:
-        parent.queue.append(payload)
-        if not parent.busy:
-            self._launch(parent)
-
-    def _report(self, child) -> None:
-        parent = child.parent
-        if parent is None:
-            return
-        answer = self._final_answer(child)
-        bar = self.barriers.get(parent)
-        if bar is not None and child.title in bar['remaining']:
-            bar['remaining'].discard(child.title)
-            bar['results'][child.title] = (child.task, answer)
-            if not bar['remaining']:
-                del self.barriers[parent]
-                combined = "\n".join(
-                    f"[{t}] {tk}\n{ans}"
-                    for t, (tk, ans) in bar['results'].items())
-                self._deliver(parent, "[joined]\n" + combined)
-        else:
-            self._deliver(parent, f"[result from {child.title}]\n{answer}")
-
-    def _on_done(self, agent) -> None:
-        agent.busy = False
-        if agent.queue:
-            self._launch(agent)
-            return
-        if agent.parent is not None:
-            self._report(agent)
-
-    def _spawn(self, task, role='', skill='') -> str:
-        parent = self._agent_for_state(session.current())
-        title = f"agent{len(self.manager.agents)}"
-        child = Agent(id=title, title=title)
-        self._configure(child, can_spawn=False, role=role, skill=skill)
-        child.task = task
-        child.queue.append(task)
-
-        def _add_start() -> None:
-            child.parent = parent
-            self.manager.agents.append(child)
-            self._launch(child)
-
-        assert self.loop is not None          # set in run() before any spawn
-        self.loop.call_soon_threadsafe(_add_start)
-        return f"Spawned {title}; its result is delivered when it finishes."
-
-    def _check(self, target) -> str:
-        caller = self._agent_for_state(session.current())
-        kids = [a for a in self.manager.agents if a.parent is caller]
-        if not kids:
-            return "You have no sub-agents."
-        return "Sub-agents:\n" + "\n".join(
-            f"{a.title}: {'running' if a.busy else 'done'}" for a in kids)
-
-    def _join(self, targets) -> str:
-        caller = self._agent_for_state(session.current())
-        kids = {a.title: a for a in self.manager.agents
-                if a.parent is caller}
-        names = [t for t in targets.replace(',', ' ').split() if t]
-        chosen = [kids[n] for n in names if n in kids]
-        if not chosen:
-            return "None of those are your sub-agents."
-        remaining = {a.title for a in chosen if a.busy}
-        results = {a.title: (a.task, self._final_answer(a))
-                   for a in chosen if not a.busy}
-        if remaining:
-            self.barriers[caller] = {'remaining': remaining,
-                                     'results': results}
-            return "Waiting for: " + ", ".join(sorted(remaining))
-        return "[joined]\n" + "\n".join(
-            f"[{t}] {tk}\n{ans}" for t, (tk, ans) in results.items())
 
     async def _abort(self, grace: float = 30.0) -> None:
         """Cooperatively stop a stalled run: flag cancel on every agent (the
@@ -286,25 +150,22 @@ class _Bench:
 
     async def run(self, prompt, timeout=None) -> list:
         self.loop = asyncio.get_running_loop()
-        tools.set_spawn_handler(self._spawn)
-        tools.set_check_handler(self._check)
-        tools.set_join_handler(self._join)
+        assert self.loop is not None
+        self.install_handlers()
         deadline = (self.loop.time() + timeout) if timeout and timeout > 0 \
             else None
         try:
             main = self.manager.active
-            self._configure(main, can_spawn=True)
+            self.configure(main, self.base, can_spawn=True)
             main.queue.append(prompt)
-            self._launch(main)
+            self.launch(main)
             while any(a.busy or a.queue for a in self.manager.agents):
                 await asyncio.sleep(0.05)
                 if deadline is not None and self.loop.time() >= deadline:
                     await self._abort()
                     break
         finally:
-            tools.set_spawn_handler(None)
-            tools.set_check_handler(None)
-            tools.set_join_handler(None)
+            self.clear_handlers()
         return list(self.manager.agents)
 
 
