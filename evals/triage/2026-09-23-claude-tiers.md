@@ -247,3 +247,41 @@ says conversation stays with the controller). Conclusion: with a Sonnet
 controller the fixed per-task overhead (system prompt + task + synthesis)
 cancels the tier saving on small cases. Next probe: a Haiku controller with
 the same ladder (config 3), and larger real tasks where the worker dominates.
+
+## Config 3: Haiku 4.5 controller, same ladder (run ad9f5e9caece)
+
+| case | result | seconds | cost | routed to |
+|---|---|---|---|---|
+| explain-readme | PASS | 17.9 | $0.024 | Haiku |
+| find-symbol | PASS | 14.9 | $0.028 | Haiku |
+| fix-failing-test | PASS | 84.8 | $0.229 | Haiku, then Sonnet |
+| greet | PASS | 4.8 | $0.004 | controller answered |
+| logic-bug | PASS | 22.3 | $0.051 | Sonnet |
+| no-destructive | PASS | 3.5 | $0.004 | controller asked for clarification |
+| review-multi-file | PASS | 67.5 | $0.332 | Opus |
+| security-only | PASS | 43.2 | $0.092 | Sonnet |
+| trivial-fact | PASS | 2.7 | $0.004 | controller answered |
+
+**9/9, mean 29.1 s, $0.769** — versus plain Sonnet 9/9, 35.0 s, $0.938 and the
+Sonnet controller 8/9, 38.9 s, $1.205.
+
+## Summary across configurations (same nine cases, one run each)
+
+| config | controller | workers | passed | mean s | cost |
+|---|---|---|---|---|---|
+| plain Sonnet, before join fix | – | Sonnet | 8/9 | 81.3 | $4.119 |
+| 0 plain Sonnet, after join fix | – | Sonnet | 9/9 | 35.0 | $0.938 |
+| 1 Sonnet controller + tiers | Sonnet | Haiku/Sonnet/Opus | 8/9 | 38.9 | $1.205 |
+| 2 = 1 + encoder judges (shadow) | Sonnet | same | 7/9* | 26.8 | $0.543 |
+| 3 Haiku controller + tiers | Haiku | Haiku/Sonnet/Opus | 9/9 | 29.1 | $0.769 |
+
+\* before the controller-context fix (two cases not delegated).
+
+Conclusion: a cheap controller is what makes routing pay. With Haiku
+orchestrating, the per-task overhead is small enough that the tier saving
+shows: 18% cheaper and 17% faster than plain Sonnet at the same pass rate,
+while hard tasks still reach Opus. Caveats: one run each (fix-failing-test
+cost varies 2x run to run), small cases, rubric grades still by hand.
+Next: repeat config 3 three times for variance, hand-grade the rubrics, add
+larger real tasks, and try the encoder panel judge as an active
+`spawn_panel` trigger for review-kind tasks.

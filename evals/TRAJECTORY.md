@@ -12,3 +12,4 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-23T19:07:36+00:00 | f1929d55c41a | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers-judges+controller | 7/9 | 26.8 | $0.54 | config 2: claude tiers + encoder judges shadow |
 | 2026-09-23T20:18:12+00:00 | 3bff8cb9eb58 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers+controller | 0/9 | 0.6 | n/a | config 1 rerun: controller knows cwd, complexity guidance |
 | 2026-09-23T20:21:20+00:00 | c7473cbe8524 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers+controller | 8/9 | 38.9 | $1.21 | config 1 rerun: controller knows cwd, complexity guidance |
+| 2026-09-23T20:28:43+00:00 | ad9f5e9caece | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers+controller | 9/9 | 29.1 | $0.77 | config 3: haiku controller, claude tiers |

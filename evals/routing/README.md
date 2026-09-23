@@ -107,3 +107,6 @@ where work happened the controller cost more than plain Sonnet. The saving
 against the pre-fix baseline (384761c577f4, $4.12) came from the `join`
 polling fix, not from routing. Rerun config 1 after the fixes before
 drawing further conclusions.
+
+- `ad9f5e9caece` — config 3: Haiku 4.5 controller + Claude tiers: 9/9, 29.1 s, $0.769 (beats plain Sonnet). See the triage note.
+- `c7473cbe8524` — config 1 rerun after the controller-context fix: 8/9, 38.9 s, $1.205.
