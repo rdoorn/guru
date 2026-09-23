@@ -1,0 +1,2157 @@
+{
+ "device": "mps",
+ "total_ms_incl_load": {
+  "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33": 18431,
+  "MoritzLaurer/deberta-v3-base-zeroshot-v2.0": 25024
+ },
+ "summary": [
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.6,
+   "mean_ms": 40,
+   "mean_conf_correct": 0.71,
+   "mean_conf_wrong": 0.62
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 1.0,
+   "mean_ms": 13,
+   "mean_conf_correct": 0.25,
+   "mean_conf_wrong": null
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 13,
+   "mean_conf_correct": 0.12,
+   "mean_conf_wrong": 0.01
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.86,
+   "mean_ms": 13,
+   "mean_conf_correct": 0.17,
+   "mean_conf_wrong": 0.24
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.67,
+   "mean_ms": 72,
+   "mean_conf_correct": 0.15,
+   "mean_conf_wrong": 0.16
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.5,
+   "mean_ms": 51,
+   "mean_conf_correct": 0.79,
+   "mean_conf_wrong": 0.61
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.42,
+   "mean_ms": 160,
+   "mean_conf_correct": 0.37,
+   "mean_conf_wrong": 0.27
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.2,
+   "mean_ms": 42,
+   "mean_conf_correct": 0.79,
+   "mean_conf_wrong": 0.65
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 14,
+   "mean_conf_correct": 0.12,
+   "mean_conf_wrong": 0.39
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.75,
+   "mean_ms": 14,
+   "mean_conf_correct": 0.0,
+   "mean_conf_wrong": 0.01
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.71,
+   "mean_ms": 14,
+   "mean_conf_correct": 0.0,
+   "mean_conf_wrong": 0.11
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.5,
+   "mean_ms": 196,
+   "mean_conf_correct": 0.0,
+   "mean_conf_wrong": 0.0
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.75,
+   "mean_ms": 48,
+   "mean_conf_correct": 0.56,
+   "mean_conf_wrong": 0.44
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.17,
+   "mean_ms": 180,
+   "mean_conf_correct": 0.28,
+   "mean_conf_wrong": 0.24
+  }
+ ],
+ "outcomes": [
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 1864
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 54
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 24
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 23
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.016
+   },
+   "ms": 28
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.0
+   },
+   "ms": 52
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.003
+   },
+   "ms": 140
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 95
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.003
+   },
+   "ms": 35
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.004
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.0
+   },
+   "ms": 12
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.011
+   },
+   "ms": 8
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "predicted": "small",
+   "correct": true,
+   "dist": {
+    "small": 0.532,
+    "medium": 0.29,
+    "large": 0.179
+   },
+   "ms": 68
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "predicted": "medium",
+   "correct": false,
+   "dist": {
+    "medium": 0.381,
+    "small": 0.337,
+    "large": 0.282
+   },
+   "ms": 23
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "predicted": "medium",
+   "correct": false,
+   "dist": {
+    "medium": 0.592,
+    "large": 0.21,
+    "small": 0.198
+   },
+   "ms": 22
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "predicted": "small",
+   "correct": true,
+   "dist": {
+    "small": 0.652,
+    "medium": 0.211,
+    "large": 0.137
+   },
+   "ms": 37
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "dist": {
+    "medium": 0.59,
+    "small": 0.265,
+    "large": 0.145
+   },
+   "ms": 108
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "dist": {
+    "medium": 0.534,
+    "small": 0.329,
+    "large": 0.137
+   },
+   "ms": 49
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "dist": {
+    "medium": 0.57,
+    "small": 0.239,
+    "large": 0.191
+   },
+   "ms": 25
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "dist": {
+    "medium": 0.499,
+    "large": 0.313,
+    "small": 0.188
+   },
+   "ms": 32
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "predicted": "large",
+   "correct": true,
+   "dist": {
+    "large": 0.378,
+    "medium": 0.331,
+    "small": 0.291
+   },
+   "ms": 46
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "predicted": "large",
+   "correct": true,
+   "dist": {
+    "large": 0.647,
+    "medium": 0.212,
+    "small": 0.142
+   },
+   "ms": 61
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "predicted": "medium",
+   "correct": false,
+   "dist": {
+    "medium": 0.357,
+    "large": 0.34,
+    "small": 0.303
+   },
+   "ms": 50
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "predicted": "large",
+   "correct": true,
+   "dist": {
+    "large": 0.656,
+    "medium": 0.196,
+    "small": 0.148
+   },
+   "ms": 60
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "predicted": "search_code",
+   "correct": false,
+   "dist": {
+    "search_code": 0.262,
+    "web_fetch": 0.115,
+    "edit_file": 0.112,
+    "web_search": 0.111,
+    "fetch_github_releases": 0.091,
+    "list_dir": 0.08,
+    "list_tree": 0.08,
+    "write_file": 0.06,
+    "read_file": 0.06,
+    "delete_file": 0.03
+   },
+   "ms": 167
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "predicted": "read_file",
+   "correct": false,
+   "dist": {
+    "read_file": 0.348,
+    "web_fetch": 0.17,
+    "edit_file": 0.096,
+    "web_search": 0.09,
+    "search_code": 0.082,
+    "fetch_github_releases": 0.078,
+    "list_dir": 0.062,
+    "list_tree": 0.042,
+    "write_file": 0.023,
+    "delete_file": 0.01
+   },
+   "ms": 174
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "predicted": "list_dir",
+   "correct": false,
+   "dist": {
+    "list_dir": 0.231,
+    "search_code": 0.184,
+    "list_tree": 0.118,
+    "edit_file": 0.109,
+    "read_file": 0.082,
+    "web_search": 0.081,
+    "fetch_github_releases": 0.076,
+    "web_fetch": 0.065,
+    "write_file": 0.038,
+    "delete_file": 0.015
+   },
+   "ms": 128
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "predicted": "search_code",
+   "correct": false,
+   "dist": {
+    "search_code": 0.225,
+    "list_dir": 0.191,
+    "list_tree": 0.148,
+    "edit_file": 0.116,
+    "web_search": 0.067,
+    "fetch_github_releases": 0.064,
+    "read_file": 0.056,
+    "write_file": 0.055,
+    "web_fetch": 0.053,
+    "delete_file": 0.024
+   },
+   "ms": 434
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "predicted": "search_code",
+   "correct": false,
+   "dist": {
+    "search_code": 0.245,
+    "list_dir": 0.124,
+    "edit_file": 0.119,
+    "list_tree": 0.116,
+    "fetch_github_releases": 0.098,
+    "web_fetch": 0.085,
+    "web_search": 0.081,
+    "read_file": 0.064,
+    "write_file": 0.044,
+    "delete_file": 0.024
+   },
+   "ms": 146
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "predicted": "list_dir",
+   "correct": false,
+   "dist": {
+    "list_dir": 0.221,
+    "search_code": 0.143,
+    "edit_file": 0.12,
+    "read_file": 0.113,
+    "list_tree": 0.097,
+    "write_file": 0.08,
+    "web_fetch": 0.073,
+    "fetch_github_releases": 0.064,
+    "web_search": 0.063,
+    "delete_file": 0.026
+   },
+   "ms": 256
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "predicted": "list_dir",
+   "correct": false,
+   "dist": {
+    "list_dir": 0.174,
+    "search_code": 0.158,
+    "list_tree": 0.142,
+    "web_search": 0.124,
+    "web_fetch": 0.122,
+    "edit_file": 0.086,
+    "read_file": 0.068,
+    "fetch_github_releases": 0.064,
+    "write_file": 0.037,
+    "delete_file": 0.024
+   },
+   "ms": 158
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "predicted": "write_file",
+   "correct": true,
+   "dist": {
+    "write_file": 0.283,
+    "list_dir": 0.183,
+    "edit_file": 0.165,
+    "list_tree": 0.09,
+    "search_code": 0.078,
+    "read_file": 0.076,
+    "fetch_github_releases": 0.049,
+    "web_search": 0.032,
+    "web_fetch": 0.031,
+    "delete_file": 0.013
+   },
+   "ms": 135
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "predicted": "search_code",
+   "correct": false,
+   "dist": {
+    "search_code": 0.194,
+    "web_fetch": 0.134,
+    "edit_file": 0.131,
+    "web_search": 0.105,
+    "fetch_github_releases": 0.096,
+    "list_tree": 0.088,
+    "list_dir": 0.078,
+    "write_file": 0.073,
+    "read_file": 0.064,
+    "delete_file": 0.038
+   },
+   "ms": 132
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "dist": {
+    "delete_file": 0.287,
+    "list_dir": 0.178,
+    "edit_file": 0.167,
+    "list_tree": 0.098,
+    "search_code": 0.082,
+    "write_file": 0.052,
+    "read_file": 0.045,
+    "fetch_github_releases": 0.035,
+    "web_search": 0.029,
+    "web_fetch": 0.027
+   },
+   "ms": 152
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "predicted": "web_fetch",
+   "correct": false,
+   "dist": {
+    "web_fetch": 0.228,
+    "search_code": 0.159,
+    "web_search": 0.111,
+    "fetch_github_releases": 0.103,
+    "list_tree": 0.101,
+    "list_dir": 0.088,
+    "read_file": 0.077,
+    "edit_file": 0.071,
+    "write_file": 0.039,
+    "delete_file": 0.024
+   },
+   "ms": 149
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "predicted": "search_code",
+   "correct": false,
+   "dist": {
+    "search_code": 0.245,
+    "edit_file": 0.121,
+    "web_fetch": 0.116,
+    "list_tree": 0.096,
+    "fetch_github_releases": 0.095,
+    "web_search": 0.094,
+    "list_dir": 0.086,
+    "write_file": 0.066,
+    "read_file": 0.045,
+    "delete_file": 0.036
+   },
+   "ms": 127
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.012
+   },
+   "ms": 13
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 9
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 8
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.015
+   },
+   "ms": 13
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 18
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 18
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 20
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.006
+   },
+   "ms": 9
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.008
+   },
+   "ms": 15
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.01
+   },
+   "ms": 19
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.005
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "predicted": true,
+   "correct": true,
+   "dist": {
+    "yes": 0.815
+   },
+   "ms": 16
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.009
+   },
+   "ms": 17
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.385
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.003
+   },
+   "ms": 13
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.12
+   },
+   "ms": 9
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.006
+   },
+   "ms": 17
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.005
+   },
+   "ms": 16
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.091
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.005
+   },
+   "ms": 16
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.62
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.49,
+    "wrong": 0.447,
+    "good": 0.063
+   },
+   "ms": 28
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.86
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.698,
+    "wrong": 0.221,
+    "good": 0.081
+   },
+   "ms": 34
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.97
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.753,
+    "wrong": 0.14,
+    "good": 0.107
+   },
+   "ms": 56
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "predicted": {
+    "argmax": 1,
+    "ev": 1.03
+   },
+   "correct": true,
+   "dist": {
+    "partial": 0.724,
+    "good": 0.153,
+    "wrong": 0.123
+   },
+   "ms": 35
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.96
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.654,
+    "wrong": 0.192,
+    "good": 0.154
+   },
+   "ms": 82
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.95
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.651,
+    "wrong": 0.197,
+    "good": 0.151
+   },
+   "ms": 30
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.99
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.76,
+    "wrong": 0.124,
+    "good": 0.116
+   },
+   "ms": 38
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.93
+   },
+   "correct": true,
+   "dist": {
+    "partial": 0.857,
+    "wrong": 0.105,
+    "good": 0.039
+   },
+   "ms": 37
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "predicted": {
+    "argmax": 1,
+    "ev": 1.11
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.565,
+    "good": 0.272,
+    "wrong": 0.163
+   },
+   "ms": 54
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-xsmall-zeroshot-v1.1-all-33",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "predicted": {
+    "argmax": 1,
+    "ev": 1.0
+   },
+   "correct": false,
+   "dist": {
+    "partial": 0.605,
+    "good": 0.198,
+    "wrong": 0.197
+   },
+   "ms": 27
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "predicted": true,
+   "correct": true,
+   "dist": {
+    "yes": 0.519
+   },
+   "ms": 334
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "predicted": true,
+   "correct": true,
+   "dist": {
+    "yes": 0.518
+   },
+   "ms": 105
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.164
+   },
+   "ms": 21
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.059
+   },
+   "ms": 21
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.414
+   },
+   "ms": 23
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.003
+   },
+   "ms": 53
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 99
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 149
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.021
+   },
+   "ms": 22
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.009
+   },
+   "ms": 16
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 13
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.14
+   },
+   "ms": 11
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "predicted": "small",
+   "correct": true,
+   "dist": {
+    "small": 0.985,
+    "large": 0.008,
+    "medium": 0.007
+   },
+   "ms": 51
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "predicted": "small",
+   "correct": true,
+   "dist": {
+    "small": 0.836,
+    "medium": 0.13,
+    "large": 0.033
+   },
+   "ms": 33
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "predicted": "small",
+   "correct": true,
+   "dist": {
+    "small": 0.837,
+    "medium": 0.133,
+    "large": 0.03
+   },
+   "ms": 31
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "predicted": "small",
+   "correct": true,
+   "dist": {
+    "small": 0.956,
+    "medium": 0.03,
+    "large": 0.014
+   },
+   "ms": 38
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "predicted": "small",
+   "correct": false,
+   "dist": {
+    "small": 0.748,
+    "medium": 0.22,
+    "large": 0.032
+   },
+   "ms": 143
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "predicted": "small",
+   "correct": false,
+   "dist": {
+    "small": 0.482,
+    "medium": 0.446,
+    "large": 0.072
+   },
+   "ms": 46
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "dist": {
+    "medium": 0.478,
+    "small": 0.416,
+    "large": 0.106
+   },
+   "ms": 33
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "dist": {
+    "medium": 0.668,
+    "large": 0.268,
+    "small": 0.064
+   },
+   "ms": 44
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "predicted": "medium",
+   "correct": false,
+   "dist": {
+    "medium": 0.684,
+    "large": 0.251,
+    "small": 0.064
+   },
+   "ms": 51
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "predicted": "medium",
+   "correct": false,
+   "dist": {
+    "medium": 0.512,
+    "large": 0.358,
+    "small": 0.13
+   },
+   "ms": 52
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "predicted": "medium",
+   "correct": false,
+   "dist": {
+    "medium": 0.467,
+    "large": 0.447,
+    "small": 0.086
+   },
+   "ms": 42
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "predicted": "medium",
+   "correct": false,
+   "dist": {
+    "medium": 0.742,
+    "large": 0.234,
+    "small": 0.024
+   },
+   "ms": 46
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "predicted": "read_file",
+   "correct": false,
+   "dist": {
+    "read_file": 0.244,
+    "list_dir": 0.133,
+    "edit_file": 0.124,
+    "web_search": 0.119,
+    "web_fetch": 0.115,
+    "search_code": 0.101,
+    "fetch_github_releases": 0.068,
+    "list_tree": 0.059,
+    "write_file": 0.021,
+    "delete_file": 0.017
+   },
+   "ms": 152
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "predicted": "read_file",
+   "correct": false,
+   "dist": {
+    "read_file": 0.645,
+    "web_fetch": 0.066,
+    "list_dir": 0.054,
+    "fetch_github_releases": 0.054,
+    "web_search": 0.052,
+    "search_code": 0.05,
+    "edit_file": 0.04,
+    "list_tree": 0.032,
+    "write_file": 0.004,
+    "delete_file": 0.003
+   },
+   "ms": 148
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "predicted": "read_file",
+   "correct": false,
+   "dist": {
+    "read_file": 0.268,
+    "list_dir": 0.13,
+    "web_search": 0.119,
+    "search_code": 0.117,
+    "web_fetch": 0.102,
+    "fetch_github_releases": 0.087,
+    "list_tree": 0.077,
+    "edit_file": 0.072,
+    "write_file": 0.018,
+    "delete_file": 0.01
+   },
+   "ms": 147
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "predicted": "search_code",
+   "correct": false,
+   "dist": {
+    "search_code": 0.196,
+    "read_file": 0.17,
+    "list_tree": 0.163,
+    "list_dir": 0.158,
+    "edit_file": 0.118,
+    "web_search": 0.079,
+    "fetch_github_releases": 0.045,
+    "web_fetch": 0.039,
+    "write_file": 0.016,
+    "delete_file": 0.016
+   },
+   "ms": 161
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "predicted": "search_code",
+   "correct": false,
+   "dist": {
+    "search_code": 0.193,
+    "list_tree": 0.166,
+    "list_dir": 0.165,
+    "edit_file": 0.105,
+    "read_file": 0.099,
+    "web_fetch": 0.08,
+    "web_search": 0.078,
+    "fetch_github_releases": 0.072,
+    "write_file": 0.027,
+    "delete_file": 0.015
+   },
+   "ms": 153
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "predicted": "read_file",
+   "correct": true,
+   "dist": {
+    "read_file": 0.302,
+    "list_dir": 0.149,
+    "write_file": 0.108,
+    "search_code": 0.107,
+    "edit_file": 0.093,
+    "list_tree": 0.09,
+    "web_search": 0.048,
+    "fetch_github_releases": 0.046,
+    "web_fetch": 0.044,
+    "delete_file": 0.013
+   },
+   "ms": 276
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "predicted": "search_code",
+   "correct": true,
+   "dist": {
+    "search_code": 0.171,
+    "edit_file": 0.14,
+    "list_dir": 0.135,
+    "list_tree": 0.118,
+    "web_search": 0.103,
+    "read_file": 0.1,
+    "fetch_github_releases": 0.076,
+    "web_fetch": 0.068,
+    "write_file": 0.066,
+    "delete_file": 0.024
+   },
+   "ms": 146
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "predicted": "write_file",
+   "correct": true,
+   "dist": {
+    "write_file": 0.398,
+    "edit_file": 0.119,
+    "list_tree": 0.099,
+    "list_dir": 0.095,
+    "search_code": 0.08,
+    "fetch_github_releases": 0.064,
+    "web_search": 0.046,
+    "web_fetch": 0.044,
+    "read_file": 0.043,
+    "delete_file": 0.012
+   },
+   "ms": 148
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "predicted": "edit_file",
+   "correct": true,
+   "dist": {
+    "edit_file": 0.194,
+    "search_code": 0.152,
+    "list_dir": 0.136,
+    "web_search": 0.12,
+    "fetch_github_releases": 0.1,
+    "list_tree": 0.091,
+    "web_fetch": 0.082,
+    "read_file": 0.08,
+    "write_file": 0.025,
+    "delete_file": 0.02
+   },
+   "ms": 141
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "dist": {
+    "delete_file": 0.777,
+    "edit_file": 0.054,
+    "search_code": 0.037,
+    "fetch_github_releases": 0.026,
+    "list_tree": 0.025,
+    "web_search": 0.024,
+    "list_dir": 0.022,
+    "web_fetch": 0.016,
+    "read_file": 0.013,
+    "write_file": 0.006
+   },
+   "ms": 143
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "predicted": "web_search",
+   "correct": false,
+   "dist": {
+    "web_search": 0.178,
+    "search_code": 0.166,
+    "read_file": 0.164,
+    "list_tree": 0.131,
+    "web_fetch": 0.129,
+    "list_dir": 0.11,
+    "fetch_github_releases": 0.052,
+    "edit_file": 0.041,
+    "write_file": 0.018,
+    "delete_file": 0.01
+   },
+   "ms": 167
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "predicted": "read_file",
+   "correct": false,
+   "dist": {
+    "read_file": 0.186,
+    "list_dir": 0.149,
+    "web_search": 0.129,
+    "edit_file": 0.118,
+    "web_fetch": 0.115,
+    "search_code": 0.095,
+    "fetch_github_releases": 0.081,
+    "list_tree": 0.074,
+    "write_file": 0.039,
+    "delete_file": 0.014
+   },
+   "ms": 143
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "predicted": true,
+   "correct": true,
+   "dist": {
+    "yes": 0.834
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.0
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.0
+   },
+   "ms": 9
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.01
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.0
+   },
+   "ms": 15
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.0
+   },
+   "ms": 15
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 17
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.01
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 15
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.004
+   },
+   "ms": 17
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.004
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "predicted": true,
+   "correct": true,
+   "dist": {
+    "yes": 0.982
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.001
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "predicted": true,
+   "correct": true,
+   "dist": {
+    "yes": 0.995
+   },
+   "ms": 13
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.04
+   },
+   "ms": 15
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "predicted": true,
+   "correct": true,
+   "dist": {
+    "yes": 0.984
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 14
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.015
+   },
+   "ms": 13
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "predicted": false,
+   "correct": false,
+   "dist": {
+    "yes": 0.237
+   },
+   "ms": 10
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.002
+   },
+   "ms": 13
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "predicted": false,
+   "correct": true,
+   "dist": {
+    "yes": 0.003
+   },
+   "ms": 15
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.59
+   },
+   "correct": true,
+   "dist": {
+    "good": 0.738,
+    "wrong": 0.145,
+    "partial": 0.117
+   },
+   "ms": 29
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.48
+   },
+   "correct": false,
+   "dist": {
+    "good": 0.656,
+    "wrong": 0.175,
+    "partial": 0.169
+   },
+   "ms": 41
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.87
+   },
+   "correct": true,
+   "dist": {
+    "good": 0.898,
+    "partial": 0.074,
+    "wrong": 0.028
+   },
+   "ms": 44
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.2
+   },
+   "correct": false,
+   "dist": {
+    "good": 0.427,
+    "partial": 0.344,
+    "wrong": 0.229
+   },
+   "ms": 38
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.19
+   },
+   "correct": true,
+   "dist": {
+    "good": 0.431,
+    "partial": 0.326,
+    "wrong": 0.243
+   },
+   "ms": 73
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.34
+   },
+   "correct": false,
+   "dist": {
+    "good": 0.544,
+    "partial": 0.248,
+    "wrong": 0.208
+   },
+   "ms": 28
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.36
+   },
+   "correct": true,
+   "dist": {
+    "good": 0.534,
+    "partial": 0.292,
+    "wrong": 0.175
+   },
+   "ms": 39
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "predicted": {
+    "argmax": 1,
+    "ev": 0.96
+   },
+   "correct": true,
+   "dist": {
+    "partial": 0.71,
+    "wrong": 0.164,
+    "good": 0.127
+   },
+   "ms": 43
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.91
+   },
+   "correct": true,
+   "dist": {
+    "good": 0.932,
+    "partial": 0.046,
+    "wrong": 0.022
+   },
+   "ms": 39
+  },
+  {
+   "model": "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "predicted": {
+    "argmax": 2,
+    "ev": 1.81
+   },
+   "correct": false,
+   "dist": {
+    "good": 0.866,
+    "partial": 0.075,
+    "wrong": 0.059
+   },
+   "ms": 28
+  }
+ ]
+}

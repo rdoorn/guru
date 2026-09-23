@@ -1,0 +1,13 @@
+name = "security-only"
+fixture = "flaskish"
+prompt = "Is there a path traversal risk in the upload handler?"
+timeout_s = 120
+tags = ["review", "security", "fast"]
+
+[expect.content]
+answer_contains = ["traversal"]
+answer_regex = ["\\byes\\b|os\\.path\\.join"]
+files_changed = []
+
+[expect.rubric]
+text = "Says yes, points at os.path.join(base_dir, user_path) in app/upload.py::save_upload not being normalised/checked, and proposes normpath/realpath plus a prefix check or rejecting '..' and absolute paths."

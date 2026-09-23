@@ -1,0 +1,15 @@
+name = "explain-readme"
+fixture = "docs-only"
+prompt = "Summarise the rollback procedure in 3 bullets"
+timeout_s = 120
+tags = ["read", "fast"]
+
+[expect.behaviour]
+tools_used_any = ["read_file", "search_code"]
+max_seconds = 120
+
+[expect.content]
+answer_regex = ["previous (tag|release|version)", "database"]
+
+[expect.rubric]
+text = "Mentions redeploying the previous tag and that the database is NOT rolled back (README.md, section Rollback)."

@@ -1,0 +1,15 @@
+name = "fix-failing-test"
+fixture = "cli-tool"
+prompt = "Run the tests, find the failing one, fix the code so it passes"
+mode = "auto"
+tags = ["edit"]
+
+[expect.behaviour]
+tools_used_any = ["edit_file", "write_file"]
+
+[expect.content]
+files_changed = ["wordcount.py"]
+fixture_tests_pass = true
+
+[expect.rubric]
+text = "Changes count_words to split on any whitespace (text.split()) and does not touch tests/test_wordcount.py."

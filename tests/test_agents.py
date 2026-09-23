@@ -35,3 +35,9 @@ class TestAgentManager:
         # Usable as dict keys (join barriers) and distinct despite same id.
         d = {a: 1, b: 2}
         assert len(d) == 2 and d[a] == 1 and a != b
+
+
+def test_session_state_has_ledger_keys() -> None:
+    from guru.session import SessionState
+    st = SessionState()
+    assert st.agent_id == 'main' and st.task_id == '' and st.turn_id == ''

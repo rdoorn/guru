@@ -166,6 +166,35 @@ class TestFileTools:
         out = files.search_code('needle', str(tmp_path), glob='*.py')
         assert 'a.py:1:' in out and 'b.txt' not in out
 
+    def test_search_code_glob_list_matches_any(
+            self, tmp_path, monkeypatch) -> None:
+        """A comma-separated glob list matches files of every listed kind."""
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'a.py').write_text('needle\n')
+        (tmp_path / 'README.md').write_text('needle\n')
+        (tmp_path / 'c.txt').write_text('needle\n')
+        out = files.search_code(
+            'needle', str(tmp_path), glob='*.py,README.md,*.sh')
+        assert 'a.py:1:' in out and 'README.md:1:' in out
+        assert 'c.txt' not in out
+
+    def test_search_code_glob_list_tolerates_spaces(
+            self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'a.py').write_text('needle\n')
+        (tmp_path / 'b.md').write_text('needle\n')
+        (tmp_path / 'c.txt').write_text('needle\n')
+        out = files.search_code('needle', str(tmp_path), glob=' *.py , *.md, ')
+        assert 'a.py:1:' in out and 'b.md:1:' in out
+        assert 'c.txt' not in out
+
+    def test_search_code_glob_list_no_match_names_globs(
+            self, tmp_path, monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        (tmp_path / 'c.txt').write_text('needle\n')
+        out = files.search_code('needle', str(tmp_path), glob='*.py,*.md')
+        assert 'No matches' in out and "'*.py,*.md'" in out
+
     def test_search_code_per_file_cap(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch, tmp_path)
         from guru.domain.files import _MAX_PER_FILE
@@ -375,3 +404,62 @@ class TestAccessPromptDefaults:
             raise KeyboardInterrupt
         monkeypatch.setattr('builtins.input', boom)
         assert tools._ask_domain('x.com') is False
+
+
+class TestAutoGrantKnob:
+    """config.AUTO_GRANT False makes auto mode consult the asker."""
+
+    def test_auto_grant_false_consults_asker_and_denies(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_AUTO)
+        monkeypatch.setattr(config, 'AUTO_GRANT', False)
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        saved: list = []
+        monkeypatch.setattr(config, 'persist_write_dir', saved.append)
+        asked: list = []
+
+        def deny(q):
+            asked.append(q)
+            return False
+        files.set_path_asker(deny)
+        try:
+            ok = files._approve(tmp_path, config.ALLOWED_WRITE_DIRS,
+                                config.persist_write_dir, 'Allow?')
+        finally:
+            files.set_path_asker(None)
+        assert ok is False and asked == ['Allow?']
+        assert config.ALLOWED_WRITE_DIRS == set() and saved == []
+
+    def test_auto_grant_true_grants_without_asking(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_AUTO)
+        monkeypatch.setattr(config, 'AUTO_GRANT', True)
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        saved: list = []
+        monkeypatch.setattr(config, 'persist_write_dir', saved.append)
+
+        def boom(q):
+            raise AssertionError('should not prompt')
+        files.set_path_asker(boom)
+        try:
+            ok = files._approve(tmp_path, config.ALLOWED_WRITE_DIRS,
+                                config.persist_write_dir, 'Allow?')
+        finally:
+            files.set_path_asker(None)
+        assert ok is True
+        assert config.ALLOWED_WRITE_DIRS == {str(tmp_path)}
+        assert saved == [str(tmp_path)]
+
+    def test_auto_grant_false_still_grants_on_yes(
+            self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_AUTO)
+        monkeypatch.setattr(config, 'AUTO_GRANT', False)
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        monkeypatch.setattr(config, 'persist_write_dir', lambda d: None)
+        files.set_path_asker(lambda q: True)
+        try:
+            ok = files._approve(tmp_path, config.ALLOWED_WRITE_DIRS,
+                                config.persist_write_dir, 'Allow?')
+        finally:
+            files.set_path_asker(None)
+        assert ok is True and str(tmp_path) in config.ALLOWED_WRITE_DIRS

@@ -1,5 +1,5 @@
 """Tests for guru.ui formatting and status helpers."""
-from guru import cli, session, ui
+from guru import cli, config, session, ui
 
 
 class TestHumanCtx:
@@ -54,3 +54,186 @@ class TestFormatBytes:
 
     def test_megabytes(self) -> None:
         assert ui.format_bytes(5_000_000) == '4.8 MB'
+
+
+class TestStatusCost:
+    """The status bar shows the run cost after the token counters."""
+
+    def _base(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'num_ctx', 1000)
+        monkeypatch.setattr(session, 'ctx_used', 100)
+        monkeypatch.setattr(session, 'model', 'demo:latest')
+        monkeypatch.setattr(session, 'session_in', 12)
+        monkeypatch.setattr(session, 'session_out', 34)
+        monkeypatch.setattr(session, 'git_branch', 'main')
+
+    def test_no_cost_fragment_when_nothing_spent(self, monkeypatch) -> None:
+        self._base(monkeypatch)
+        monkeypatch.setattr(session, 'cost_usd', 0.0)
+        monkeypatch.setattr(session, 'cost_known', True)
+        right = ui._status_parts()[2]
+        assert '$' not in right
+
+    def test_cost_with_four_decimals_after_tokens(self, monkeypatch) -> None:
+        self._base(monkeypatch)
+        monkeypatch.setattr(session, 'cost_usd', 0.01234)
+        monkeypatch.setattr(session, 'cost_known', True)
+        right = ui._status_parts()[2]
+        assert ' | ↑ 34 | $0.0123 | 📁' in right
+
+    def test_unknown_cost_shows_question_mark(self, monkeypatch) -> None:
+        self._base(monkeypatch)
+        monkeypatch.setattr(session, 'cost_usd', 0.0)
+        monkeypatch.setattr(session, 'cost_known', False)
+        right = ui._status_parts()[2]
+        assert ' | ↑ 34 | $? | 📁' in right
+
+    def test_partial_cost_shows_spend_plus_marker(self, monkeypatch) -> None:
+        self._base(monkeypatch)
+        monkeypatch.setattr(session, 'cost_usd', 0.5)
+        monkeypatch.setattr(session, 'cost_known', False)
+        right = ui._status_parts()[2]
+        assert ' | ↑ 34 | $0.5000+? | 📁' in right
+
+
+class _RowsRepo:
+    """LedgerRepository with ``rows(stream, run_id=None)`` like JsonlLedger."""
+
+    def __init__(self, seed=None) -> None:
+        self.rows_by_stream: dict = dict(seed or {})
+
+    def append(self, stream: str, row: dict) -> None:
+        self.rows_by_stream.setdefault(stream, []).append(row)
+
+    def rows(self, stream: str, run_id=None) -> list:
+        out = list(self.rows_by_stream.get(stream, []))
+        if run_id is not None:
+            out = [r for r in out if r.get('run_id') == run_id]
+        return out
+
+
+class _AppendOnlyRepo:
+    """Minimal LedgerRepository. ``rows`` is a list attribute on purpose
+    (like conftest.FakeRepo): the cli must treat a non-callable ``rows`` as
+    "cannot read back", not crash on it."""
+
+    def __init__(self) -> None:
+        self.rows: list = []
+
+    def append(self, stream: str, row: dict) -> None:
+        self.rows.append((stream, row))
+
+
+class TestLabelCommands:
+    """/good and /bad label the last completed turn and its tasks."""
+
+    def _install(self, monkeypatch, repo: object) -> None:
+        from guru.domain import ledger
+        ledger.set_repository(repo)
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+        monkeypatch.setattr(session, 'turn_id', 'turn1')
+
+    def test_labels_turn_and_its_tasks(self, monkeypatch) -> None:
+        from guru.domain import ledger
+        repo = _RowsRepo({'tasks': [
+            {'run_id': ledger.RUN_ID, 'task_id': 'tA', 'turn_id': 'turn1'},
+            {'run_id': ledger.RUN_ID, 'task_id': 'tA', 'turn_id': 'turn1'},
+            {'run_id': ledger.RUN_ID, 'task_id': 'tB', 'turn_id': 'turn1'},
+            {'run_id': ledger.RUN_ID, 'task_id': 'tZ', 'turn_id': 'other'},
+            {'run_id': 'old-run', 'task_id': 'tO', 'turn_id': 'turn1'},
+        ]})
+        self._install(monkeypatch, repo)
+        try:
+            cli._label_command('good', 'clean answer')
+            ledger.flush()
+        finally:
+            ledger.set_repository(None)
+        labels = repo.rows('labels')
+        assert [(r['target_id'], r['label'], r['labeller'], r['note'])
+                for r in labels] == [
+            ('turn1', 'good', 'user', 'clean answer'),
+            ('tA', 'good', 'user', 'clean answer'),
+            ('tB', 'good', 'user', 'clean answer')]
+
+    def test_bad_without_rows_support_labels_only_the_turn(
+            self, monkeypatch, capsys) -> None:
+        from guru.domain import ledger
+        repo = _AppendOnlyRepo()
+        self._install(monkeypatch, repo)
+        try:
+            cli._label_command('bad')
+            ledger.flush()
+        finally:
+            ledger.set_repository(None)
+        assert [(s, r['target_id'], r['label'], r['note'])
+                for s, r in repo.rows] == [('labels', 'turn1', 'bad', '')]
+        assert 'turn1' in capsys.readouterr().out
+
+    def test_no_turn_yet(self, monkeypatch, capsys) -> None:
+        from guru.domain import ledger
+        repo = _AppendOnlyRepo()
+        self._install(monkeypatch, repo)
+        monkeypatch.setattr(session, 'turn_id', '')
+        try:
+            cli._label_command('good')
+            ledger.flush()
+        finally:
+            ledger.set_repository(None)
+        assert repo.rows == []
+        assert 'No completed turn' in capsys.readouterr().out
+
+    def test_no_repository(self, monkeypatch, capsys) -> None:
+        from guru.domain import ledger
+        ledger.set_repository(None)
+        monkeypatch.setattr(session, 'turn_id', 'turn1')
+        cli._label_command('good')
+        assert 'ledger' in capsys.readouterr().out.lower()
+
+
+class TestLedgerCommand:
+    """/ledger prints the current run's summary."""
+
+    def test_prints_models_tasks_and_top(self, monkeypatch, capsys) -> None:
+        from guru.domain import ledger
+        rid = ledger.RUN_ID
+        repo = _RowsRepo({
+            'calls': [
+                {'run_id': rid, 'adapter': 'Ollama', 'model': 'qwen3:8b',
+                 'tokens_in': 100, 'tokens_out': 20, 'cost_usd': 0.0},
+                {'run_id': rid, 'adapter': 'Anthropic', 'model': 'opus',
+                 'tokens_in': 10, 'tokens_out': 2, 'cost_usd': 0.25},
+                {'run_id': 'old', 'adapter': 'X', 'model': 'ghost',
+                 'tokens_in': 1, 'tokens_out': 1, 'cost_usd': 5.0}],
+            'tasks': [
+                {'run_id': rid, 'task_id': 't1', 'status': 'done',
+                 'adapter': 'Ollama', 'model': 'qwen3:8b', 'cost_usd': 0.0,
+                 'seconds': 3.5, 'task': 'review upload.py for bugs',
+                 'role': 'security-engineer', 'kind': 'review'}]})
+        ledger.set_repository(repo)
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+        try:
+            cli._ledger_command()
+        finally:
+            ledger.set_repository(None)
+        out = capsys.readouterr().out
+        assert 'qwen3:8b' in out and 'opus' in out and 'ghost' not in out
+        assert '0.2500' in out and 'security-engineer' in out
+        assert rid in out
+
+    def test_without_repository(self, capsys) -> None:
+        from guru.domain import ledger
+        ledger.set_repository(None)
+        cli._ledger_command()
+        assert 'ledger' in capsys.readouterr().out.lower()
+
+    def test_format_handles_unknown_cost(self) -> None:
+        summary = {'run_id': 'r', 'models': {'A|m': {
+            'adapter': 'A', 'model': 'm', 'calls': 1, 'tokens_in': 1,
+            'tokens_out': 1, 'cache_read': 0, 'cache_write': 0,
+            'cost_usd': None}}, 'tasks': {},
+            'top_tasks': [], 'totals': {'calls': 1, 'tokens_in': 1,
+                                        'tokens_out': 1, 'cache_read': 0,
+                                        'cache_write': 0, 'cost_usd': None,
+                                        'tasks': 0}}
+        text = cli._format_run_summary(summary)
+        assert '$?' in text and 'A|m' in text

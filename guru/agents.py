@@ -42,6 +42,11 @@ class Agent:
     # results back to the parent's mailbox when the turn finishes.
     parent: object = None
     task: str = ""
+    # Ledger bookkeeping for a spawned sub-agent: its running TaskRecord
+    # (guru.domain.ledger.TaskRecord; Any keeps this module import-free) and
+    # the monotonic time its turn was launched.
+    task_rec: Any = None
+    started: float = 0.0
 
     def append(self, text: str) -> None:
         """Append a line (or block) to the scrollback buffer."""

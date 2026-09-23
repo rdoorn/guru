@@ -107,7 +107,8 @@ class TestBenchMetrics:
         a.state.messages = [
             {'role': 'user', 'content': 'q'},
             SimpleNamespace(role='assistant', content='thinking', tool_calls=[
-                SimpleNamespace(function=SimpleNamespace(name='read_file'))]),
+                SimpleNamespace(function=SimpleNamespace(
+                    name='read_file', arguments={'path': 'a.py'}))]),
             {'role': 'tool', 'tool_name': 'read_file', 'content': 'data'},
             {'role': 'assistant', 'content': 'ANSWER'},
         ]
@@ -115,9 +116,26 @@ class TestBenchMetrics:
         assert out[0]['title'] == 'main' and out[0]['model'] == 'm'
         msgs = out[0]['messages']
         assert msgs[0] == {'role': 'user', 'content': 'q'}
-        assert msgs[1]['tool_calls'] == ['read_file']
+        assert msgs[1]['tool_calls'] == [
+            {'name': 'read_file', 'args': {'path': 'a.py'}}]
         assert msgs[2]['tool_name'] == 'read_file'
         assert msgs[3]['content'] == 'ANSWER'
+
+    def test_serialize_transcript_truncates_long_args(self) -> None:
+        from guru.agents import Agent
+        a = Agent(id='main', title='main')
+        a.state.model = 'm'
+        a.state.messages = [{
+            'role': 'assistant', 'content': '', 'tool_calls': [{'function': {
+                'name': 'write_file',
+                'arguments': {'path': 'a.py', 'content': 'z' * 900}}}]}]
+        rec = bench.serialize_transcript([a])[0]['messages'][0]
+        call = rec['tool_calls'][0]
+        assert call['name'] == 'write_file'
+        assert call['args']['path'] == 'a.py'
+        assert len(call['args']['content']) == 500
+        assert 'content' in call['note']
+        json.dumps(rec)                     # JSON-safe as written
 
 
 class TestBenchOrchestrator:
@@ -202,7 +220,12 @@ class TestBenchRunner:
         # make asyncio.run a passthrough (run_once is a plain function here)
         monkeypatch.setattr(bench.asyncio, 'run', lambda coro: coro)
 
+        from guru import config, skills
+        monkeypatch.setattr(config, 'GURU_SKILLS_DIR', tmp_path / 'skills')
+        monkeypatch.setattr(skills, 'REGISTRY', {})
         path = bench.run_benchmark([(None, 'm1')], out_dir=tmp_path)
+        # the skill/role catalog is loaded so spawn(role=, skill=) works
+        assert skills.get('code-review') is not None
         data = json.loads(path.read_text(encoding='utf-8'))
         assert len(data) == 1
         assert data[0]['model'] == 'm1' and data[0]['result'] == 'A'

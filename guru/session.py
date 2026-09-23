@@ -21,6 +21,13 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:                     # avoid an import cycle at runtime
     from guru.adapters.base import Adapter
 
+# Struggle counters kept per session (guru.domain.ledger.bump increments
+# them); a TaskRecord/TurnRecord carries them so the ledger can tell a
+# smooth task from one that limped to its answer.
+STRUGGLE_KEYS: tuple[str, ...] = (
+    'stall_nudges', 'delegation_nudges', 'compactions', 'tool_errors',
+    'sha_mismatches', 'provider_errors', 'refusals', 'redactions')
+
 
 class SessionState:
     """All mutable runtime state for one conversation/agent."""
@@ -57,6 +64,27 @@ class SessionState:
         # Whether this agent may delegate via the spawn tool (main + user-made
         # agents may; tool-spawned sub-agents may not, to avoid recursion).
         self.can_spawn: bool = False
+        # Controller mode (guru.domain.routing / [routing] controller): the
+        # agent converses, decomposes with spawn and synthesises, and gets
+        # only spawn/check/join/use_skill as tools.
+        self.controller: bool = False
+        # Ledger join keys (guru.domain.ledger): which agent this state
+        # belongs to, the sub-agent task it is executing (empty for the main
+        # agent) and the current user turn.
+        self.agent_id: str = 'main'
+        self.task_id: str = ''
+        self.turn_id: str = ''
+        # Ledger accumulators (guru.domain.ledger.record_call / bump): calls
+        # made, USD spent (cost_known drops to False once any call could not
+        # be priced; unpriced_calls counts them so a turn can tell whether
+        # *its* cost is exact), struggle counters and the last provider
+        # error text.
+        self.call_count: int = 0
+        self.cost_usd: float = 0.0
+        self.cost_known: bool = True
+        self.unpriced_calls: int = 0
+        self.struggle: dict[str, int] = {k: 0 for k in STRUGGLE_KEYS}
+        self.last_error: str = ''
 
 
 _default = SessionState()
@@ -83,6 +111,7 @@ class _SessionProxy(types.ModuleType):
     """Module stand-in whose attributes route to the current SessionState."""
 
     SessionState = SessionState
+    STRUGGLE_KEYS = STRUGGLE_KEYS
     current = staticmethod(current)
     use = staticmethod(use)
     reset = staticmethod(reset)

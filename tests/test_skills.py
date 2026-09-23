@@ -66,6 +66,35 @@ class TestSkillsRegistry:
         assert 'architect' in skills.REGISTRY
         skills.REGISTRY.clear()          # leave global clean for other tests
 
+    def test_ensure_loaded_seeds_only_a_missing_dir(self, tmp_path,
+                                                    monkeypatch) -> None:
+        d = tmp_path / 'skills'
+        monkeypatch.setattr(config, 'GURU_SKILLS_DIR', d)
+        monkeypatch.setattr(skills, 'REGISTRY', {})
+        skills.ensure_loaded()
+        assert skills.get('code-review') is not None
+        assert (d / 'code-review.md').is_file()      # seeded: dir was missing
+        # an existing directory is only read, never written to
+        d2 = tmp_path / 'user-skills'
+        d2.mkdir()
+        (d2 / 'mine.md').write_text(
+            '---\nname: mine\nkind: skill\ndescription: d\n---\nbody\n')
+        monkeypatch.setattr(config, 'GURU_SKILLS_DIR', d2)
+        monkeypatch.setattr(skills, 'REGISTRY', {})
+        skills.ensure_loaded()
+        assert [p.name for p in d2.iterdir()] == ['mine.md']
+        assert skills.get('mine') is not None
+        assert skills.get('code-review') is None
+
+    def test_ensure_loaded_is_a_noop_when_loaded(self, tmp_path,
+                                                 monkeypatch) -> None:
+        monkeypatch.setattr(config, 'GURU_SKILLS_DIR', tmp_path / 'skills')
+        monkeypatch.setattr(skills, 'REGISTRY', {
+            'x': skills.SkillEntry('x', 'skill', 'd', '', 'b')})
+        skills.ensure_loaded()
+        assert list(skills.REGISTRY) == ['x']
+        assert not (tmp_path / 'skills').exists()
+
 
 class TestSkillTools:
     def _reg(self):
@@ -92,24 +121,29 @@ class TestSkillTools:
     def test_spawn_passes_role_and_skill(self, monkeypatch) -> None:
         seen = {}
 
-        def handler(task, role, skill):
-            seen.update(task=task, role=role, skill=skill)
+        def handler(task, role, skill, kind, complexity):
+            seen.update(task=task, role=role, skill=skill, kind=kind,
+                        complexity=complexity)
             return "ok"
         tools.set_spawn_handler(handler)
         try:
-            tools.spawn('do it', role='developer', skill='code-review')
+            tools.spawn('do it', role='developer', skill='code-review',
+                        kind='review', complexity='hard')
             assert seen == {'task': 'do it', 'role': 'developer',
-                            'skill': 'code-review'}
+                            'skill': 'code-review', 'kind': 'review',
+                            'complexity': 'hard'}
         finally:
             tools.set_spawn_handler(None)
 
     def test_spawn_defaults_role_skill_empty(self, monkeypatch) -> None:
         seen = {}
         tools.set_spawn_handler(
-            lambda task, role, skill: seen.update(
-                role=role, skill=skill) or "ok")
+            lambda task, role, skill, kind, complexity: seen.update(
+                role=role, skill=skill, kind=kind,
+                complexity=complexity) or "ok")
         try:
             tools.spawn('t')
-            assert seen == {'role': '', 'skill': ''}
+            assert seen == {'role': '', 'skill': '', 'kind': 'other',
+                            'complexity': 'standard'}
         finally:
             tools.set_spawn_handler(None)

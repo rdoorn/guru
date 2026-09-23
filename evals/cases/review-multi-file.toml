@@ -1,0 +1,16 @@
+name = "review-multi-file"
+fixture = "flaskish"
+prompt = "Review this repository for correctness and security issues."
+tags = ["delegation", "review"]
+
+[expect.behaviour]
+tools_used_none = ["write_file", "edit_file", "delete_file"]
+spawned_min = 2
+roles_include = ["security-engineer"]
+
+[expect.content]
+answer_contains = ["traversal"]
+files_changed = []
+
+[expect.rubric]
+text = "Names both planted bugs with file and function: the unnormalised os.path.join in app/upload.py::save_upload (path traversal) and the swapped comparison in app/session.py::is_expired."

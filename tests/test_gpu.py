@@ -1,8 +1,23 @@
 """Tests for the Ollama GPU auto-fit context sizing."""
 from types import SimpleNamespace
 
-from guru import config
+import pytest
+
+from guru import config, session
 from guru.adapters.ollama import OllamaAdapter
+
+
+@pytest.fixture(autouse=True)
+def _decisions_off(monkeypatch):
+    """The fit must not depend on the developer's own [decisions] table."""
+    monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
+    monkeypatch.setattr(config, 'DECISIONS_POINTS', {})
+
+
+def _fake_list(sizes: dict):
+    """An ``ollama.list`` stand-in over ``{model: size_bytes}``."""
+    return lambda: SimpleNamespace(models=[
+        SimpleNamespace(model=m, size=s) for m, s in sizes.items()])
 
 
 class TestGpuAutoFit:
@@ -154,3 +169,93 @@ class TestGpuAutoFit:
             'huihui_ai/qwen3-abliterated:8b',             # qwen3-abliterated
             'batiai/qwen3.6-27b:q3',                      # qwen3.6
         ]
+
+
+class TestSidecarReserve:
+    """Task 4.7: the judge sidecar's memory comes off the GPU budget."""
+
+    GIB = 1024 ** 3
+
+    def _shadow(self, monkeypatch, points=None, sidecar='qwen3:4b'):
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
+        monkeypatch.setattr(config, 'DECISIONS_POINTS',
+                            points if points is not None else
+                            {'stall': 'ollama'})
+        monkeypatch.setattr(config, 'DECISIONS_SIDECAR_MODEL', sidecar)
+        monkeypatch.setattr(
+            'guru.adapters.ollama.ollama.list',
+            _fake_list({'qwen3:4b': 2 * self.GIB, 'other:1b': self.GIB,
+                        'm': 9 * self.GIB}))
+
+    def test_no_reserve_when_decisions_off(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            'guru.adapters.ollama.ollama.list',
+            _fake_list({'qwen3:4b': 2 * self.GIB}))
+        monkeypatch.setattr(config, 'DECISIONS_POINTS', {'stall': 'ollama'})
+        assert OllamaAdapter()._sidecar_reserve('m') == 0
+
+    def test_no_reserve_without_an_ollama_point(self, monkeypatch) -> None:
+        self._shadow(monkeypatch, points={'panel': 'encoder',
+                                          'injection': 'injection'})
+        assert OllamaAdapter()._sidecar_reserve('m') == 0
+
+    def test_reserve_is_size_times_factor(self, monkeypatch) -> None:
+        self._shadow(monkeypatch)
+        assert OllamaAdapter()._sidecar_reserve('m') == int(2.4 * self.GIB)
+
+    def test_point_spec_names_its_own_model(self, monkeypatch) -> None:
+        self._shadow(monkeypatch, points={'stall': 'ollama:other:1b'})
+        assert OllamaAdapter()._sidecar_reserve('m') == int(1.2 * self.GIB)
+
+    def test_sidecar_equal_to_main_model_is_free(self, monkeypatch) -> None:
+        self._shadow(monkeypatch, sidecar='m')
+        assert OllamaAdapter()._sidecar_reserve('m') == 0
+
+    def test_unknown_sidecar_size_reserves_nothing(self, monkeypatch):
+        self._shadow(monkeypatch, sidecar='missing:7b')
+        assert OllamaAdapter()._sidecar_reserve('m') == 0
+
+    def test_max_gpu_ctx_subtracts_the_sidecar(self, monkeypatch) -> None:
+        self._shadow(monkeypatch)
+        a = OllamaAdapter()
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 24 * self.GIB)
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 163840)
+        # budget 19.2G - 2.4G sidecar - 9G weights - 0.5G overhead = 7.3G
+        # -> 47826 tokens -> 47104 after rounding (was 63488 unreserved)
+        assert a._max_gpu_ctx('m', 262144) == 47104
+
+    def test_calibrated_ctx_spill_subtracts_the_sidecar(self, monkeypatch):
+        self._shadow(monkeypatch)
+        a = OllamaAdapter()
+        measured = {2048: (15335544320, 15335544320),
+                    32768: (20368709120, 18000000000)}
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 163840)
+        # (18e9*0.95 - 15e9 - 2.4GiB)/163840 -> 12288 - 15727 -> floor 2048
+        assert a._calibrated_ctx('m', 262144) == 2048
+
+    def test_extend_fit_probe_spill_subtracts_the_sidecar(self, monkeypatch):
+        self._shadow(monkeypatch)
+        a = OllamaAdapter()
+        monkeypatch.setattr(session, 'model', 'm')
+        measured = {2048: (5_000_000_000, 5_000_000_000),
+                    32768: (8_072_000_000, 8_072_000_000),
+                    131072: (30_000_000_000, 18_000_000_000)}
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 10 ** 12)
+        # (18e9*0.95 - 4_795_200_000 - 2.4GiB)/100000 = 97278 -> 96256
+        assert a._calibrated_ctx('m', 131072) == 96256
+
+    def test_extend_fit_probe_fits_leaves_room(self, monkeypatch) -> None:
+        self._shadow(monkeypatch)
+        a = OllamaAdapter()
+        monkeypatch.setattr(session, 'model', 'm')
+        measured = {2048: (5_000_000_000, 5_000_000_000),
+                    32768: (8_072_000_000, 8_072_000_000),
+                    131072: (13_000_000_000, 13_000_000_000)}
+        monkeypatch.setattr(a, '_measure_at', lambda ctx: measured[int(ctx)])
+        monkeypatch.setattr(a, '_kv_bytes_per_token', lambda m: 100000)
+        monkeypatch.setattr(a, '_total_gpu_bytes', lambda: 10 ** 12)
+        # 131072 - 2.4GiB/100000 = 131072 - 25769 = 105303 -> 104448
+        assert a._calibrated_ctx('m', 131072) == 104448

@@ -459,3 +459,355 @@ class TestRunTurnIntegration:
                   if conversation.msg_role(m) == 'assistant'
                   and 'one file' in conversation.msg_content(m)]
         assert finals            # a real final answer was rendered
+
+
+class TestCallRecords:
+    """Every provider call emits exactly one ledger CallRecord."""
+
+    def _arm(self, monkeypatch, fake_repo):
+        from guru.adapters import turn
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'num_ctx', 4096)
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'session_in', 0)
+        monkeypatch.setattr(session, 'session_out', 0)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'q'}])
+        return fake_repo
+
+    def _calls(self, repo):
+        from guru.domain import ledger
+        ledger.flush()
+        return repo.stream('calls')
+
+    # --- anthropic -----------------------------------------------------------
+
+    def _anthropic(self, monkeypatch, resp):
+        a = anth.AnthropicAdapter(thinking=False)
+        client = SimpleNamespace(
+            messages=SimpleNamespace(create=lambda **kw: resp))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        return a
+
+    def _anthropic_resp(self, text='hi', **usage):
+        return SimpleNamespace(
+            usage=SimpleNamespace(**usage), stop_reason='end_turn',
+            content=[SimpleNamespace(type='text', text=text)])
+
+    def test_anthropic_step_records_cache_tokens(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = self._anthropic(monkeypatch, self._anthropic_resp(
+            input_tokens=100, output_tokens=20, cache_read_input_tokens=30,
+            cache_creation_input_tokens=10))
+        a.run_turn()
+        [row] = self._calls(repo)
+        assert row['adapter'] == 'Anthropic' and row['tokens_in'] == 100
+        assert row['tokens_out'] == 20 and row['phase'] == 'step'
+        assert row['cache_read'] == 30 and row['cache_write'] == 10
+        assert row['cost_source'] in ('table', 'unknown')
+        assert row['seconds'] >= 0 and row['cost_source'] != 'local'
+        assert row['model'] == 'm'
+
+    def test_anthropic_summarise_records_phase(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = self._anthropic(monkeypatch, self._anthropic_resp(
+            text='sum', input_tokens=8, output_tokens=2))
+        assert a.summarise('long transcript') == 'sum'
+        [row] = self._calls(repo)
+        assert row['phase'] == 'summarise' and row['tokens_in'] == 8
+
+    # --- ollama --------------------------------------------------------------
+
+    def _ollama_chunk(self, content='', pin=0, ein=0, **durations):
+        return SimpleNamespace(
+            message=SimpleNamespace(content=content, tool_calls=None),
+            prompt_eval_count=pin, eval_count=ein, **durations)
+
+    def test_ollama_step_is_local_and_has_timing(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = OllamaAdapter()
+        monkeypatch.setattr(a, '_supports_thinking', lambda m: False)
+        monkeypatch.setattr(session, 'active_tools', [])
+
+        def fake(*args, **kw):
+            yield self._ollama_chunk('Hel')
+            yield self._ollama_chunk('lo', pin=50, ein=10, load_duration=1e9,
+                                     prompt_eval_duration=2e8,
+                                     eval_duration=5e8)
+        monkeypatch.setattr('guru.adapters.ollama.ollama.chat', fake)
+        msg = a._collect_response()
+        assert msg.content == 'Hello'
+        [row] = self._calls(repo)
+        assert row['adapter'] == 'Ollama' and row['phase'] == 'step'
+        assert row['tokens_in'] == 50 and row['tokens_out'] == 10
+        assert row['cost_usd'] == 0.0 and row['cost_source'] == 'local'
+        assert row['load_s'] == 1.0 and row['prefill_s'] == 0.2
+        assert row['generate_s'] == 0.5
+
+    def test_ollama_cancelled_stream_records_nothing(
+            self, monkeypatch, fake_repo):
+        repo = self._arm(monkeypatch, fake_repo)
+        a = OllamaAdapter()
+        monkeypatch.setattr(a, '_supports_thinking', lambda m: False)
+        monkeypatch.setattr(session, 'active_tools', [])
+        monkeypatch.setattr(session, 'cancel_requested', True)
+
+        def fake(*args, **kw):
+            while True:
+                yield self._ollama_chunk('x')
+        monkeypatch.setattr('guru.adapters.ollama.ollama.chat', fake)
+        assert a._collect_response() is None
+        assert self._calls(repo) == []
+
+    def test_ollama_summarise_records_phase(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = OllamaAdapter()
+        resp = self._ollama_chunk('sum', pin=30, ein=4, load_duration=0,
+                                  prompt_eval_duration=1e8,
+                                  eval_duration=3e8)
+        monkeypatch.setattr('guru.adapters.ollama.ollama.chat',
+                            lambda *a, **k: resp)
+        assert a.summarise('long transcript') == 'sum'
+        [row] = self._calls(repo)
+        assert row['phase'] == 'summarise' and row['cost_source'] == 'local'
+        assert row['tokens_in'] == 30 and row['tokens_out'] == 4
+        assert row['load_s'] is None and row['prefill_s'] == 0.1
+        assert row['generate_s'] == 0.3
+
+    # --- litellm -------------------------------------------------------------
+
+    def _litellm(self, monkeypatch, resp):
+        a = lite.LiteLLMAdapter(base_url='http://proxy')
+        client = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **kw: resp)))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        return a
+
+    def _litellm_resp(self, text='hi', hidden=None, **usage):
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(**usage),
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=text, tool_calls=None),
+                finish_reason='stop')])
+        if hidden is not None:
+            resp._hidden_params = hidden
+        return resp
+
+    def test_litellm_step_prefers_cost_header(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = self._litellm(monkeypatch, self._litellm_resp(
+            prompt_tokens=10, completion_tokens=5,
+            hidden={'response_cost': 0.002}))
+        a.run_turn()
+        [row] = self._calls(repo)
+        assert row['adapter'] == 'LiteLLM' and row['phase'] == 'step'
+        assert row['tokens_in'] == 10 and row['tokens_out'] == 5
+        assert row['cost_usd'] == 0.002 and row['cost_source'] == 'header'
+
+    def test_litellm_step_without_cost_header_uses_table(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = self._litellm(monkeypatch, self._litellm_resp(
+            prompt_tokens=10, completion_tokens=5,
+            hidden={'response_cost': 'n/a'}))
+        a.run_turn()
+        [row] = self._calls(repo)
+        assert row['cost_source'] in ('table', 'unknown')
+
+    def test_litellm_summarise_records_phase(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = self._litellm(monkeypatch, self._litellm_resp(
+            text='sum', prompt_tokens=8, completion_tokens=2,
+            hidden={'response_cost': 0.001}))
+        assert a.summarise('long transcript') == 'sum'
+        [row] = self._calls(repo)
+        assert row['phase'] == 'summarise' and row['cost_usd'] == 0.001
+
+
+class TestStruggleCounters(TestCallRecords):
+    """Provider exceptions and refusals feed session.struggle/last_error."""
+
+    def _fresh(self, monkeypatch, fake_repo):
+        return self._arm(monkeypatch, fake_repo)   # counters: conftest
+
+    def _raising(self, exc):
+        def create(**kw):
+            raise exc
+        return create
+
+    def test_anthropic_step_error(self, monkeypatch, fake_repo) -> None:
+        repo = self._fresh(monkeypatch, fake_repo)
+        a = anth.AnthropicAdapter(thinking=False)
+        client = SimpleNamespace(messages=SimpleNamespace(
+            create=self._raising(RuntimeError('overloaded 529'))))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        a.run_turn()                                 # printed, not raised
+        assert session.struggle['provider_errors'] == 1
+        assert 'overloaded 529' in session.last_error
+        assert len(session.last_error) <= 200
+        assert self._calls(repo) == []
+
+    def test_anthropic_summarise_error(self, monkeypatch, fake_repo) -> None:
+        self._fresh(monkeypatch, fake_repo)
+        a = anth.AnthropicAdapter(thinking=False)
+        client = SimpleNamespace(messages=SimpleNamespace(
+            create=self._raising(RuntimeError('boom'))))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        assert a.summarise('t').startswith('(summary failed')
+        assert session.struggle['provider_errors'] == 1
+        assert 'boom' in session.last_error
+
+    def test_anthropic_refusal_counted(self, monkeypatch, fake_repo) -> None:
+        repo = self._fresh(monkeypatch, fake_repo)
+        resp = self._anthropic_resp(text='I cannot help with that.',
+                                    input_tokens=5, output_tokens=5)
+        resp.stop_reason = 'refusal'
+        a = self._anthropic(monkeypatch, resp)
+        a.run_turn()
+        assert session.struggle['refusals'] == 1
+        assert session.struggle['provider_errors'] == 0
+        assert len(self._calls(repo)) == 1
+
+    def test_anthropic_end_turn_not_a_refusal(
+            self, monkeypatch, fake_repo) -> None:
+        self._fresh(monkeypatch, fake_repo)
+        a = self._anthropic(monkeypatch, self._anthropic_resp(
+            input_tokens=5, output_tokens=5))
+        a.run_turn()
+        assert session.struggle['refusals'] == 0
+
+    def test_litellm_step_error(self, monkeypatch, fake_repo) -> None:
+        self._fresh(monkeypatch, fake_repo)
+        a = lite.LiteLLMAdapter(base_url='http://proxy')
+        client = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=self._raising(ConnectionError('refused')))))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        a.run_turn()
+        assert session.struggle['provider_errors'] == 1
+        assert 'refused' in session.last_error
+
+    def test_litellm_summarise_error(self, monkeypatch, fake_repo) -> None:
+        self._fresh(monkeypatch, fake_repo)
+        a = lite.LiteLLMAdapter(base_url='http://proxy')
+        client = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=self._raising(ConnectionError('refused')))))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        assert a.summarise('t').startswith('(summary failed')
+        assert session.struggle['provider_errors'] == 1
+
+    def test_ollama_summarise_error(self, monkeypatch, fake_repo) -> None:
+        self._fresh(monkeypatch, fake_repo)
+        a = OllamaAdapter()
+
+        def boom(**kw):
+            raise ConnectionError('ollama down')
+        monkeypatch.setattr('guru.adapters.ollama.ollama.chat', boom)
+        assert a.summarise('t') == ''
+        assert session.struggle['provider_errors'] == 1
+        assert 'ollama down' in session.last_error
+
+    def test_ollama_step_error(self, monkeypatch, fake_repo) -> None:
+        self._fresh(monkeypatch, fake_repo)
+        a = OllamaAdapter()
+        monkeypatch.setattr(a, '_fit_after_load', lambda: None)
+
+        def boom():
+            raise ConnectionError('ollama down')
+        monkeypatch.setattr(a, '_collect_response', boom)
+        a.run_turn()                                 # printed, not raised
+        assert session.struggle['provider_errors'] == 1
+        assert 'ollama down' in session.last_error
+        assert session.cancel_requested is False
+
+
+class TestControllerExecuted:
+    """controller_executed on the TurnRecord (Task 4.5)."""
+
+    def _run(self, monkeypatch, fake_repo, seq, controller=True):
+        from guru.adapters import turn
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'messages', [])
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'task_id', '')
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', controller)
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 0)
+        it = iter(seq)
+        turn.run_loop(step=lambda: next(it), run_tools=lambda p: None,
+                      add_user=lambda t: None)
+        from guru.domain import ledger
+        ledger.flush()
+        rows = fake_repo.stream('turns')
+        assert len(rows) == 1
+        return rows[0]
+
+    def test_foreign_tool_call_flips_flag(self, monkeypatch, fake_repo):
+        row = self._run(monkeypatch, fake_repo, [
+            ("", [("read_file", {"path": "x"}, "r1")]), ("short.", [])])
+        assert row['controller_executed'] is True
+
+    def test_long_answer_without_spawn_flips_flag(self, monkeypatch,
+                                                  fake_repo):
+        row = self._run(monkeypatch, fake_repo, [("x" * 601, [])])
+        assert row['controller_executed'] is True
+
+    def test_long_answer_after_spawn_is_fine(self, monkeypatch, fake_repo):
+        row = self._run(monkeypatch, fake_repo, [
+            ("", [("spawn", {"task": "t"}, "r1")]),
+            ("", [("join", {"targets": "agent1"}, "r2")]),
+            ("x" * 601, [])])
+        assert row['controller_executed'] is False
+        assert row['tasks_spawned'] == 1
+
+    def test_short_conversational_answer_is_fine(self, monkeypatch,
+                                                 fake_repo):
+        row = self._run(monkeypatch, fake_repo, [("Hello there.", [])])
+        assert row['controller_executed'] is False
+
+    def test_mailbox_delivery_turn_never_flips(self, monkeypatch, fake_repo):
+        from guru.adapters import turn
+        for prefix in ('[joined results]\n- agent1: ...',
+                       '[result from agent1 · task: t]\nA1'):
+            monkeypatch.setattr(session, 'messages', [])
+            row = None
+
+            def step(it=iter([("x" * 601, [])])):
+                return next(it)
+            monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+            monkeypatch.setattr(ui, 'status_draw', lambda: None)
+            monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+            monkeypatch.setattr(session, 'task_id', '')
+            monkeypatch.setattr(session, 'can_spawn', True)
+            monkeypatch.setattr(session, 'controller', True)
+            monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 0)
+            session.messages.append({'role': 'user', 'content': prefix})
+            turn.run_loop(step=step, run_tools=lambda p: None,
+                          add_user=lambda t: None)
+            from guru.domain import ledger
+            ledger.flush()
+            row = fake_repo.stream('turns')[-1]
+            assert row['controller_executed'] is False, prefix
+
+    def test_turn_start_clears_last_error(self, monkeypatch, fake_repo):
+        monkeypatch.setattr(session, 'last_error', 'old failure')
+        self._run(monkeypatch, fake_repo, [("ok.", [])])
+        assert session.last_error == ''
+
+    def test_non_controller_never_flips(self, monkeypatch, fake_repo):
+        row = self._run(monkeypatch, fake_repo, [
+            ("", [("read_file", {"path": "x"}, "r1")]), ("x" * 601, [])],
+            controller=False)
+        assert row['controller_executed'] is False

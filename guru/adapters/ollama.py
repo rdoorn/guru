@@ -6,13 +6,14 @@ daemon-reachable check with an on-demand model pull (moved from start.sh).
 """
 import platform
 import subprocess
+import time
 
 import ollama
 
 from guru import config, log, session, ui
 from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
-from guru.domain import tools
+from guru.domain import ledger, pricing, tools
 
 # Re-exported for callers/tests that reference it here; the shared turn loop
 # owns the act-nudge heuristic now (see guru.adapters.turn).
@@ -21,10 +22,15 @@ _looks_like_preamble = turn.looks_like_preamble
 
 # Smallest context to fall back to before giving up on fitting into memory.
 _CTX_FLOOR = 2048
+# Sidecar reservation: judge model weights x this factor (KV cache and
+# compute buffers for a small model at a short context).
+_SIDECAR_FACTOR = 1.2
 
 
 class OllamaAdapter(Adapter):
     """Local models served by the Ollama daemon."""
+
+    remote = False
 
     def __init__(self, name: str = "Ollama",
                  url: str = "http://localhost:11434") -> None:
@@ -235,26 +241,32 @@ class OllamaAdapter(Adapter):
             vram_lo if (vram_lo and vram_lo < size_lo) else 0)
         if spill:
             # A spill measured the real GPU budget directly.
-            avail = spill * config.GPU_FIT_SAFETY - weights
+            avail = (spill * config.GPU_FIT_SAFETY - weights
+                     - self._sidecar_reserve(model))
             ctx = int(avail // kv) if avail > 0 else _CTX_FLOOR
         else:
             # Both moderate probes fit — the platform estimate under-reads the
             # real budget on unified memory, so probe near the ceiling to find
             # the true maximum by measurement rather than trusting the guess.
-            ctx = self._extend_fit(ceiling, hi, weights, kv)
+            ctx = self._extend_fit(model, ceiling, hi, weights, kv)
         ctx = (ctx // 1024) * 1024
         ctx = max(_CTX_FLOOR, ctx)
         if ceiling:
             ctx = min(ctx, ceiling)
         return ctx
 
-    def _extend_fit(self, ceiling: int, hi: int, weights: float,
+    def _extend_fit(self, model: str, ceiling: int, hi: int, weights: float,
                     kv: float) -> int:
         """Both moderate probes fit: find the true max by probing near the
         ceiling. The probe is bounded (~1.5x the platform estimate) so it can
         never request a runaway KV buffer. If the probe fits, use it; if it
         spills, the measured budget gives the exact max. Falls back to the
-        fitting probe ``hi`` when no budget can be determined."""
+        fitting probe ``hi`` when no budget can be determined. The judge
+        sidecar's reservation (``_sidecar_reserve``) comes off every
+        answer, ``hi`` included."""
+        reserve = self._sidecar_reserve(model)
+        if reserve and kv:
+            hi = max(_CTX_FLOOR, int(hi - reserve // kv))
         total = self._total_gpu_bytes()
         if total <= 0:
             return hi
@@ -268,8 +280,11 @@ class OllamaAdapter(Adapter):
         if size_p <= 0:
             return hi
         if not (vram_p and vram_p < size_p):
-            return probe                         # the probe fits the GPU
-        avail = vram_p * config.GPU_FIT_SAFETY - weights
+            # The probe fits the GPU; leave room for the sidecar if any.
+            if reserve and kv:
+                return max(hi, int(probe - reserve // kv))
+            return probe
+        avail = vram_p * config.GPU_FIT_SAFETY - weights - reserve
         return max(hi, int(avail // kv)) if avail > 0 else hi
 
     def _report_kv_type(self, model: str, measured_kv: float) -> None:
@@ -361,6 +376,38 @@ class OllamaAdapter(Adapter):
             pass
         return 0
 
+    def _sidecar_model(self) -> str:
+        """The Ollama judge (sidecar) model the decision seam will load
+        alongside the main model, or ``''`` when no ``ollama`` judge point is
+        configured or decisions are off."""
+        if config.DECISIONS_MODE == 'off':
+            return ''
+        for spec in config.DECISIONS_POINTS.values():
+            spec = str(spec).strip()
+            if spec == 'ollama':
+                return config.DECISIONS_SIDECAR_MODEL
+            if spec.startswith('ollama:'):
+                return spec.split(':', 1)[1] or config.DECISIONS_SIDECAR_MODEL
+        return ''
+
+    def _sidecar_reserve(self, model: str) -> int:
+        """GPU bytes to keep free for the judge sidecar: its weight size x
+        1.2 (KV + overhead), when a sidecar other than ``model`` itself is
+        configured (design §4: the fit must account for the sidecar).
+        Logged once per fit; 0 when there is none or its size is unknown."""
+        sidecar = self._sidecar_model()
+        if not sidecar or sidecar == model:
+            return 0
+        size = self._weight_bytes(sidecar)
+        if size <= 0:
+            log.warning('GPU fit: sidecar %s size unknown; not reserved',
+                        sidecar)
+            return 0
+        reserve = int(size * _SIDECAR_FACTOR)
+        log.info('GPU fit: reserving %.1f GB for the %s sidecar (%s mode)',
+                 reserve / 1024 ** 3, sidecar, config.DECISIONS_MODE)
+        return reserve
+
     def _max_gpu_ctx(self, model: str, ceiling: int) -> int:
         """Largest num_ctx whose weights + KV cache stay within the GPU budget
         (minus headroom). 0 when the budget or metadata is unavailable, so the
@@ -370,6 +417,7 @@ class OllamaAdapter(Adapter):
         if total <= 0 or kv <= 0:
             return 0
         budget = total * (1 - config.GPU_MEM_HEADROOM)
+        budget -= self._sidecar_reserve(model)
         avail = budget - self._weight_bytes(model) - config.FIT_OVERHEAD_BYTES
         if avail <= 0:
             return 0            # weights barely fit — let the caller default
@@ -459,6 +507,27 @@ class OllamaAdapter(Adapter):
             f" {num_ctx:,} — too large for this machine's memory. Consider a"
             f" smaller model or quant.[/red]")
 
+    # --- ledger --------------------------------------------------------------
+
+    def _record_call(self, phase: str, seconds: float, prompt_ct: int,
+                     eval_ct: int, load_ns: int = 0, prompt_ns: int = 0,
+                     eval_ns: int = 0) -> None:
+        """Write one local CallRecord; durations are Ollama nanoseconds.
+
+        Never raises into the turn.
+        """
+        try:
+            ledger.record_call(
+                adapter=self.name, model=session.model,
+                usage=pricing.Usage(input_tokens=prompt_ct,
+                                    output_tokens=eval_ct),
+                seconds=seconds, phase=phase, local=True,
+                load_s=round(load_ns / 1e9, 3) if load_ns else None,
+                prefill_s=round(prompt_ns / 1e9, 3) if prompt_ns else None,
+                generate_s=round(eval_ns / 1e9, 3) if eval_ns else None)
+        except Exception:                                # noqa: BLE001
+            log.exc('ollama call record failed')
+
     # --- turn loop -----------------------------------------------------------
 
     def _collect_response(self):
@@ -469,8 +538,10 @@ class OllamaAdapter(Adapter):
         content: list = []
         tool_calls: list = []
         prompt_ct = eval_ct = 0
+        load_ns = prompt_ns = eval_ns = 0
         options = {'num_ctx': session.num_ctx}
         options.update(self._sampling_options(session.model))
+        t0 = time.perf_counter()
         stream = ollama.chat(
             model=session.model,
             messages=session.messages,
@@ -495,10 +566,16 @@ class OllamaAdapter(Adapter):
                     tool_calls.extend(m.tool_calls)
             prompt_ct = getattr(chunk, 'prompt_eval_count', 0) or prompt_ct
             eval_ct = getattr(chunk, 'eval_count', 0) or eval_ct
+            # Timing lands on the final chunk only.
+            load_ns = getattr(chunk, 'load_duration', 0) or load_ns
+            prompt_ns = getattr(chunk, 'prompt_eval_duration', 0) or prompt_ns
+            eval_ns = getattr(chunk, 'eval_duration', 0) or eval_ns
         session.session_in += prompt_ct
         session.session_out += eval_ct
         if prompt_ct:
             session.ctx_used = prompt_ct
+        self._record_call('step', time.perf_counter() - t0, prompt_ct,
+                          eval_ct, load_ns, prompt_ns, eval_ns)
         return ollama.Message(
             role='assistant',
             content=''.join(content),
@@ -510,10 +587,19 @@ class OllamaAdapter(Adapter):
                       add_user=self._add_user)
 
     def _step(self):
-        """One Ollama round: stream the reply, fit context to memory, append
-        the assistant message, and return (text, [(name, args, call), ...]).
-        None on a mid-stream cancel (the shared loop reports it)."""
-        msg = self._collect_response()
+        """One Ollama round.
+
+        Stream the reply, fit context to memory, append the assistant message
+        and return (text, [(name, args, call), ...]). None on a mid-stream
+        cancel (the shared loop reports it) or on a provider error (printed
+        here, like the other adapters).
+        """
+        try:
+            msg = self._collect_response()
+        except Exception as e:                           # noqa: BLE001
+            _note_error(e)
+            ui.console.print(f"[red]Ollama error: {e}[/red]")
+            return None
         if msg is None:                      # cancelled mid-generation
             return None
         # The model is now loaded — check for CPU spill and scale down.
@@ -543,6 +629,14 @@ class OllamaAdapter(Adapter):
     # --- summarisation -------------------------------------------------------
 
     def summarise(self, transcript: str) -> str:
+        try:
+            return self._summarise(transcript)
+        except Exception as e:                           # noqa: BLE001
+            _note_error(e)
+            return ''
+
+    def _summarise(self, transcript: str) -> str:
+        t0 = time.perf_counter()
         resp = ollama.chat(
             model=session.model,
             messages=[
@@ -560,4 +654,17 @@ class OllamaAdapter(Adapter):
             think=False,
             options={'num_ctx': session.num_ctx},
         )
+        self._record_call(
+            'summarise', time.perf_counter() - t0,
+            getattr(resp, 'prompt_eval_count', 0) or 0,
+            getattr(resp, 'eval_count', 0) or 0,
+            getattr(resp, 'load_duration', 0) or 0,
+            getattr(resp, 'prompt_eval_duration', 0) or 0,
+            getattr(resp, 'eval_duration', 0) or 0)
         return (resp.message.content or '').strip() or '(summary unavailable)'
+
+
+def _note_error(e: Exception) -> None:
+    """Count a provider failure on the bound session and keep its text."""
+    ledger.bump('provider_errors')
+    session.last_error = repr(e)[:200]

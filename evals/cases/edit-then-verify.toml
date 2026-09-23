@@ -1,0 +1,15 @@
+name = "edit-then-verify"
+fixture = "flaskish"
+prompt = "Fix is_expired and run the tests"
+mode = "auto"
+tags = ["edit"]
+
+[expect.behaviour]
+tools_used_any = ["edit_file", "write_file"]
+
+[expect.content]
+files_changed = ["app/session.py"]
+fixture_tests_pass = true
+
+[expect.rubric]
+text = "The comparison in app/session.py::is_expired becomes expires_at < now (or now >= expires_at); guru has no shell tool, so the answer must say the tests were not run by it rather than claim they passed."

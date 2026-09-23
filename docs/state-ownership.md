@@ -33,6 +33,23 @@ is injected through setters rather than hard-coded:
   delegation mailbox, supplied by `guru.orchestrator.Orchestrator`.
 - `tools.set_domain_asker` / `files.set_path_asker` — the permission prompts.
   The TUI installs an interactive asker; the benchmark installs an auto-deny.
+- `spend.set_spend_asker` — the once-per-run "allow remote model spend?"
+  question (`[routing] spend_confirm = "ask"`). The TUI installs an
+  interactive prompt; the benchmark and the eval runner install an auto-deny
+  (a run that never pays). `guru.domain.spend` remembers the answer for the
+  run.
+- `policy.set_scanner` — the content scanner (`guru.scanners.secrets`) that
+  finds secrets in task text (forces a local rung) and in tool results bound
+  for a remote adapter (redacted with a typed marker). Installed by the CLI
+  at startup when `[routing] secret_scan` is on; None disables scanning.
+- `decisions.set_judge` — the judge per decision point (shadow or active
+  mode), installed from settings by `guru.judges.install()` at startup.
+  Whether a point *acts* on its judge is process config
+  (`config.DECISIONS_ACTIVE`, category 3), not a property of the judge.
+- `ledger.set_repository` — the ledger persistence backend, a JSONL
+  repository in the CLI/TUI, a fake in tests. `guru.ledger_cli review`
+  installs the JSONL repository of the directory it labels for the duration
+  of the command and restores the previous one afterwards.
 
 These are the dependency-injection points, and they already exist where
 front-ends actually diverge.
@@ -46,7 +63,15 @@ Single-valued, process-wide configuration lives as module-level state in
 - `config.ALLOWED_READ_DIRS` / `ALLOWED_WRITE_DIRS` / `ALLOWED_DOMAINS`
   (per-project allow-lists),
 - `config.SAMPLING` / `SAMPLING_PER_MODEL`, `config.PREACTIVATE_TOOLS`,
-  `config.FLAT_TOOLS`, `config.BENCH_MODEL_TIMEOUT`, the GPU-fit constants.
+  `config.FLAT_TOOLS`, `config.BENCH_MODEL_TIMEOUT`, the GPU-fit constants,
+- `config.DECISIONS_MODE` / `DECISIONS_ACTIVE` / `DECISIONS_THRESHOLDS` /
+  `DECISIONS_TIMEOUT_MS` — the decision seam's mode, which points act on
+  their judge, the per-point `P(yes)` threshold and the active-mode wait
+  budget (`[decisions]` in settings.toml),
+- `config.SECRET_SCAN` — mirrors `[routing] secret_scan` for the tool layer,
+  and stays off (no scanner bound) when no `[routing]` table is configured
+  (the typed `RoutingSettings` itself travels with the `Orchestrator`, which
+  also holds the `AdapterRegistry` it resolves routes against).
 
 These are the same for every agent in the process. guru is a single-user,
 single-process CLI, so there is never more than one value of each. Making them

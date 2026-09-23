@@ -16,13 +16,14 @@ Config (adapters.toml):
 """
 import json
 import os
+import time
 
 import requests
 
 from guru import log, session, ui
 from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
-from guru.domain import tools
+from guru.domain import ledger, pricing, tools
 
 _MAX_TOKENS = 4096
 _DEFAULT_CONTEXT = 128000
@@ -186,6 +187,30 @@ class LiteLLMAdapter(Adapter):
             model_id, _DEFAULT_CONTEXT)
         session.ctx_ceiling = session.num_ctx
 
+    # --- ledger --------------------------------------------------------------
+
+    def _record_call(self, phase: str, resp, seconds: float) -> None:
+        """Write one CallRecord. A LiteLLM proxy's per-response cost, when it
+        exposes one, is on ``resp._hidden_params['response_cost']``; it wins
+        over the price table. Never raises into the turn."""
+        try:
+            usage = getattr(resp, 'usage', None)
+            hidden = getattr(resp, '_hidden_params', None)
+            header_cost = hidden.get('response_cost') \
+                if isinstance(hidden, dict) else None
+            ledger.record_call(
+                adapter=self.name, model=session.model,
+                usage=pricing.Usage(
+                    input_tokens=getattr(usage, 'prompt_tokens', 0) or 0,
+                    output_tokens=getattr(
+                        usage, 'completion_tokens', 0) or 0),
+                seconds=seconds, phase=phase,
+                cost_header=float(header_cost)
+                if isinstance(header_cost, (int, float))
+                and not isinstance(header_cost, bool) else None)
+        except Exception:                                # noqa: BLE001
+            log.exc('litellm call record failed')
+
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
@@ -196,6 +221,7 @@ class LiteLLMAdapter(Adapter):
         def step():
             """One chat-completions round; returns (text, [(name, args, id)])
             or None on error (printed) — the shared loop handles cancel."""
+            t0 = time.perf_counter()
             try:
                 resp = client.chat.completions.create(
                     model=session.model,
@@ -204,6 +230,7 @@ class LiteLLMAdapter(Adapter):
                     max_tokens=_MAX_TOKENS,
                 )
             except Exception as e:
+                _note_error(e)
                 ui.console.print(f"[red]LiteLLM error: {e}[/red]")
                 return None
 
@@ -214,6 +241,7 @@ class LiteLLMAdapter(Adapter):
                     getattr(usage, 'completion_tokens', 0) or 0)
                 session.ctx_used = (
                     getattr(usage, 'prompt_tokens', 0) or session.ctx_used)
+            self._record_call('step', resp, time.perf_counter() - t0)
 
             msg = resp.choices[0].message
             text = msg.content or ''
@@ -275,6 +303,7 @@ class LiteLLMAdapter(Adapter):
 
     def summarise(self, transcript: str) -> str:
         try:
+            t0 = time.perf_counter()
             resp = self._client().chat.completions.create(
                 model=session.model,
                 max_tokens=1024,
@@ -291,7 +320,15 @@ class LiteLLMAdapter(Adapter):
                     {'role': 'user', 'content': transcript},
                 ],
             )
+            self._record_call('summarise', resp, time.perf_counter() - t0)
             return (resp.choices[0].message.content or '').strip() \
                 or '(summary unavailable)'
         except Exception as e:
+            _note_error(e)
             return f'(summary failed: {e})'
+
+
+def _note_error(e: Exception) -> None:
+    """Count a provider failure on the bound session and keep its text."""
+    ledger.bump('provider_errors')
+    session.last_error = repr(e)[:200]

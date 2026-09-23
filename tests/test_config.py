@@ -173,3 +173,129 @@ class TestToolsAndSamplingSettings:
         monkeypatch.setattr(config, 'FLAT_TOOLS', False)
         config._apply_settings()
         assert config.FLAT_TOOLS is True
+
+
+class TestDecisionsAndLedgerSettings:
+    """settings.toml [decisions], [ledger], [pricing] tables."""
+
+    def _apply(self, tmp_path, monkeypatch, text):
+        p = tmp_path / 'settings.toml'
+        p.write_text(text, encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        for name, default in (('DECISIONS_MODE', 'off'),
+                              ('DECISIONS_POINTS', {}),
+                              ('DECISIONS_ACTIVE', {}),
+                              ('DECISIONS_THRESHOLDS', {}),
+                              ('DECISIONS_TIMEOUT_MS', 1500),
+                              ('DECISIONS_SIDECAR_MODEL', 'qwen3:4b'),
+                              ('LEDGER_ENABLED', True),
+                              ('PRICING_OVERRIDES', {})):
+            monkeypatch.setattr(config, name, default)
+        config._apply_settings()
+
+    def test_unknown_mode_is_ignored_and_logged(
+            self, tmp_path, monkeypatch, caplog) -> None:
+        with caplog.at_level('INFO', logger='guru'):
+            self._apply(tmp_path, monkeypatch,
+                        '[decisions]\nmode = "autopilot"\n')
+        assert config.DECISIONS_MODE == 'off'
+        assert any('autopilot' in r.getMessage() for r in caplog.records)
+
+    def test_defaults(self) -> None:
+        assert config.DECISIONS_MODE == 'off'
+        assert config.DECISIONS_POINTS == {}
+        assert config.LEDGER_ENABLED is True
+        assert config.LEDGER_DIR == config.GURU_HOME / 'ledger'
+        assert config.PRICING_OVERRIDES == {}
+
+    def test_reads_all_three_tables(self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch, (
+            '[decisions]\nmode = "shadow"\nsidecar_model = "qwen3:1.7b"\n'
+            '[decisions.points]\nstall = "ollama"\npanel = "encoder"\n'
+            '[ledger]\nenabled = false\n'
+            '[pricing."claude-sonnet-5"]\ninput_per_m = 2.5\n'
+            'output_per_m = 11.0\n'))
+        assert config.DECISIONS_MODE == 'shadow'
+        assert config.DECISIONS_SIDECAR_MODEL == 'qwen3:1.7b'
+        assert config.DECISIONS_POINTS == {'stall': 'ollama',
+                                           'panel': 'encoder'}
+        assert config.LEDGER_ENABLED is False
+        assert config.PRICING_OVERRIDES == {
+            'claude-sonnet-5': {'input_per_m': 2.5, 'output_per_m': 11.0}}
+
+    def test_unknown_mode_falls_back_to_off(self, tmp_path, monkeypatch):
+        self._apply(tmp_path, monkeypatch, '[decisions]\nmode = "yolo"\n')
+        assert config.DECISIONS_MODE == 'off'
+
+    def test_active_defaults(self) -> None:
+        assert config.DECISIONS_MODES == ('off', 'shadow', 'active')
+        assert config.JUDGING_MODES == ('shadow', 'active')
+        assert config.DECISIONS_ACTIVE == {}
+        assert config.DECISIONS_THRESHOLDS == {}
+        assert config.DECISIONS_TIMEOUT_MS == 1500
+        assert config.DECISIONS_BREAKER_TIMEOUTS == 5
+        assert config.DECISIONS_BREAKER_COOLDOWN_S == 60.0
+
+    def test_reads_breaker_settings(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'DECISIONS_BREAKER_TIMEOUTS', 5)
+        monkeypatch.setattr(config, 'DECISIONS_BREAKER_COOLDOWN_S', 60.0)
+        self._apply(tmp_path, monkeypatch, (
+            '[decisions]\nmode = "active"\nbreaker_timeouts = 3\n'
+            'breaker_cooldown_s = 10\n'))
+        assert config.DECISIONS_BREAKER_TIMEOUTS == 3
+        assert config.DECISIONS_BREAKER_COOLDOWN_S == 10.0
+
+    def test_reads_active_tables(self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch, (
+            '[decisions]\nmode = "active"\ntimeout_ms = 800\n'
+            '[decisions.points]\nstall = "ollama"\npanel = "encoder"\n'
+            '[decisions.active]\nstall = true\npanel = false\n'
+            '[decisions.thresholds]\nstall = 0.6\npanel = 1\n'))
+        assert config.DECISIONS_MODE == 'active'
+        assert config.DECISIONS_TIMEOUT_MS == 800
+        assert config.DECISIONS_ACTIVE == {'stall': True, 'panel': False}
+        assert config.DECISIONS_THRESHOLDS == {'stall': 0.6, 'panel': 1.0}
+
+    def test_bad_active_values_are_skipped(self, tmp_path, monkeypatch):
+        self._apply(tmp_path, monkeypatch, (
+            '[decisions]\nmode = "active"\ntimeout_ms = "soon"\n'
+            '[decisions.active]\nstall = "yes"\npanel = true\n'
+            '[decisions.thresholds]\nstall = "high"\npanel = 0.7\n'))
+        assert config.DECISIONS_TIMEOUT_MS == 1500
+        assert config.DECISIONS_ACTIVE == {'panel': True}
+        assert config.DECISIONS_THRESHOLDS == {'panel': 0.7}
+
+
+class TestEvalsSettings:
+    """settings.toml [evals]: default model spec and pinned context."""
+
+    def _apply(self, tmp_path, monkeypatch, text):
+        p = tmp_path / 'settings.toml'
+        p.write_text(text, encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        monkeypatch.setattr(config, 'EVALS_MODEL', '')
+        monkeypatch.setattr(config, 'EVALS_NUM_CTX', 8192)
+        config._apply_settings()
+
+    def test_defaults(self) -> None:
+        assert config.EVALS_MODEL == ''
+        assert config.EVALS_NUM_CTX == 8192
+
+    def test_apply_reads_model_and_num_ctx(self, tmp_path,
+                                           monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch,
+                    '[evals]\nmodel = "Ollama|huihui_ai/qwen3-abliterated:8b"'
+                    '\nnum_ctx = 16384\n')
+        assert config.EVALS_MODEL == 'Ollama|huihui_ai/qwen3-abliterated:8b'
+        assert config.EVALS_NUM_CTX == 16384
+
+    def test_missing_table_keeps_defaults(self, tmp_path, monkeypatch):
+        self._apply(tmp_path, monkeypatch, '[tools]\nflat = false\n')
+        assert config.EVALS_MODEL == ''
+        assert config.EVALS_NUM_CTX == 8192
+
+    def test_bad_num_ctx_is_ignored(self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch,
+                    '[evals]\nnum_ctx = "lots"\nmodel = 3\n')
+        assert config.EVALS_NUM_CTX == 8192
+        assert config.EVALS_MODEL == ''

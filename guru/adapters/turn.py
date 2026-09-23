@@ -31,10 +31,17 @@ Each adapter supplies three closures over its per-turn state:
     Append a user turn (the nudge) to both histories.
 """
 import re
+import time
 
 from rich.markdown import Markdown
 
 from guru import config, session, ui
+from guru.domain import decisions, ledger, tools
+
+# A controller answer longer than this with no spawn in the turn counts as
+# the controller doing the work itself (design doc §5: measured, not
+# punished).
+_CONTROLLER_ANSWER_CHARS = 600
 
 # A weak model sometimes ends a turn by announcing an action ("Let me read the
 # files…") without calling a tool; without a nudge that would be taken as the
@@ -93,6 +100,68 @@ def looks_like_preamble(content: str) -> bool:
     return bool(_PREAMBLE_RE.search(content))
 
 
+def _turn_request() -> str:
+    """The user's request for this turn: the most recent user message that
+    is not one of the loop's own nudges."""
+    for m in reversed(session.messages):
+        if not isinstance(m, dict) or m.get('role') != 'user':
+            continue
+        text = (m.get('content') or '').strip()
+        if text and text not in (_NUDGE_TEXT, _DELEGATION_TEXT):
+            return text
+    return ''
+
+
+_MAILBOX_PREFIXES = ('[joined results]', '[result from')
+
+
+def controller_executed(tools_used: list, answer: str) -> bool:
+    """Did a controller do the work itself this turn?
+
+    True only in controller mode, when a tool outside spawn/check/join/
+    use_skill was attempted or the final answer exceeds
+    ``_CONTROLLER_ANSWER_CHARS`` with no spawn in the turn. Turns driven by
+    a mailbox delivery (a joined or single sub-agent result) are synthesis
+    turns and never count.
+    """
+    if not session.controller:
+        return False
+    if _turn_request().startswith(_MAILBOX_PREFIXES):
+        return False
+    if any(name not in tools.CONTROLLER_TOOLS for name in tools_used):
+        return True
+    return (len(answer) > _CONTROLLER_ANSWER_CHARS
+            and tools_used.count('spawn') == 0)
+
+
+def _close_turn(start: float, in0: int, out0: int, cost0: float,
+                unpriced0: int, struggle0: dict, tools_used: list,
+                answer: str = '') -> None:
+    """Write the TurnRecord for any agent not executing a task.
+
+    A sub-agent running a spawned task is accounted for by its task row.
+    Tokens, cost and struggle counters are this turn's deltas over the
+    session values snapshotted at turn start; cost is None only when a call
+    made during *this* turn could not be priced. ``answer`` is the final
+    answer text (empty on cancel/error), for ``controller_executed``.
+    """
+    if session.task_id:
+        return
+    exact = session.unpriced_calls == unpriced0
+    cost = session.cost_usd - cost0 if exact else None
+    ledger.record_turn(ledger.TurnRecord(
+        turn_id=session.turn_id, request=_turn_request(),
+        model=session.model, seconds=time.monotonic() - start,
+        tasks_spawned=tools_used.count('spawn'), tools_used=tools_used,
+        tokens_in=session.session_in - in0,
+        tokens_out=session.session_out - out0,
+        cost_usd=cost,
+        controller_executed=controller_executed(tools_used, answer),
+        agent=session.agent_id,
+        adapter=getattr(session.adapter, 'name', ''),
+        struggle=ledger.struggle_delta(struggle0, session.struggle)))
+
+
 def _render_answer(content: str) -> None:
     ui.console.print("\n[bold green]answer>[/bold green]")
     ui.console.print(Markdown(content))
@@ -104,30 +173,67 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
 
     Owns the shared control flow; the adapter owns the provider calls and
     history threading. See the module docstring for the closure contracts.
+    Exactly one TurnRecord is written per call, on every exit path.
     """
     session.cancel_requested = False
+    session.last_error = ''          # this turn's provider failure, if any
+    if not session.task_id:
+        # A sub-agent executing a task keeps the turn_id it inherited.
+        session.turn_id = ledger.new_turn_id()
+    start = time.monotonic()
+    in0, out0 = session.session_in, session.session_out
+    cost0, unpriced0 = session.cost_usd, session.unpriced_calls
+    struggle0 = dict(session.struggle)
+    tools_used: list = []
+    answer = ''
+    try:
+        answer = _drive(step, run_tools, add_user, nudge, tools_used)
+    finally:
+        _close_turn(start, in0, out0, cost0, unpriced0, struggle0,
+                    tools_used, answer)
+
+
+def _drive(step, run_tools, add_user, nudge: bool, tools_used: list) -> str:
+    """The round loop proper; every requested tool lands in ``tools_used``.
+    Returns the final answer text (``''`` on cancel or error)."""
     called: set = set()
     nudged = 0
     delegation_nudged = False
+    panel_asked = False
     while True:
         if session.cancel_requested:
             ui.console.print("[yellow]* cancelled[/yellow]")
-            return
+            return ''
         ui.note_thinking()
         result = step()
         if result is None:
             # None = stop: a cancel (flagged) or an error (step printed it).
             if session.cancel_requested:
                 ui.console.print("[yellow]* cancelled[/yellow]")
-            return
+            return ''
         ui.status_draw()
         text, tool_calls = result
 
         if not tool_calls:
             content = (text or '').strip()
             stalled = not content or looks_like_preamble(content)
+            if content:
+                # The stall judge sees the same candidate answer the
+                # heuristic scored. Shadow: its verdict only lands in the
+                # ledger. Active ([decisions.active] stall = true): its
+                # verdict decides, the heuristic is the timeout fallback.
+                stalled = bool(decisions.decide(
+                    'stall', decisions.stall_question(content),
+                    heuristic=stalled))
+                if session.can_spawn and not panel_asked:
+                    # One boolean cannot stand in for three specialist
+                    # questions, so the panel batch carries no heuristic.
+                    panel_asked = True
+                    decisions.shadow(
+                        'panel', decisions.panel_questions(_turn_request()))
             if nudge and stalled and nudged < _NUDGE_CAP:
                 nudged += 1
+                ledger.bump('stall_nudges')
                 reason = ("empty response" if not content
                           else "announced an action but called no tool")
                 ui.console.print(
@@ -139,16 +245,18 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
             if (nudge and not delegation_nudged and content
                     and _should_delegate()):
                 delegation_nudged = True
+                ledger.bump('delegation_nudges')
                 ui.console.print(
                     "[dim yellow]\\[DELEGATE][/dim yellow] broad task, no"
                     " sub-agents — asking it to spawn a domain panel")
                 add_user(_DELEGATION_TEXT)
                 continue
             _render_answer(content)
-            return
+            return content
 
         pending = []
         for name, args, ref in tool_calls:
+            tools_used.append(name)
             key = (name, tuple(sorted(args.items())))
             duplicate = key in called
             if not duplicate:

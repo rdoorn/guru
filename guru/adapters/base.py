@@ -26,6 +26,10 @@ class Adapter(ABC):
 
     name: str = "adapter"
     enabled: bool = True
+    # Whether prompts leave the machine. Routing strips remote adapters in
+    # local-only mode and whenever the secret scanner finds something; the
+    # remote path also redacts tool output. Local providers set False.
+    remote: bool = True
 
     def verify(self) -> tuple:
         """Check the adapter works, triggering auth if needed.
