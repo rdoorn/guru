@@ -400,7 +400,8 @@ class TestFileShaLedger:
         conversation.refresh_system_context()
         session.file_shas.clear()
         conversation.refresh_system_context()
-        assert session.messages[0]['content'] == 'BASE'
+        body = session.messages[0]['content']
+        assert body.startswith('BASE') and '[open files]' not in body
 
     def test_refresh_shows_relative_path(self, tmp_path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
@@ -478,6 +479,56 @@ class TestSystemContext:
             session, 'messages', [{'role': 'system', 'content': 'BASE'}])
         conversation.refresh_system_context()      # must not raise
         assert '[role:' not in session.messages[0]['content']
+
+
+class TestProjectBlock:
+    """The '[project]' block: cwd name, absolute path and git branch, so
+    every agent (the controller above all) knows which project a request
+    refers to (triage 2026-09-23-claude-tiers: the controller asked
+    "which repository?" instead of delegating)."""
+
+    def _base(self, monkeypatch, branch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', {})
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(session, 'active_role', None)
+        monkeypatch.setattr(session, 'active_skill', None)
+        monkeypatch.setattr(session, 'git_branch', branch)
+        monkeypatch.setattr(
+            session, 'messages', [{'role': 'system', 'content': 'BASE'}])
+
+    def test_names_cwd_and_branch(self, tmp_path, monkeypatch) -> None:
+        proj = tmp_path / 'myproj'
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        self._base(monkeypatch, 'feat/x')
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert body.startswith('BASE')
+        assert '[project]' in body
+        assert 'myproj' in body and str(proj.resolve()) in body
+        assert 'feat/x' in body
+        assert 'requests refer to it' in body
+
+    def test_no_branch_line_without_git(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._base(monkeypatch, None)
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert '[project]' in body and '- git branch:' not in body
+
+    def test_rendered_once_across_calls(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._base(monkeypatch, 'main')
+        conversation.refresh_system_context()
+        conversation.refresh_system_context()
+        assert session.messages[0]['content'].count('[project]') == 1
+
+    def test_helper_returns_block(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(session, 'git_branch', None)
+        block = conversation.project_block()
+        assert block.startswith('[project]')
+        assert str(tmp_path.resolve()) in block
 
 
 class TestFocusedSummary:

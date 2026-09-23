@@ -148,6 +148,13 @@ def _turn_request() -> str:
 _MAILBOX_PREFIXES = ('[joined results]', '[result from')
 
 
+def _mailbox_turn() -> bool:
+    """True when this turn was started by a mailbox delivery (a joined or
+    single sub-agent result): the request text is the sub-agents' output,
+    not a task from the user."""
+    return _turn_request().startswith(_MAILBOX_PREFIXES)
+
+
 def controller_executed(tools_used: list, answer: str) -> bool:
     """Did a controller do the work itself this turn?
 
@@ -159,7 +166,7 @@ def controller_executed(tools_used: list, answer: str) -> bool:
     """
     if not session.controller:
         return False
-    if _turn_request().startswith(_MAILBOX_PREFIXES):
+    if _mailbox_turn():
         return False
     if any(name not in tools.CONTROLLER_TOOLS for name in tools_used):
         return True
@@ -260,9 +267,12 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list) -> str:
                 stalled = bool(decisions.decide(
                     'stall', decisions.stall_question(content),
                     heuristic=stalled))
-                if session.can_spawn and not panel_asked:
+                if (session.can_spawn and not panel_asked
+                        and not _mailbox_turn()):
                     # One boolean cannot stand in for three specialist
                     # questions, so the panel batch carries no heuristic.
+                    # A mailbox delivery is the sub-agents' results, not a
+                    # task to staff, so it is never judged (f1929d55c41a).
                     panel_asked = True
                     decisions.shadow(
                         'panel', decisions.panel_questions(_turn_request()))

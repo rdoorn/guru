@@ -67,6 +67,27 @@ class TestReviewPanel:
         assert 'the repo' in s and 'consolidate' in s.lower()
 
 
+class TestControllerHint:
+    """CONTROLLER_HINT tells the controller which project requests refer
+    to and how to label complexity (triage 2026-09-23-claude-tiers)."""
+
+    def test_never_asks_which_repository(self) -> None:
+        hint = config.CONTROLLER_HINT
+        assert 'Never ask which repository' in hint
+        assert '[project]' in hint
+        assert 'refer to it' in hint
+
+    def test_task_names_the_project_path(self) -> None:
+        assert 'project path' in config.CONTROLLER_HINT
+
+    def test_complexity_examples(self) -> None:
+        hint = config.CONTROLLER_HINT
+        for word in ('trivial', 'standard', 'hard', 'greetings',
+                     'one-file edit', 'multi-file refactor', 'concurrency',
+                     'whole codebase'):
+            assert word in hint, word
+
+
 class TestModelCtxStore:
     """Per-model context persistence (~/.guru/model_ctx.json)."""
 

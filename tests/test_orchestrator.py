@@ -991,6 +991,26 @@ class TestControllerConfigure:
         assert agent.state.controller is False
         assert config.CONTROLLER_HINT not in agent.state.messages[0]['content']
 
+    def test_controller_prompt_names_cwd_and_repo_rule(
+            self, tmp_path, monkeypatch) -> None:
+        """The rendered controller system prompt carries the working
+        directory and the 'never ask which repository' rule."""
+        from guru.agents import Agent
+        monkeypatch.chdir(tmp_path)
+        o, base = self._orch()
+        base.git_branch = 'feat/routing'
+        agent = Agent(id='main', title='main')
+        o.configure(agent, base, can_spawn=True, controller=True)
+        token = session.use(agent.state)
+        try:
+            conversation.refresh_system_context()
+        finally:
+            session.reset(token)
+        body = agent.state.messages[0]['content']
+        assert str(tmp_path.resolve()) in body
+        assert 'feat/routing' in body
+        assert 'Never ask which repository' in body
+
 
 class TestLocalRetry:
     """A remote child that fails without an answer is respawned once

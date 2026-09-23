@@ -30,12 +30,12 @@ def _quiet(monkeypatch) -> Recorder:
 
 
 def _loop(replies, monkeypatch, fake_repo, can_spawn=False, tool_rounds=(),
-          nudge=False):
+          nudge=False, request='review the login code'):
     """Drive run_loop with scripted (text, tool_calls) steps."""
     rec = _quiet(monkeypatch)
     monkeypatch.setattr(session, 'messages', [
         {'role': 'system', 'content': 's'},
-        {'role': 'user', 'content': 'review the login code'}])
+        {'role': 'user', 'content': request}])
     monkeypatch.setattr(session, 'can_spawn', can_spawn)
     monkeypatch.setattr(session, 'model', 'qwen3:14b')
     steps = list(tool_rounds) + [(r, []) for r in replies]
@@ -197,6 +197,18 @@ class TestPanelShadow:
         calls, _ = _loop(["Let me read the files:", "Here is my review."],
                          monkeypatch, fake_repo, can_spawn=True, nudge=True)
         assert [c[0] for c in calls] == ['stall', 'panel', 'stall']
+
+    @pytest.mark.parametrize('request_text', [
+        '[joined results]\n\n— agent1 · task: review x\nfindings…',
+        '[result from agent1 · task: review x]\nfindings…'])
+    def test_mailbox_turn_skips_panel(self, monkeypatch, fake_repo,
+                                      request_text):
+        """A mailbox delivery is the sub-agents' results, not a task: the
+        panel questions are not asked (run f1929d55c41a judged joined
+        results as tasks)."""
+        calls, _ = _loop(["Consolidated report."], monkeypatch, fake_repo,
+                         can_spawn=True, request=request_text)
+        assert [c[0] for c in calls] == ['stall']
 
     def test_sub_agent_does_not_shadow_panel(self, monkeypatch, fake_repo):
         calls, _ = _loop(["Here is my review."], monkeypatch, fake_repo,

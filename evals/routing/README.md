@@ -89,3 +89,21 @@ that triage apply to every config here: a `join` that opens a barrier
 ends the controller's turn (no more polling rounds), and the delegation
 nudge fires only after three distinct files were read on a request that
 is not a single-file edit, never for a controller.
+
+## Runs (2026-09-23, git 8296e89)
+
+| config | run id | result | mean s | cost |
+|---|---|---|---|---|
+| 0 | `04dbcf7566f9` | 9/9 | 35.0 | $0.94 |
+| 1 | `3f9ab125dbeb` | 7/9 | 18.8 | $0.38 |
+| 2 | `f1929d55c41a` | 7/9 | 26.8 | $0.54 |
+
+Triage: `evals/triage/2026-09-23-claude-tiers.md`. Short version: the
+controller asked "which repository?" on two cases instead of delegating
+(fixed since: a `[project]` block in the system context and a "never ask
+which repository" rule in the controller hint), every spawned task was
+labelled `standard` so the Haiku and Opus rungs never ran, and on the cases
+where work happened the controller cost more than plain Sonnet. The saving
+against the pre-fix baseline (384761c577f4, $4.12) came from the `join`
+polling fix, not from routing. Rerun config 1 after the fixes before
+drawing further conclusions.

@@ -254,6 +254,26 @@ def _summarise_groups(groups: list) -> str:
 _DYN_SEP = "\n\n--- active context ---\n"
 
 
+def project_block() -> str:
+    """The '[project]' block: the working directory's name, absolute path
+    and git branch, plus the rule that requests refer to it.
+
+    Rendered for every agent so none of them has to guess which codebase a
+    request means; the controller, which has no file tools, relies on it
+    (triage 2026-09-23-claude-tiers: it asked "which repository?" instead of
+    delegating).
+    """
+    cwd = Path.cwd().resolve()
+    lines = ["[project]", f"- name: {cwd.name}", f"- path: {cwd}"]
+    branch = session.git_branch
+    if branch:
+        lines.append(f"- git branch: {branch}")
+    lines.append(
+        "This working directory is the current project; user requests refer"
+        " to it unless they say otherwise.")
+    return "\n".join(lines)
+
+
 def _ledger_block() -> str:
     """The '[open files]' sha list, or '' when nothing is tracked."""
     ledger = session.file_shas
@@ -277,11 +297,12 @@ def _ledger_block() -> str:
 def refresh_system_context() -> None:
     """Rebuild the dynamic tail of the system prompt (messages[0]) in place.
 
-    Renders, in order, the roles/skills catalog, the active role overlay, the
-    active skill overlay, and the open-files sha ledger -- each a single copy
-    that survives pruning/compaction (message 0 is always kept) and is counted
-    in the 'sys' context bucket. Idempotent: the previous tail is stripped
-    first, so calling it every turn never doubles it.
+    Renders, in order, the project block (cwd + branch), the roles/skills
+    catalog, the active role overlay, the active skill overlay, and the
+    open-files sha ledger -- each a single copy that survives
+    pruning/compaction (message 0 is always kept) and is counted in the
+    'sys' context bucket. Idempotent: the previous tail is stripped first,
+    so calling it every turn never doubles it.
     """
     msgs = session.messages
     if not msgs or not isinstance(msgs[0], dict) \
@@ -289,7 +310,7 @@ def refresh_system_context() -> None:
         return
     base = (msgs[0].get('content') or '').split(_DYN_SEP)[0]
 
-    sections = []
+    sections = [project_block()]
     catalog = skills.catalog_block()
     if catalog:
         sections.append(catalog)
