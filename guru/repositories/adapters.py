@@ -47,3 +47,10 @@ class AdapterRegistry:
 
     def __len__(self) -> int:
         return len(self._adapters)
+
+
+def registry_from(adapters: Iterable[Adapter]) -> AdapterRegistry:
+    """The registry over ``adapters`` (all of them, enabled or not, so a
+    ladder rung on a disabled adapter is reported rather than unknown).
+    Shared by the CLI and the eval runner."""
+    return AdapterRegistry(adapters)

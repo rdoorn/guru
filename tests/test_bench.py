@@ -360,3 +360,67 @@ class TestBenchPlot:
         assert len(paths) == 2
         for p in paths:
             assert p.exists() and p.stat().st_size > 0
+
+
+class TestBenchRunRouting:
+    """``BenchRun(base, registry=, routing=)`` wires the orchestrator's
+    routing and, with ``routing.controller``, runs main as a controller."""
+
+    def test_defaults_are_inert(self) -> None:
+        b = bench.BenchRun(session.SessionState())
+        assert b.registry is None and b.controller is False
+
+    def test_registry_and_routing_are_passed_through(self) -> None:
+        from guru.repositories.adapters import AdapterRegistry
+        from guru.repositories.settings import RoutingSettings
+        reg = AdapterRegistry()
+        routing = RoutingSettings(controller=True, present=True)
+        b = bench.BenchRun(session.SessionState(), registry=reg,
+                           routing=routing)
+        assert b.registry is reg
+        assert b._routing() is routing
+        assert b.controller is True
+
+    def test_run_configures_main_as_controller(self, monkeypatch) -> None:
+        import asyncio
+        from guru.adapters.base import Adapter
+        from guru.repositories.adapters import AdapterRegistry
+        from guru.repositories.settings import RoutingSettings
+
+        class Quiet(Adapter):
+            name = 'fake'
+            remote = False
+            def available(self): return True
+            def list_models(self): return []
+            def activate(self, m): pass
+            def summarise(self, t): return 's'
+
+            def run_turn(self):
+                session.current().messages.append(
+                    {'role': 'assistant', 'content': 'done'})
+
+        base = session.SessionState()
+        base.adapter = Quiet()
+        base.model = 'fake'
+        seen: dict = {}
+        orig = bench.BenchRun.configure
+
+        def spy(self, agent, b, can_spawn, role=None, skill=None,
+                controller=False):
+            seen[agent.title] = controller
+            orig(self, agent, b, can_spawn, role=role, skill=skill,
+                 controller=controller)
+
+        monkeypatch.setattr(bench.BenchRun, 'configure', spy)
+        for flag in (False, True):
+            routing = RoutingSettings(controller=flag, present=True)
+            reg = AdapterRegistry([base.adapter])
+            run = bench.BenchRun(base, registry=reg, routing=routing)
+            try:
+                agents = asyncio.run(run.run('hi', timeout=5))
+            finally:
+                tools.set_spawn_handler(None)
+                tools.set_check_handler(None)
+                tools.set_join_handler(None)
+            assert seen['main'] is flag
+            assert agents[0].state.controller is flag

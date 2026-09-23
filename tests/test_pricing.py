@@ -64,3 +64,38 @@ class TestCost:
         usage = pricing.Usage(input_tokens=10, output_tokens=10)
         assert pricing.cost_usd('qwen3:14b', usage, local=True) == 0.0
         assert pricing.cost_usd('gpt-4.1', usage) is None
+
+
+class TestNormalise:
+    """Bedrock/LiteLLM-style ids resolve to the first-party table keys."""
+
+    @pytest.mark.parametrize('model_id, key', [
+        ('aws/claude-5-sonnet', 'claude-sonnet-5'),
+        ('claude-5-sonnet', 'claude-sonnet-5'),
+        ('claude-4-5-haiku', 'claude-haiku-4-5'),
+        ('claude-5-5-opus', 'claude-opus-5-5'),
+        ('claude-4-8-opus', 'claude-opus-4-8'),
+        ('anthropic.claude-sonnet-5', 'claude-sonnet-5'),
+        ('claude-sonnet-5-20260101', 'claude-sonnet-5'),
+        ('bedrock/anthropic.claude-4-5-haiku-20260101', 'claude-haiku-4-5'),
+        ('anthropic/claude-opus-5-5', 'claude-opus-5-5'),
+        ('claude-sonnet-5', 'claude-sonnet-5'),
+    ])
+    def test_aliases_resolve(self, model_id: str, key: str) -> None:
+        assert pricing.normalise_model_id(model_id) == key
+        assert pricing.prices_for(model_id) == pricing.prices_for(key)
+        assert pricing.prices_for(model_id) is not None
+
+    def test_unknown_ids_stay_none(self) -> None:
+        for m in ('gpt-4.1', 'aws/claude-9-sonnet', 'claude-3-turbo',
+                  'aws/llama-3-70b'):
+            assert pricing.prices_for(m) is None, m
+
+    def test_normalise_leaves_unknown_shapes_alone(self) -> None:
+        assert pricing.normalise_model_id('gpt-4.1') == 'gpt-4.1'
+        assert pricing.normalise_model_id('aws/llama-3-70b') == 'llama-3-70b'
+
+    def test_cost_through_alias(self) -> None:
+        usage = pricing.Usage(input_tokens=1_000_000)
+        assert pricing.cost_usd('aws/claude-5-sonnet', usage) == \
+            pytest.approx(2.0)

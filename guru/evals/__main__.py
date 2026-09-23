@@ -49,11 +49,13 @@ def _timeout_detail(observed: dict) -> str:
             f'; files_changed={changed}')
 
 
-def _row(res: CaseResult) -> list:
+def _row(res: CaseResult, routed: bool = False) -> list:
     """One table row: case, verdict, seconds, cost, failed checks/rubric.
 
     A timed-out case fails every check by design; its row shows the
     observed tools, sub-agents and changed files instead of the check list.
+    For a routed run the detail also lists where the sub-agent tasks went
+    (``routes: Adapter|model, ...``; ``-`` when nothing was spawned).
     """
     parts: list = []
     if res.observed.get('timed_out'):
@@ -64,18 +66,26 @@ def _row(res: CaseResult) -> list:
             parts.append(', '.join(failed))
     if res.rubric:
         parts.append('rubric: grade by hand')
+    if routed or res.routes:
+        parts.append('routes: ' + (', '.join(res.routes) or '-'))
     return [res.case, 'PASS' if res.passed else 'FAIL',
             f'{res.seconds:.1f}', _fmt_cost(res.cost_usd), '; '.join(parts)]
 
 
 def _print_run(run: Run, out_root: Path) -> None:
+    routed = bool(run.routing)
     print(_table(['case', 'result', 'seconds', 'cost', 'detail'],
-                 [_row(c) for c in run.cases]))
+                 [_row(c, routed) for c in run.cases]))
     passed = sum(1 for c in run.cases if c.passed)
-    print(f'\npassed {passed}/{len(run.cases)}'
-          f' · mean {run.mean_seconds():.1f}s'
-          f' · cost {_fmt_cost(run.total_cost())}'
-          f' · model {run.model_label()}')
+    summary = (f'\npassed {passed}/{len(run.cases)}'
+               f' · mean {run.mean_seconds():.1f}s'
+               f' · cost {_fmt_cost(run.total_cost())}'
+               f' · model {run.model_label()}')
+    if routed:
+        summary += f' · routing {run.routing}'
+        if run.controller:
+            summary += ' (controller)'
+    print(summary)
     trajectory = runner.DEFAULT_TRAJECTORY_DIR / runs.TRAJECTORY_FILE
     print(f'run {run.run_id} saved under {out_root} '
           f'(transcripts: {out_root / run.run_id / "transcripts"}; '
@@ -112,6 +122,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
     out_root = Path(args.out)
+    routing = None
+    routing_name = ''
+    if args.routing:
+        try:
+            routing = runner.load_routing_file(Path(args.routing))
+        except ValueError as e:
+            print(f'error: {e}', file=sys.stderr)
+            return 2
+        routing_name = Path(args.routing).stem
 
     def progress(res: CaseResult) -> None:
         flags = ', timed out' if res.observed.get('timed_out') else ''
@@ -120,7 +139,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     try:
         run = runner.run_suite(suite, model, out_root, note=args.note,
-                               on_result=progress, num_ctx=num_ctx)
+                               on_result=progress, num_ctx=num_ctx,
+                               routing=routing, routing_name=routing_name,
+                               allow_spend=args.allow_spend)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
@@ -192,6 +213,13 @@ def _parser() -> argparse.ArgumentParser:
                        help=f'run directory (default: {DEFAULT_OUT})')
     run_p.add_argument('--note', default='',
                        help='free text for the trajectory row')
+    run_p.add_argument('--routing', default=None, metavar='FILE',
+                       help='TOML file with a [routing] table (as in '
+                            'settings.toml) to route sub-agents; see '
+                            'evals/routing/README.md')
+    run_p.add_argument('--allow-spend', action='store_true',
+                       help='grant the remote-spend question for the run '
+                            '(default: deny, so remote rungs are skipped)')
     run_p.add_argument('--cases-dir', default=str(cases.CASES_DIR),
                        help=argparse.SUPPRESS)
     run_p.set_defaults(func=_cmd_run)

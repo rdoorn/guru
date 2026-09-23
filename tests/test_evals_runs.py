@@ -177,3 +177,50 @@ class TestNumCtx:
         r.num_ctx = 8192
         runs.append_trajectory(r, tmp_path)
         assert '| Ollama\\|qwen3:14b@8k |' in _last_row(tmp_path)
+
+
+class TestRoutingFields:
+    """``routing``/``controller`` on Run and ``routes`` on CaseResult."""
+
+    def test_defaults_and_old_files_load(self, tmp_path: Path) -> None:
+        r = run()
+        assert r.routing == '' and r.controller is False
+        assert r.cases[0].routes == []
+        path = runs.save(r, tmp_path)
+        data = json.loads(path.read_text())
+        for key in ('routing', 'controller'):
+            del data[key]
+        for c in data['cases']:
+            del c['routes']
+        path.write_text(json.dumps(data))
+        loaded = runs.load(path)
+        assert loaded.routing == '' and loaded.controller is False
+        assert all(c.routes == [] for c in loaded.cases)
+
+    def test_round_trip(self, tmp_path: Path) -> None:
+        c = result('a', True)
+        c.routes = ['Ollama|qwen3:8b', 'SBP Litellm|aws/claude-5-sonnet']
+        r = Run(run_id='r1', ts='2026-09-23T10:00:00+00:00', model='m',
+                git_sha='', cases=[c], num_ctx=8192, routing='exp-b',
+                controller=True)
+        loaded = runs.load(runs.save(r, tmp_path))
+        assert loaded == r
+        assert loaded.cases[0].routes == c.routes
+
+    def test_model_label_carries_routing(self) -> None:
+        r = run()
+        r.num_ctx = 8192
+        r.routing = 'exp-b'
+        assert r.model_label() == 'Ollama|qwen3:14b@8k+routed:exp-b'
+        r.controller = True
+        assert r.model_label() == \
+            'Ollama|qwen3:14b@8k+routed:exp-b+controller'
+        r.num_ctx = 0
+        assert r.model_label() == 'Ollama|qwen3:14b+routed:exp-b+controller'
+
+    def test_trajectory_row_carries_routing(self, tmp_path: Path) -> None:
+        r = run()
+        r.routing = 'exp-b'
+        runs.append_trajectory(r, tmp_path)
+        text = (tmp_path / runs.TRAJECTORY_FILE).read_text()
+        assert '| Ollama\\|qwen3:14b+routed:exp-b |' in text

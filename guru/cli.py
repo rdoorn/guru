@@ -14,7 +14,7 @@ from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import ledger, policy, tools
 from guru.repositories import settings as routing_settings
-from guru.repositories.adapters import AdapterRegistry
+from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
 from guru.scanners.secrets import load_project_scanner
 
@@ -79,7 +79,7 @@ def build_registry(adapters: list) -> AdapterRegistry:
     """The AdapterRegistry over ``adapters`` (all of them, enabled or not,
     so a ladder rung on a disabled adapter is reported rather than unknown).
     """
-    return AdapterRegistry(adapters)
+    return registry_from(adapters)
 
 
 def load_routing() -> routing_settings.RoutingSettings:

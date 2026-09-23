@@ -23,7 +23,16 @@ evals/
 .venv/bin/python -m guru.evals run --cases greet,logic-bug
 .venv/bin/python -m guru.evals run --model 'Ollama|qwen3:14b' --num-ctx 16384 --note 'after nudge fix'
 .venv/bin/python -m guru.evals compare evals/runs/<old>.json evals/runs/<new>.json
+.venv/bin/python -m guru.evals run --routing evals/routing/<file>.toml --allow-spend
 ```
+
+`--routing FILE` routes sub-agents through a `[routing]` table (same shape
+as `settings.toml`; the main agent becomes a controller when the table says
+so) and `--allow-spend` grants the remote-spend question for the run
+(default: deny, so remote rungs are skipped). The run records the file
+stem (`+routed:<stem>` in the model label) and the table's detail column
+lists the `Adapter|model` each case's sub-agents ran on. See
+`evals/routing/README.md` for the local-vs-remote cost experiment.
 
 `--cases` takes case names; `--tags` selects the cases carrying ANY of the
 listed tags (the tags are the `tags = [...]` list in each case file; `list`

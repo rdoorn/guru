@@ -123,11 +123,16 @@ class BenchRun(Orchestrator):
     """Headless coordinator: the shared spawn/check/join orchestrator with the
     default quiet console and no per-turn retention/timing, so sub-agents
     actually run and their raw behaviour can be measured. Also the engine of
-    the eval runner (``guru.evals.runner``)."""
+    the eval runner (``guru.evals.runner``).
 
-    def __init__(self, base) -> None:
-        super().__init__()
+    ``registry`` (AdapterRegistry) and ``routing`` (RoutingSettings) make
+    sub-agent routing active exactly as in the TUI; without them it is
+    inert. ``routing.controller`` runs the main agent as a controller."""
+
+    def __init__(self, base, registry=None, routing=None) -> None:
+        super().__init__(registry=registry, routing=routing)
         self.base = base
+        self.controller = bool(routing is not None and routing.controller)
 
     async def _abort(self, grace: float = 30.0) -> None:
         """Cooperatively stop a stalled run: flag cancel on every agent (the
@@ -151,7 +156,8 @@ class BenchRun(Orchestrator):
             else None
         try:
             main = self.manager.active
-            self.configure(main, self.base, can_spawn=True)
+            self.configure(main, self.base, can_spawn=True,
+                           controller=self.controller)
             main.queue.append(prompt)
             self.launch(main)
             while any(a.busy or a.queue for a in self.manager.agents):

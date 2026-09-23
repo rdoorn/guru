@@ -9,6 +9,16 @@ fixture's own pytest verdict and the cost from the ledger rows this case
 appended. Everything touched (cwd, ``config.MODE``, allow-lists, askers,
 persistence of approvals, ledger repository) is restored afterwards.
 
+Routing: :func:`run_suite` takes a :class:`RoutingSettings` (parsed from a
+``[routing]`` file by :func:`load_routing_file`) and builds the adapter
+registry over the suite's adapters, so :class:`guru.bench.BenchRun` routes
+sub-agents exactly as the TUI would; ``routing.controller`` runs the main
+agent as a controller and ``routing.secret_scan`` binds the secret scanner
+for the duration (``config.SECRET_SCAN`` and the scanner are restored). A
+case records the distinct ``Adapter|model`` its sub-agent tasks ran on
+(``CaseResult.routes``). Remote spend is denied unless ``allow_spend`` is
+set, which installs a granting spend asker per case.
+
 Process-global state: the cwd, ``guru.config`` and the domain-level asker
 hooks are shared by the whole process, so cases run strictly sequentially
 and :func:`run_case` must never run concurrently with the TUI, the bench or
@@ -31,19 +41,24 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict
+import tomllib
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 from guru import bench, config, log, session, skills
 from guru.adapters import turn
 from guru.adapters.base import Adapter
-from guru.domain import conversation, files, ledger, spend, tools
+from guru.domain import conversation, files, ledger, policy, spend, tools
 from guru.evals import cases, checks, runs
 from guru.evals.cases import Case
 from guru.evals.checks import Observed
 from guru.evals.runs import CaseResult, Run
+from guru.repositories import settings as routing_settings
+from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
+from guru.repositories.settings import RoutingSettings
+from guru.scanners.secrets import load_project_scanner
 
 _COPY_IGNORE = shutil.ignore_patterns('__pycache__', '.pytest_cache',
                                       '*.pyc', '.git')
@@ -59,6 +74,37 @@ DEFAULT_TRAJECTORY_DIR = cases.REPO_ROOT / 'evals'   # TRAJECTORY.md
 
 def _deny(question: str) -> bool:
     return False
+
+
+def _grant(question: str) -> bool:
+    return True
+
+
+@dataclass(frozen=True)
+class Routing:
+    """How a run routes sub-agents: the validated ``[routing]`` settings,
+    the registry that resolves rung adapter names and the routing file's
+    stem (recorded on the run)."""
+    settings: RoutingSettings
+    registry: AdapterRegistry
+    name: str = ''
+
+
+def load_routing_file(path: Path) -> RoutingSettings:
+    """Parse the ``[routing]`` table of a TOML file (same shape as
+    ``settings.toml``). ``ValueError`` for a missing/unreadable file,
+    invalid TOML, a missing table or an invalid key."""
+    path = Path(path)
+    try:
+        data = tomllib.loads(path.read_text(encoding='utf-8'))
+    except OSError as e:
+        raise ValueError(f'{path}: cannot read routing file: {e}') from e
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f'{path}: invalid TOML: {e}') from e
+    section = data.get('routing')
+    if not isinstance(section, dict) or not section:
+        raise ValueError(f'{path}: no [routing] table')
+    return routing_settings.load_routing(section=section)
 
 
 def _no_persist(value: str) -> None:
@@ -234,10 +280,11 @@ class _Sandbox:
 
 
 @contextlib.contextmanager
-def _sandbox(copy: Path, mode: str, repo: JsonlLedger
-             ) -> Iterator[_Sandbox]:
+def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
+             allow_spend: bool = False) -> Iterator[_Sandbox]:
     """cwd, access mode, allow-lists, askers, persistence and ledger for one
-    case; all restored afterwards (askers excepted when workers leaked)."""
+    case; all restored afterwards (askers excepted when workers leaked).
+    The spend asker denies unless ``allow_spend``."""
     prev_cwd = os.getcwd()
     prev_mode = config.MODE
     prev_grant = config.AUTO_GRANT
@@ -262,7 +309,8 @@ def _sandbox(copy: Path, mode: str, repo: JsonlLedger
             setattr(config, n, _no_persist)
         tools.set_domain_asker(_deny)
         files.set_path_asker(_deny)
-        spend.set_spend_asker(_deny)       # a case never pays for remote
+        # A case never pays for remote unless the run opted in.
+        spend.set_spend_asker(_grant if allow_spend else _deny)
         spend.reset()
         ledger.set_repository(repo)
         yield state
@@ -301,22 +349,27 @@ def _drain_workers(agents: list, limit: float = WORKER_DRAIN_S) -> bool:
 
 
 def _execute(case: Case, copy: Path, base_state: session.SessionState,
-             adapters: list[Adapter], repo: JsonlLedger
+             adapters: list[Adapter], repo: JsonlLedger,
+             routing: Optional[Routing] = None, allow_spend: bool = False
              ) -> tuple[list, float, str]:
     """Run the prompt inside the sandbox.
 
     Returns ``(agents, seconds, error)``; the clock covers only the model
     run (not the fixture copy). ``error`` is set when workers were still
-    running after the bounded drain.
+    running after the bounded drain. ``routing`` makes the bench route
+    sub-agents (inert when None).
     """
-    with _sandbox(copy, case.mode, repo) as box:
+    registry = routing.registry if routing is not None else None
+    settings = routing.settings if routing is not None else None
+    with _sandbox(copy, case.mode, repo, allow_spend) as box:
         base = _state_for(case.model, base_state, adapters)
         token = session.use(base)
         t0 = time.monotonic()
         try:
             agents = asyncio.run(
-                bench.BenchRun(base).run(case.prompt,
-                                         timeout=case.timeout_s))
+                bench.BenchRun(base, registry=registry,
+                               routing=settings).run(case.prompt,
+                                                     timeout=case.timeout_s))
         finally:
             seconds = time.monotonic() - t0
             session.reset(token)
@@ -364,6 +417,20 @@ def _cost(rows: list[dict]) -> Optional[float]:
     return float(sum(r['cost_usd'] for r in rows))
 
 
+def _routes(rows: list[dict]) -> list[str]:
+    """Distinct ``Adapter|model`` of task rows, first-appearance order;
+    rows without an adapter/model (refused tasks) are skipped."""
+    out: list[str] = []
+    for r in rows:
+        adapter, model = r.get('adapter') or '', r.get('model') or ''
+        if not adapter or not model:
+            continue
+        spec = f'{adapter}|{model}'
+        if spec not in out:
+            out.append(spec)
+    return out
+
+
 def _save_transcript(agents: list, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(path, 'wt', encoding='utf-8') as fh:
@@ -373,7 +440,9 @@ def _save_transcript(agents: list, path: Path) -> None:
 
 def run_case(case: Case, base_state: session.SessionState,
              adapters: list[Adapter], out_dir: Path,
-             fixtures_dir: Optional[Path] = None) -> CaseResult:
+             fixtures_dir: Optional[Path] = None,
+             routing: Optional[Routing] = None,
+             allow_spend: bool = False) -> CaseResult:
     """Run one case and evaluate it; never raises for a failing run.
 
     Synchronous entry point: drives its own asyncio loop, so it must not be
@@ -381,13 +450,16 @@ def run_case(case: Case, base_state: session.SessionState,
     with anything else that uses the process cwd or ``guru.config``.
     Writes ``out_dir/transcripts/<case>.json.gz`` and appends this case's
     ledger rows under ``out_dir/ledger``. A timeout is detected as the
-    bench does: wall time reached ``case.timeout_s``.
+    bench does: wall time reached ``case.timeout_s``. ``routing`` routes
+    sub-agents (see :class:`Routing`); ``allow_spend`` grants remote spend
+    for the case.
     """
     _assert_no_running_loop('run_case')
     out_dir = Path(out_dir)
     repo = JsonlLedger(out_dir / 'ledger')
     repo.dir.mkdir(parents=True, exist_ok=True)
     rows_before = len(repo.rows('calls'))
+    tasks_before = len(repo.rows('tasks'))
     workdir = Path(tempfile.mkdtemp(prefix=f'guru-eval-{case.name}-'))
     agents: list = []
     error = ''
@@ -398,7 +470,8 @@ def run_case(case: Case, base_state: session.SessionState,
         copy = prepare_fixture(case.fixture, workdir, fixtures_dir)
         try:
             agents, seconds, error = _execute(case, copy, base_state,
-                                              adapters, repo)
+                                              adapters, repo, routing,
+                                              allow_spend)
         except Exception as e:                       # noqa: BLE001
             error = str(e) or type(e).__name__
         changed = files_changed(copy)
@@ -417,7 +490,8 @@ def run_case(case: Case, base_state: session.SessionState,
         case=case.name, passed=checks.passed(results),
         checks=[asdict(r) for r in results], observed=asdict(obs),
         rubric=case.expect.rubric, transcript_path=str(tpath),
-        cost_usd=_cost(repo.rows('calls')[rows_before:]))
+        cost_usd=_cost(repo.rows('calls')[rows_before:]),
+        routes=_routes(repo.rows('tasks')[tasks_before:]))
 
 
 # --- the suite --------------------------------------------------------------
@@ -433,12 +507,33 @@ def git_sha() -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ''
 
 
+@contextlib.contextmanager
+def _scanner_for(routing: Optional[RoutingSettings]) -> Iterator[None]:
+    """Bind the secret scanner as ``cli.load_routing`` does for the TUI:
+    on when the table is present and ``secret_scan`` is set; both
+    ``config.SECRET_SCAN`` and the scanner are restored afterwards. No-op
+    without routing."""
+    if routing is None:
+        yield
+        return
+    prev_flag, prev_scanner = config.SECRET_SCAN, policy.scanner()
+    scan = routing.present and routing.secret_scan
+    config.SECRET_SCAN = scan
+    policy.set_scanner(load_project_scanner() if scan else None)
+    try:
+        yield
+    finally:
+        config.SECRET_SCAN = prev_flag
+        policy.set_scanner(prev_scanner)
+
+
 def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               base_state: Optional[session.SessionState] = None,
               adapters: Optional[list[Adapter]] = None, note: str = '',
               on_result: Optional[Callable[[CaseResult], None]] = None,
               trajectory_dir: Path = DEFAULT_TRAJECTORY_DIR,
-              num_ctx: int = 0) -> Run:
+              num_ctx: int = 0, routing: Optional[RoutingSettings] = None,
+              routing_name: str = '', allow_spend: bool = False) -> Run:
     """Run every case, save the run file and append the trajectory row.
 
     Synchronous; see :func:`run_case` for the loop and concurrency rules.
@@ -447,7 +542,10 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     ``trajectory_dir/TRAJECTORY.md`` (default ``evals/TRAJECTORY.md``).
     ``on_result`` runs after each case. ``num_ctx`` pins the context when
     the base state is resolved here (see :func:`resolve_base`); the run
-    records the context the base state ended up with.
+    records the context the base state ended up with. ``routing`` (with
+    ``routing_name``, the file stem recorded on the run) activates
+    sub-agent routing over a registry of ``adapters`` and binds the secret
+    scanner for the duration; ``allow_spend`` grants remote spend.
     """
     _assert_no_running_loop('run_suite')
     skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
@@ -459,18 +557,24 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     elif not model_spec or model_spec == cases.DEFAULT_MODEL:
         model_spec = (f'{getattr(base_state.adapter, "name", "?")}'
                       f'|{base_state.model}')
+    routed = (Routing(routing, registry_from(adapters), routing_name)
+              if routing is not None else None)
     run_id = runs.new_run_id()
     ts = runs.now_ts()
     out_dir = out_root / run_id
     results: list[CaseResult] = []
-    for case in suite:
-        res = run_case(case, base_state, adapters, out_dir)
-        results.append(res)
-        if on_result is not None:
-            on_result(res)
+    with _scanner_for(routing):
+        for case in suite:
+            res = run_case(case, base_state, adapters, out_dir,
+                           routing=routed, allow_spend=allow_spend)
+            results.append(res)
+            if on_result is not None:
+                on_result(res)
     run = Run(run_id=run_id, ts=ts, model=model_spec, git_sha=git_sha(),
               cases=results,
-              num_ctx=base_state.num_ctx or base_state.num_ctx_override)
+              num_ctx=base_state.num_ctx or base_state.num_ctx_override,
+              routing=routing_name if routing is not None else '',
+              controller=bool(routing is not None and routing.controller))
     runs.save(run, out_root)
     runs.append_trajectory(run, Path(trajectory_dir), note=note)
     return run

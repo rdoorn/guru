@@ -4,9 +4,19 @@ Bundled defaults were verified against the live Anthropic pricing page on
 2026-09-23; ``[pricing."<model>"]`` in settings.toml overrides any field.
 Lookup is exact model ID first, then the longest table key contained in the
 ID (LiteLLM route names such as ``anthropic/claude-sonnet-5``).
+
+Bedrock/LiteLLM-style ids are normalised first (:func:`normalise_model_id`):
+provider prefixes (``aws/``, ``anthropic/``, ``anthropic.``, ``bedrock/``)
+and a trailing ``-YYYYMMDD`` date are stripped, and a version-first name
+such as ``claude-5-sonnet`` or ``claude-4-5-haiku`` is reordered to the
+first-party form (``claude-sonnet-5``, ``claude-haiku-4-5``). Prices for
+those aliases are the first-party table; Bedrock partner pricing may
+differ, so a cost computed through an alias is an approximation. Override
+per model with ``[pricing."<model>"]`` when the exact figure matters.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -46,6 +56,12 @@ class Usage:
 REQUIRED_FOR_NEW = ('input_per_m', 'output_per_m')
 _warned: set = set()
 
+# Provider prefixes stripped (repeatedly) from Bedrock/LiteLLM route names.
+PROVIDER_PREFIXES = ('aws/', 'anthropic/', 'anthropic.', 'bedrock/')
+_DATE_SUFFIX = re.compile(r'-\d{8}$')
+# ``claude-5-sonnet`` / ``claude-4-5-haiku``: version before the family.
+_VERSION_FIRST = re.compile(r'claude-(\d+(?:-\d+)?)-(opus|sonnet|haiku)\b')
+
 
 def _table() -> dict:
     """Bundled table with settings.toml overrides merged per field.
@@ -69,15 +85,54 @@ def _table() -> dict:
     return table
 
 
-def prices_for(model: str) -> Optional[dict]:
-    """Return the price dict for ``model`` or None if unknown."""
-    table = _table()
+def _strip_provider(model: str) -> str:
+    stripped = True
+    while stripped:
+        stripped = False
+        for prefix in PROVIDER_PREFIXES:
+            if model.startswith(prefix):
+                model = model[len(prefix):]
+                stripped = True
+    return model
+
+
+def _lookup(table: dict, model: str) -> Optional[str]:
+    """The table key for ``model``: exact, else the longest key contained."""
     if model in table:
-        return table[model]
+        return model
     hits = [k for k in table if k in model]
-    if not hits:
-        return None
-    return table[max(hits, key=len)]
+    return max(hits, key=len) if hits else None
+
+
+def normalise_model_id(model: str) -> str:
+    """Map a provider-flavoured id onto the table key it stands for.
+
+    Strips provider prefixes and a trailing date, tries an exact/contained
+    match, then reorders a version-first name (``claude-5-sonnet`` ->
+    ``claude-sonnet-5``) and tries again. An id that matches nothing is
+    returned stripped (prefixes/date) but otherwise unchanged.
+    """
+    table = _table()
+    bare = _DATE_SUFFIX.sub('', _strip_provider(model))
+    key = _lookup(table, bare)
+    if key is not None:
+        return key
+    reordered = _VERSION_FIRST.sub(r'claude-\2-\1', bare)
+    key = _lookup(table, reordered)
+    return key if key is not None else bare
+
+
+def prices_for(model: str) -> Optional[dict]:
+    """Return the price dict for ``model`` or None if unknown.
+
+    ``model`` may be a first-party id, a LiteLLM route name or a Bedrock
+    alias (see :func:`normalise_model_id`).
+    """
+    table = _table()
+    key = _lookup(table, model)
+    if key is None:
+        key = _lookup(table, normalise_model_id(model))
+    return table[key] if key is not None else None
 
 
 def cost_usd(model: str, usage: Usage, local: bool = False) -> Optional[float]:

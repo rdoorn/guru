@@ -101,3 +101,21 @@ class TestCliWiring:
         reg = AdapterRegistry()
         assert Orchestrator(registry=reg).registry is reg
         assert Orchestrator().registry is None
+
+
+class TestRegistryFrom:
+    """``registry_from``: the registry over built adapters, enabled or not."""
+
+    def test_keeps_every_adapter_in_order(self) -> None:
+        from guru.repositories.adapters import registry_from
+        a = FakeAdapter('A', remote=True)
+        b = FakeAdapter('B', remote=False, enabled=False)
+        reg = registry_from([a, b])
+        assert isinstance(reg, AdapterRegistry)
+        assert reg.names() == ['A', 'B']
+        assert reg.get('B') is b and reg.is_remote('B') is False
+
+    def test_cli_build_registry_delegates(self) -> None:
+        from guru import cli
+        a = FakeAdapter('A')
+        assert cli.build_registry([a]).get('A') is a

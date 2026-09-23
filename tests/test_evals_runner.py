@@ -21,6 +21,7 @@ from guru.evals import cases, runner, runs
 from guru.evals.__main__ import main as cli_main
 from guru.evals.cases import Case, Expect
 from guru.repositories.jsonl_ledger import JsonlLedger
+from guru.repositories.settings import RoutingSettings
 
 FIXTURES = Path(__file__).resolve().parents[1] / 'evals' / 'fixtures'
 
@@ -641,12 +642,15 @@ class TestCli:
             'name = "b"\nfixture = "docs-only"\nprompt = "hi"\n')
 
         def fake_suite(suite, model_spec, out_root, base_state=None,
-                       adapters=None, note='', on_result=None, num_ctx=0):
+                       adapters=None, note='', on_result=None, num_ctx=0,
+                       routing=None, routing_name='', allow_spend=False):
             assert [c.name for c in suite] == ['a']
             assert callable(on_result)
             assert model_spec == 'Fake|m'
             assert note == 'n1'
             assert num_ctx == 4096
+            assert routing is None and routing_name == ''
+            assert allow_spend is False
             r = runs.Run(run_id='rid', ts=runs.now_ts(), model=model_spec,
                          git_sha='', num_ctx=num_ctx, cases=[runs.CaseResult(
                              case='a', passed=False,
@@ -996,3 +1000,293 @@ class TestGuards:
 
         asyncio.run(inside())
         assert not list(tmp_path.iterdir())
+
+
+ROUTING_TOML = '''
+[routing]
+mode = "local-and-remote"
+controller = true
+complexity_router = true
+spend_confirm = "auto"
+secret_scan = true
+
+[[routing.ladder]]
+adapter = "Fake"
+model = "small"
+max_complexity = "standard"
+default = true
+
+[[routing.ladder]]
+adapter = "Remote"
+model = "aws/claude-5-sonnet"
+max_complexity = "hard"
+'''
+
+
+class TestRoutingFile:
+    """``runner.load_routing_file``: a ``[routing]`` table as in
+    settings.toml."""
+
+    def test_parses_table(self, tmp_path: Path) -> None:
+        p = tmp_path / 'exp.toml'
+        p.write_text(ROUTING_TOML)
+        rs = runner.load_routing_file(p)
+        assert rs.present is True and rs.controller is True
+        assert rs.spend_confirm == 'auto'
+        assert [r.model for r in rs.ladders['default']] == [
+            'small', 'aws/claude-5-sonnet']
+
+    @pytest.mark.parametrize('text, match', [
+        ('mode = "x"\n', r'no \[routing\] table'),
+        ('[routing]\nmode = "bogus"\n', 'mode'),
+        ('[routing]\nnope = 1\n', 'unknown keys'),
+        ('[routing\n', 'invalid TOML'),
+    ])
+    def test_invalid_raises_value_error(self, tmp_path: Path, text: str,
+                                        match: str) -> None:
+        p = tmp_path / 'bad.toml'
+        p.write_text(text)
+        with pytest.raises(ValueError, match=match):
+            runner.load_routing_file(p)
+
+    def test_missing_file_raises_value_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match='no-such'):
+            runner.load_routing_file(tmp_path / 'no-such.toml')
+
+
+@pytest.fixture
+def routed(monkeypatch):
+    """Like ``canned`` but records the routing wiring, the spend asker, the
+    scanner state and lets a test write ledger ``tasks`` rows."""
+    from guru.domain import policy, spend
+    seen: dict = {}
+
+    async def fake_run(self, prompt, timeout=None):
+        seen['registry'] = self.registry
+        seen['routing'] = self._routing_settings
+        seen['controller'] = self.controller
+        seen['spend_asker'] = spend._asker
+        seen['spend_granted'] = spend._asker(spend.QUESTION) \
+            if spend._asker is not None else None
+        seen['secret_scan'] = config.SECRET_SCAN
+        seen['scanner'] = policy.scanner()
+        for row in seen.get('tasks', []):
+            ledger.repository().append('tasks', row)
+        return _canned_agents()
+
+    monkeypatch.setattr(bench.BenchRun, 'run', fake_run)
+    return seen
+
+
+def _routing(**kw) -> RoutingSettings:
+    return RoutingSettings(present=True, **kw)
+
+
+class TestRunCaseRouting:
+    def test_inert_without_routing(self, tmp_path: Path, routed) -> None:
+        from guru.domain import spend
+        spend.set_spend_asker(None)
+        base = _base()
+        runner.run_case(_case(), base, [base.adapter], tmp_path)
+        assert routed['registry'] is None
+        assert routed['routing'] is None
+        assert routed['controller'] is False
+        assert routed['spend_asker'] is runner._deny
+        assert routed['spend_granted'] is False
+        assert spend._asker is None                  # restored
+
+    def test_registry_routing_and_controller(self, tmp_path: Path,
+                                             routed) -> None:
+        from guru.repositories.adapters import AdapterRegistry
+        base = _base()
+        settings = _routing(controller=True)
+        routing = runner.Routing(settings, AdapterRegistry([base.adapter]),
+                                 name='exp')
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path,
+                              routing=routing)
+        assert routed['registry'] is routing.registry
+        assert routed['registry'].get('Fake') is base.adapter
+        assert routed['routing'] is settings
+        assert routed['controller'] is True
+        assert res.routes == []
+
+    def test_allow_spend_grants_and_restores(self, tmp_path: Path,
+                                             routed) -> None:
+        from guru.domain import spend
+        sentinel = object()
+        spend.set_spend_asker(sentinel)      # type: ignore[arg-type]
+        try:
+            base = _base()
+            runner.run_case(_case(), base, [base.adapter], tmp_path,
+                            allow_spend=True)
+            assert routed['spend_granted'] is True
+            assert spend._asker is sentinel
+        finally:
+            spend.set_spend_asker(None)
+
+    def test_routes_are_distinct_task_adapter_models(self, tmp_path: Path,
+                                                     routed) -> None:
+        routed['tasks'] = [
+            {'task_id': 't1', 'adapter': 'Fake', 'model': 'small',
+             'status': 'running'},
+            {'task_id': 't1', 'adapter': 'Fake', 'model': 'small',
+             'status': 'done'},
+            {'task_id': 't2', 'adapter': 'Remote',
+             'model': 'aws/claude-5-sonnet', 'status': 'running'},
+            {'task_id': 't3', 'adapter': '', 'model': '',
+             'status': 'refused'},
+            {'task_id': 't4', 'adapter': 'Fake', 'model': 'small',
+             'status': 'running'},
+        ]
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path)
+        assert res.routes == ['Fake|small', 'Remote|aws/claude-5-sonnet']
+        # only this case's rows count
+        routed['tasks'] = []
+        res2 = runner.run_case(_case(name='second'), base, [base.adapter],
+                               tmp_path)
+        assert res2.routes == []
+
+
+class TestRunSuiteRouting:
+    def test_records_routing_and_builds_registry(self, tmp_path: Path,
+                                                 routed) -> None:
+        from guru.repositories.adapters import AdapterRegistry
+        base = _base()
+        settings = _routing(controller=True, secret_scan=False)
+        run = runner.run_suite([_case(name='a')], 'Fake|base-model',
+                               tmp_path, base_state=base,
+                               adapters=[base.adapter],
+                               trajectory_dir=tmp_path, routing=settings,
+                               routing_name='exp-b')
+        assert run.routing == 'exp-b' and run.controller is True
+        assert isinstance(routed['registry'], AdapterRegistry)
+        assert routed['registry'].get('Fake') is base.adapter
+        assert routed['routing'] is settings
+        assert run.model_label() == 'Fake|base-model+routed:exp-b+controller'
+        assert runs.load(next(tmp_path.glob('*.json'))).routing == 'exp-b'
+        traj = (tmp_path / runs.TRAJECTORY_FILE).read_text()
+        assert '+routed:exp-b+controller' in traj
+
+    def test_without_routing_records_defaults(self, tmp_path: Path,
+                                              routed) -> None:
+        base = _base()
+        run = runner.run_suite([_case(name='a')], 'Fake|base-model',
+                               tmp_path, base_state=base,
+                               adapters=[base.adapter],
+                               trajectory_dir=tmp_path)
+        assert run.routing == '' and run.controller is False
+        assert routed['registry'] is None
+
+    @pytest.mark.parametrize('scan', [True, False])
+    def test_secret_scan_follows_routing_and_is_restored(
+            self, tmp_path: Path, routed, monkeypatch, scan: bool) -> None:
+        from guru.domain import policy
+        monkeypatch.setattr(config, 'SECRET_SCAN', not scan)
+        before = object()
+        policy.set_scanner(before)          # type: ignore[arg-type]
+        try:
+            base = _base()
+            runner.run_suite([_case(name='a')], 'Fake|base-model', tmp_path,
+                             base_state=base, adapters=[base.adapter],
+                             trajectory_dir=tmp_path,
+                             routing=_routing(secret_scan=scan))
+            assert routed['secret_scan'] is scan
+            assert (routed['scanner'] is not None) is scan
+            assert routed['scanner'] is not before
+            assert config.SECRET_SCAN is (not scan)
+            assert policy.scanner() is before
+        finally:
+            policy.set_scanner(None)
+
+    def test_without_routing_scanner_untouched(self, tmp_path: Path,
+                                               routed, monkeypatch) -> None:
+        from guru.domain import policy
+        monkeypatch.setattr(config, 'SECRET_SCAN', False)
+        policy.set_scanner(None)
+        base = _base()
+        runner.run_suite([_case(name='a')], 'Fake|base-model', tmp_path,
+                         base_state=base, adapters=[base.adapter],
+                         trajectory_dir=tmp_path)
+        assert routed['secret_scan'] is False and routed['scanner'] is None
+
+
+class TestCliRouting:
+    def _cases_dir(self, tmp_path: Path) -> Path:
+        cdir = tmp_path / 'cases'
+        cdir.mkdir()
+        (cdir / 'a.toml').write_text(
+            'name = "a"\nfixture = "docs-only"\nprompt = "hi"\n')
+        return cdir
+
+    def test_routing_file_is_parsed_and_passed(self, tmp_path: Path, capsys,
+                                               monkeypatch) -> None:
+        from guru.repositories import settings as rs
+        cdir = self._cases_dir(tmp_path)
+        rfile = tmp_path / 'exp-b.toml'
+        rfile.write_text(ROUTING_TOML)
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            r = runs.Run(run_id='rid', ts=runs.now_ts(), model='Fake|m',
+                         git_sha='', routing=kw['routing_name'],
+                         controller=kw['routing'].controller,
+                         cases=[runs.CaseResult(
+                             case='a', passed=True, checks=[],
+                             observed={'seconds': 1.0}, rubric='',
+                             transcript_path='t', cost_usd=0.0,
+                             routes=['Fake|small', 'Remote|big'])])
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['run', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path / 'r'), '--model', 'Fake|m',
+                         '--routing', str(rfile)])
+        assert code == 0
+        assert isinstance(seen['routing'], rs.RoutingSettings)
+        assert seen['routing'].controller is True
+        assert seen['routing_name'] == 'exp-b'
+        assert seen['allow_spend'] is False
+        out = capsys.readouterr().out
+        assert 'routes: Fake|small, Remote|big' in out
+        assert 'model Fake|m+routed:exp-b+controller' in out
+        assert 'routing exp-b (controller)' in out
+
+    def test_allow_spend_flag(self, tmp_path: Path, monkeypatch) -> None:
+        cdir = self._cases_dir(tmp_path)
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            return runs.Run(run_id='rid', ts=runs.now_ts(), model='m',
+                            git_sha='', cases=[])
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path), '--allow-spend']) == 0
+        assert seen['allow_spend'] is True
+        assert seen['routing'] is None and seen['routing_name'] == ''
+
+    def test_missing_or_invalid_routing_file_is_usage_error(
+            self, tmp_path: Path, capsys) -> None:
+        cdir = self._cases_dir(tmp_path)
+        assert cli_main(['run', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path),
+                         '--routing', str(tmp_path / 'nope.toml')]) == 2
+        assert 'nope.toml' in capsys.readouterr().err
+        bad = tmp_path / 'bad.toml'
+        bad.write_text('[routing]\nmode = "bogus"\n')
+        assert cli_main(['run', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path),
+                         '--routing', str(bad)]) == 2
+        assert 'mode' in capsys.readouterr().err
+
+    def test_routed_run_without_spawns_shows_dash(self) -> None:
+        from guru.evals import __main__ as cli
+        res = runs.CaseResult(case='x', passed=True, checks=[],
+                              observed={'seconds': 1.0}, rubric='',
+                              transcript_path='t', cost_usd=None)
+        assert cli._row(res, routed=True)[-1] == 'routes: -'
+        assert cli._row(res, routed=False)[-1] == ''

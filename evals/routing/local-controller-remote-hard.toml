@@ -1,0 +1,31 @@
+# Experiment C: a local controller decomposes, remote only for hard tasks.
+#
+# Run with the controller on the local adapter (whatever --model gives,
+# e.g. --model 'Ollama|huihui_ai/qwen3-abliterated:8b'). Same ladder as
+# experiment B: trivial and standard tasks stay local, hard tasks go to the
+# remote rung. The adapter names below must match the `name` of an
+# [[adapter]] in ~/.guru/adapters.toml.
+
+[routing]
+mode = "local-and-remote"
+controller = true
+complexity_router = true
+type_router = false
+spend_confirm = "auto"
+secret_scan = true
+
+[[routing.ladder]]
+adapter = "Ollama"
+model = "huihui_ai/qwen3-abliterated:8b"
+max_complexity = "trivial"
+
+[[routing.ladder]]
+adapter = "Ollama"
+model = "huihui_ai/qwen3-abliterated:8b"
+max_complexity = "standard"
+default = true
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "hard"

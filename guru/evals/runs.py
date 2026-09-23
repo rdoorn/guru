@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +31,10 @@ class CaseResult:
     rubric: str
     transcript_path: str
     cost_usd: Optional[float]
+    # Distinct ``Adapter|model`` the case's sub-agent tasks ran on (from the
+    # ledger ``tasks`` rows); empty when nothing was spawned or for run
+    # files from before this field.
+    routes: list[str] = field(default_factory=list)
 
     @property
     def seconds(self) -> float:
@@ -49,11 +53,23 @@ class Run:
     # Context window the suite's model was loaded at (0 = unknown; run
     # files from before this field load with 0).
     num_ctx: int = 0
+    # Routing file stem the run used ('' = no routing, inert) and whether
+    # the main agent ran as a controller; older run files load with the
+    # defaults.
+    routing: str = ''
+    controller: bool = False
 
     def model_label(self) -> str:
-        """``Adapter|model`` plus ``@<ctx>`` when the context is known."""
+        """``Adapter|model`` plus ``@<ctx>`` when the context is known,
+        ``+routed:<file>`` when a routing file was used and ``+controller``
+        when the main agent was a controller."""
         label = ctx_label(self.num_ctx)
-        return f'{self.model}@{label}' if label else self.model
+        out = f'{self.model}@{label}' if label else self.model
+        if self.routing:
+            out += f'+routed:{self.routing}'
+        if self.controller:
+            out += '+controller'
+        return out
 
     def pass_rate(self) -> float:
         """Fraction of cases that passed; 0.0 for an empty run."""
