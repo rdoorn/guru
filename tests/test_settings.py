@@ -5,7 +5,8 @@ from guru import config
 from guru.domain.routing import Ladder, Rung
 from guru.repositories.adapters import AdapterRegistry
 from guru.repositories.settings import (
-    RoutingSettings, RungSpec, ladders_from_settings, load_routing)
+    RoutingSettings, RungSpec, ladders_from_settings, load_decisions,
+    load_routing)
 from tests.test_adapters_registry import FakeAdapter
 
 
@@ -210,3 +211,51 @@ class TestLaddersFromSettings:
 
     def test_empty_settings_gives_empty_ladders(self) -> None:
         assert ladders_from_settings(load_routing({}), self._registry()) == {}
+
+
+class TestDecisionsSettings:
+    """``load_decisions``: the ``[decisions]`` table of an experiment file
+    (mode + points/active/thresholds sub-tables)."""
+
+    def test_empty_section_gives_off_defaults(self) -> None:
+        from guru.repositories.settings import DecisionsSettings
+        s = load_decisions({})
+        assert s == DecisionsSettings()
+        assert s.mode == 'off' and s.points == {} and s.active == {} \
+            and s.thresholds == {}
+
+    def test_full_table_parsed(self) -> None:
+        s = load_decisions({
+            'mode': 'shadow',
+            'points': {'panel': 'encoder', 'injection': 'injection'},
+            'active': {'stall': True},
+            'thresholds': {'stall': 0.7, 'panel': 1}})
+        assert s.mode == 'shadow'
+        assert s.points == {'panel': 'encoder', 'injection': 'injection'}
+        assert s.active == {'stall': True}
+        assert s.thresholds == {'stall': 0.7, 'panel': 1.0}
+
+    @pytest.mark.parametrize('mode', ['bogus', 3, ''])
+    def test_bad_mode_raises(self, mode) -> None:
+        with pytest.raises(ValueError, match='mode'):
+            load_decisions({'mode': mode})
+
+    def test_unknown_keys_named(self) -> None:
+        with pytest.raises(ValueError, match='sidecar_model'):
+            load_decisions({'mode': 'shadow', 'sidecar_model': 'x'})
+
+    def test_points_must_map_to_strings(self) -> None:
+        with pytest.raises(ValueError, match='points'):
+            load_decisions({'points': {'stall': 3}})
+        with pytest.raises(ValueError, match='points'):
+            load_decisions({'points': 'encoder'})
+
+    def test_active_must_map_to_bools(self) -> None:
+        with pytest.raises(ValueError, match='active'):
+            load_decisions({'active': {'stall': 'yes'}})
+
+    def test_thresholds_must_map_to_numbers(self) -> None:
+        with pytest.raises(ValueError, match='thresholds'):
+            load_decisions({'thresholds': {'stall': True}})
+        with pytest.raises(ValueError, match='thresholds'):
+            load_decisions({'thresholds': {'stall': '0.7'}})

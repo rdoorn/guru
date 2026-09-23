@@ -1,7 +1,9 @@
 """Neutral conversation handling: save/resume and compaction (hybrid D).
 
 The neutral message format is the normalized dict
-``{role, content, tool_calls?, tool_name?}``. Adapters translate to/from it,
+``{role, content, tool_calls?, tool_name?, tool_args?}`` (``tool_args``,
+the call's arguments, is kept in memory only for the delegation nudge and
+is not persisted). Adapters translate to/from it,
 so these operations are provider-independent.
 """
 import ast

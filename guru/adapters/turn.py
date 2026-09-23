@@ -30,6 +30,7 @@ Each adapter supplies three closures over its per-turn state:
 ``add_user(text)``
     Append a user turn (the nudge) to both histories.
 """
+import os
 import re
 import time
 
@@ -70,23 +71,55 @@ _DELEGATION_TEXT = (
 )
 
 
-def _should_delegate() -> bool:
-    """True when a delegation-capable main agent has read enough files to make
-    a domain panel worthwhile but has not spawned a single sub-agent — the cue
-    for the one-time delegation nudge. Gated on file reads so trivial Q&A never
-    triggers it. Disabled when DELEGATION_NUDGE_MIN_READS is 0."""
-    if not session.can_spawn or config.DELEGATION_NUDGE_MIN_READS <= 0:
+# A request shaped like a single edit: an edit verb and at most one
+# file-like token. Such a task is never a review panel (triage
+# 1f4f8262a80a: a one-file fix was nudged into a two-agent panel).
+_EDIT_VERB_RE = re.compile(
+    r"\b(fix|edit|rename|change|update|patch)\b", re.IGNORECASE)
+_FILE_TOKEN_RE = re.compile(
+    r"\S+\.(?:py|md|toml|txt|js|ts|json|yaml|yml)\b", re.IGNORECASE)
+
+
+def _single_target_request(request: str) -> bool:
+    """True for an edit-shaped request naming at most one file."""
+    if not _EDIT_VERB_RE.search(request):
         return False
-    reads = 0
+    return len(set(_FILE_TOKEN_RE.findall(request))) <= 1
+
+
+def _distinct_reads() -> int:
+    """Distinct paths this conversation read with the read tools (by the
+    ``path`` argument recorded on tool messages); -1 once a spawn ran."""
+    paths: set = set()
     for m in session.messages:
         if not isinstance(m, dict) or m.get('role') != 'tool':
             continue
         name = m.get('tool_name', '')
         if name == 'spawn':
-            return False                 # already delegated — leave it alone
-        if name in config.DELEGATION_READ_TOOLS:
-            reads += 1
-    return reads >= config.DELEGATION_NUDGE_MIN_READS
+            return -1                    # already delegated — leave it alone
+        if name not in config.DELEGATION_READ_TOOLS:
+            continue
+        args = m.get('tool_args')
+        path = args.get('path') if isinstance(args, dict) else None
+        if path:
+            paths.add(os.path.normpath(str(path)))
+    return len(paths)
+
+
+def _should_delegate() -> bool:
+    """True when a delegation-capable main agent has read enough distinct
+    files to make a domain panel worthwhile, the request is not a
+    single-target edit, and it has not spawned a single sub-agent — the cue
+    for the one-time delegation nudge. Never for a controller (it has no
+    read tools and must delegate anyway) and disabled when
+    DELEGATION_NUDGE_MIN_READS is 0."""
+    if (session.controller or not session.can_spawn
+            or config.DELEGATION_NUDGE_MIN_READS <= 0):
+        return False
+    reads = _distinct_reads()
+    if reads < config.DELEGATION_NUDGE_MIN_READS:
+        return False
+    return not _single_target_request(_turn_request())
 
 
 def looks_like_preamble(content: str) -> bool:
@@ -177,6 +210,8 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     """
     session.cancel_requested = False
     session.last_error = ''          # this turn's provider failure, if any
+    session.turn_waiting = False     # set by join/check (orchestrator)
+    session.check_polls = 0
     if not session.task_id:
         # A sub-agent executing a task keeps the turn_id it inherited.
         session.turn_id = ledger.new_turn_id()
@@ -263,3 +298,10 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list) -> str:
                 called.add(key)
             pending.append((name, args, ref, duplicate))
         run_tools(pending)
+        if session.turn_waiting:
+            # A join opened a barrier (or check kept polling running
+            # sub-agents): stop here instead of another model round. No
+            # answer is rendered; the mailbox resumes this agent with the
+            # results.
+            ui.console.print("[dim]\\[waiting for sub-agents][/dim]")
+            return ''

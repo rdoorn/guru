@@ -643,8 +643,10 @@ class TestCli:
 
         def fake_suite(suite, model_spec, out_root, base_state=None,
                        adapters=None, note='', on_result=None, num_ctx=0,
-                       routing=None, routing_name='', allow_spend=False):
+                       routing=None, routing_name='', allow_spend=False,
+                       decisions=None):
             assert [c.name for c in suite] == ['a']
+            assert decisions is None
             assert callable(on_result)
             assert model_spec == 'Fake|m'
             assert note == 'n1'
@@ -1054,6 +1056,53 @@ class TestRoutingFile:
             runner.load_routing_file(tmp_path / 'no-such.toml')
 
 
+DECISIONS_TOML = """
+[decisions]
+mode = "shadow"
+
+[decisions.points]
+panel = "encoder"
+injection = "injection"
+"""
+
+
+class TestDecisionsFile:
+    """``runner.load_decisions_file``: the optional ``[decisions]`` table
+    of an experiment file."""
+
+    def test_parses_table(self, tmp_path: Path) -> None:
+        p = tmp_path / 'exp.toml'
+        p.write_text(ROUTING_TOML + DECISIONS_TOML)
+        ds = runner.load_decisions_file(p)
+        assert ds is not None
+        assert ds.mode == 'shadow'
+        assert ds.points == {'panel': 'encoder', 'injection': 'injection'}
+        assert ds.active == {} and ds.thresholds == {}
+        # the same file still parses as a routing file
+        assert runner.load_routing_file(p).controller is True
+
+    def test_no_table_is_none(self, tmp_path: Path) -> None:
+        p = tmp_path / 'exp.toml'
+        p.write_text(ROUTING_TOML)
+        assert runner.load_decisions_file(p) is None
+
+    @pytest.mark.parametrize('text, match', [
+        ('[decisions]\nmode = "bogus"\n', 'mode'),
+        ('[decisions]\nmode = "shadow"\nnope = 1\n', 'unknown keys'),
+        ('[decisions\n', 'invalid TOML'),
+    ])
+    def test_invalid_raises_value_error(self, tmp_path: Path, text: str,
+                                        match: str) -> None:
+        p = tmp_path / 'bad.toml'
+        p.write_text(text)
+        with pytest.raises(ValueError, match=match):
+            runner.load_decisions_file(p)
+
+    def test_missing_file_raises_value_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match='no-such'):
+            runner.load_decisions_file(tmp_path / 'no-such.toml')
+
+
 @pytest.fixture
 def routed(monkeypatch):
     """Like ``canned`` but records the routing wiring, the spend asker, the
@@ -1211,6 +1260,114 @@ class TestRunSuiteRouting:
         assert routed['secret_scan'] is False and routed['scanner'] is None
 
 
+@pytest.fixture
+def judged(monkeypatch):
+    """Like ``canned`` but records the decision seam as the run saw it."""
+    from guru.domain import decisions as seam
+    seen: dict = {}
+
+    async def fake_run(self, prompt, timeout=None):
+        seen['mode'] = config.DECISIONS_MODE
+        seen['points'] = dict(config.DECISIONS_POINTS)
+        seen['active'] = dict(config.DECISIONS_ACTIVE)
+        seen['thresholds'] = dict(config.DECISIONS_THRESHOLDS)
+        seen['judges'] = dict(seam._judges)
+        return _canned_agents()
+
+    monkeypatch.setattr(bench.BenchRun, 'run', fake_run)
+    return seen
+
+
+def _decisions(**kw):
+    from guru.repositories.settings import DecisionsSettings
+    return DecisionsSettings(**kw)
+
+
+class TestRunSuiteJudges:
+    """``run_suite(decisions=...)`` installs the experiment's judges for the
+    run and restores the process afterwards."""
+
+    @pytest.fixture(autouse=True)
+    def _off(self, monkeypatch):
+        from guru.domain import decisions as seam
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
+        monkeypatch.setattr(config, 'DECISIONS_POINTS', {'stall': 'ollama'})
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {})
+        monkeypatch.setattr(config, 'DECISIONS_THRESHOLDS', {})
+        seam.clear_judges()
+        yield
+        seam.clear_judges()
+
+    def _run(self, tmp_path, decisions):
+        base = _base()
+        return runner.run_suite([_case(name='a')], 'Fake|base-model',
+                                tmp_path, base_state=base,
+                                adapters=[base.adapter],
+                                trajectory_dir=tmp_path,
+                                decisions=decisions)
+
+    def test_judges_installed_for_the_run_and_cleared(
+            self, tmp_path: Path, judged, monkeypatch) -> None:
+        from guru.domain import decisions as seam
+        from guru.judges import encoder
+        monkeypatch.setattr(encoder, 'available', lambda: True)
+        ds = _decisions(mode='shadow',
+                        points={'panel': 'encoder',
+                                'injection': 'injection'},
+                        thresholds={'panel': 0.6})
+        run = self._run(tmp_path, ds)
+        assert judged['mode'] == 'shadow'
+        assert judged['points'] == ds.points
+        assert judged['active'] == {}
+        assert judged['thresholds'] == {'panel': 0.6}
+        assert set(judged['judges']) == {'panel', 'injection'}
+        assert judged['judges']['panel'].name.startswith('encoder:')
+        assert run.judges == [
+            'panel=' + judged['judges']['panel'].name,
+            'injection=' + judged['judges']['injection'].name]
+        # restored
+        assert config.DECISIONS_MODE == 'off'
+        assert config.DECISIONS_POINTS == {'stall': 'ollama'}
+        assert config.DECISIONS_THRESHOLDS == {}
+        assert seam._judges == {}
+        # persisted and reloadable
+        assert runs.load(next(tmp_path.glob('*.json'))).judges == run.judges
+
+    def test_unavailable_judges_leave_the_list_empty(
+            self, tmp_path: Path, judged, monkeypatch) -> None:
+        from guru.judges import encoder
+        monkeypatch.setattr(encoder, 'available', lambda: False)
+        run = self._run(tmp_path, _decisions(
+            mode='shadow', points={'panel': 'encoder'}))
+        assert judged['mode'] == 'shadow' and judged['judges'] == {}
+        assert run.judges == []
+
+    def test_restored_when_a_case_raises(self, tmp_path: Path,
+                                         monkeypatch) -> None:
+        from guru.domain import decisions as seam
+        from guru.judges import encoder
+        monkeypatch.setattr(encoder, 'available', lambda: True)
+
+        def boom(*a, **k):
+            raise RuntimeError('boom')
+        monkeypatch.setattr(runner, 'run_case', boom)
+        with pytest.raises(RuntimeError):
+            self._run(tmp_path, _decisions(mode='shadow',
+                                           points={'panel': 'encoder'}))
+        assert config.DECISIONS_MODE == 'off' and seam._judges == {}
+
+    def test_without_decisions_seam_untouched(self, tmp_path: Path,
+                                              judged, monkeypatch) -> None:
+        from guru.domain import decisions as seam
+        marker = object()
+        seam.set_judge('stall', marker)      # type: ignore[arg-type]
+        run = self._run(tmp_path, None)
+        assert judged['mode'] == 'off'
+        assert judged['judges'] == {'stall': marker}
+        assert seam._judges == {'stall': marker}     # not cleared
+        assert run.judges == []
+
+
 class TestCliRouting:
     def _cases_dir(self, tmp_path: Path) -> Path:
         cdir = tmp_path / 'cases'
@@ -1254,6 +1411,45 @@ class TestCliRouting:
         assert 'model Fake|m+routed:exp-b+controller' in out
         assert 'routing exp-b (controller)' in out
 
+    def test_decisions_table_is_parsed_and_judges_printed(
+            self, tmp_path: Path, capsys, monkeypatch) -> None:
+        from guru.repositories import settings as rs
+        cdir = self._cases_dir(tmp_path)
+        rfile = tmp_path / 'exp-j.toml'
+        rfile.write_text(ROUTING_TOML + DECISIONS_TOML)
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            r = runs.Run(run_id='rid', ts=runs.now_ts(), model='Fake|m',
+                         git_sha='', routing=kw['routing_name'],
+                         controller=True, cases=[],
+                         judges=['panel=encoder:x', 'injection=injection:y'])
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['run', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path / 'r'), '--model', 'Fake|m',
+                         '--routing', str(rfile)])
+        assert code == 0
+        assert isinstance(seen['decisions'], rs.DecisionsSettings)
+        assert seen['decisions'].mode == 'shadow'
+        assert seen['decisions'].points == {'panel': 'encoder',
+                                            'injection': 'injection'}
+        out = capsys.readouterr().out
+        assert 'judges panel=encoder:x, injection=injection:y' in out
+
+    def test_bad_decisions_table_is_usage_error(self, tmp_path: Path,
+                                                capsys) -> None:
+        cdir = self._cases_dir(tmp_path)
+        bad = tmp_path / 'bad.toml'
+        bad.write_text(ROUTING_TOML + '[decisions]\nmode = "bogus"\n')
+        assert cli_main(['run', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path),
+                         '--routing', str(bad)]) == 2
+        assert 'mode' in capsys.readouterr().err
+
     def test_allow_spend_flag(self, tmp_path: Path, monkeypatch) -> None:
         cdir = self._cases_dir(tmp_path)
         seen: dict = {}
@@ -1268,6 +1464,7 @@ class TestCliRouting:
                          '--out', str(tmp_path), '--allow-spend']) == 0
         assert seen['allow_spend'] is True
         assert seen['routing'] is None and seen['routing_name'] == ''
+        assert seen['decisions'] is None
 
     def test_missing_or_invalid_routing_file_is_usage_error(
             self, tmp_path: Path, capsys) -> None:

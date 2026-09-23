@@ -76,6 +76,115 @@ class TestOrchestrator:
         assert main.queue[-1].startswith('SYNTH-LEAD')
         assert 'A1' in main.queue[-1]
 
+    def test_do_join_waiting_sets_turn_waiting(self) -> None:
+        """A join that opens a barrier flags the caller's turn as waiting
+        so the turn loop ends the turn instead of polling."""
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        o.manager.agents.append(self._agent('agent1', parent=main, busy=True))
+        assert main.state.turn_waiting is False
+        msg = o.do_join(main.state, ['agent1'])
+        assert 'Waiting for agent1' in msg
+        assert main.state.turn_waiting is True
+        assert main in o.barriers
+
+    def test_do_join_all_done_does_not_wait(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        o.manager.agents.append(self._agent('agent1', parent=main))
+        o.do_join(main.state, ['agent1'])
+        assert main.state.turn_waiting is False
+
+    def test_do_join_unknown_targets_do_not_wait(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        o.manager.agents.append(self._agent('agent1', parent=main, busy=True))
+        o.do_join(main.state, ['nope'])
+        assert main.state.turn_waiting is False
+
+    def test_do_check_third_all_running_poll_ends_the_turn(self) -> None:
+        """Polling running sub-agents: the first poll is plain, the second
+        tells the model to join, the third ends the turn like a join."""
+        from guru import orchestrator
+        o = orchestrator.Orchestrator()
+        main = o.manager.active
+        o.manager.agents += [
+            self._agent('agent1', parent=main, busy=True),
+            self._agent('agent2', parent=main, busy=True)]
+        first = o.do_check(main.state, 'all')
+        assert 'agent1: running' in first and 'join' not in first
+        assert main.state.check_polls == 1
+        assert main.state.turn_waiting is False
+        second = o.do_check(main.state, 'all')
+        assert 'agent1: running' in second and 'join' in second
+        assert main.state.check_polls == 2
+        assert main.state.turn_waiting is False
+        third = o.do_check(main.state, 'all')
+        assert third == orchestrator.CHECK_WAIT_TEXT
+        assert 'still running' in third and 'resumed' in third
+        assert main.state.turn_waiting is True
+        # The running children are joined so their results arrive together.
+        assert o.barriers[main]['remaining'] == {'agent1', 'agent2'}
+
+    def test_do_check_counter_resets_when_a_child_is_done(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        c1 = self._agent('agent1', parent=main, busy=True)
+        o.manager.agents += [c1, self._agent('agent2', parent=main,
+                                             busy=True)]
+        o.do_check(main.state, 'all')
+        o.do_check(main.state, 'all')
+        c1.busy = False
+        out = o.do_check(main.state, 'all')
+        assert 'agent1: done' in out and 'still running' not in out
+        assert main.state.check_polls == 0
+        assert main.state.turn_waiting is False
+        c1.busy = True
+        o.do_check(main.state, 'all')
+        o.do_check(main.state, 'all')
+        assert main.state.turn_waiting is False       # count restarted
+
+    def test_do_check_named_running_target_counts_too(self) -> None:
+        from guru import orchestrator
+        o = orchestrator.Orchestrator()
+        main = o.manager.active
+        o.manager.agents += [
+            self._agent('agent1', parent=main, busy=True),
+            self._agent('agent2', parent=main, busy=False)]
+        assert 'running' in o.do_check(main.state, 'agent1')
+        assert 'running' in o.do_check(main.state, 'agent1')
+        assert o.do_check(main.state, 'agent1') == \
+            orchestrator.CHECK_WAIT_TEXT
+        assert main.state.turn_waiting is True
+        assert o.barriers[main]['remaining'] == {'agent1'}   # not agent2
+
+    def test_do_check_waiting_merges_into_an_open_barrier(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        o.manager.agents += [
+            self._agent('agent1', parent=main, busy=True),
+            self._agent('agent2', parent=main, busy=True)]
+        o.barriers[main] = {'remaining': {'agent1'}, 'results': {}}
+        for _ in range(3):
+            o.do_check(main.state, 'agent2')
+        assert o.barriers[main]['remaining'] == {'agent1', 'agent2'}
+
+    def test_do_check_done_target_never_waits(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        o.manager.agents.append(self._agent('agent1', parent=main,
+                                            answer='A1'))
+        for _ in range(4):
+            out = o.do_check(main.state, 'agent1')
+        assert 'A1' in out and main.state.turn_waiting is False
+
     def test_spawn_panel_runs_children_and_synthesises(self) -> None:
         import asyncio
         from guru.adapters.base import Adapter

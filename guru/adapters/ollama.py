@@ -620,8 +620,11 @@ class OllamaAdapter(Adapter):
                            " Use the previous result.")
             else:
                 content = tools.execute_tool(name, arguments)
+            # tool_args is guru-only (the delegation nudge counts distinct
+            # paths from it); the Ollama client ignores unknown keys.
             session.messages.append(
-                {"role": "tool", "tool_name": name, "content": content})
+                {"role": "tool", "tool_name": name,
+                 "tool_args": dict(arguments or {}), "content": content})
 
     def _add_user(self, text: str) -> None:
         session.messages.append({"role": "user", "content": text})

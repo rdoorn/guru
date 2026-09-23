@@ -1,62 +1,91 @@
-# Routing experiment: does local steering cut remote cost?
+# Routing experiment: Claude tiers and shadow judges
 
-Three runs of the same suite, differing only in who plans and who works.
-Compare pass rate, seconds and cost (the run file, the `compare` output
-and the `TRAJECTORY.md` row carry all three; the table's `routes:` detail
-shows which `Adapter|model` each case's sub-agents ran on).
+Claude is the controller and every worker; local models are only small
+judges (design decision 10). Three runs of the same suite, differing only
+in how sub-agent tasks are routed and whether the judges observe. Compare
+pass rate, seconds and cost (the run file, the `compare` output and the
+`TRAJECTORY.md` row carry all three; the table's `routes:` detail shows
+which `Adapter|model` each case's sub-agents ran on, and the summary's
+`judges` field lists the judges a config-2 run installed).
 
-| run | controller (main agent) | workers | routing file |
+| config | main agent | workers | file |
 |---|---|---|---|
-| A | remote, no routing | remote (same model, inherited) | none |
-| B | remote (`--model`) | local 8B; hard tasks remote | `remote-controller-local-workers.toml` |
-| C | local (`--model`) | local 8B; hard tasks remote | `local-controller-remote-hard.toml` |
+| 0 | plain Sonnet, no routing | Sonnet (inherited) | none |
+| 1 | Sonnet controller | Claude tiers by complexity | `claude-tiers.toml` |
+| 2 | Sonnet controller | Claude tiers by complexity | `claude-tiers-judges.toml` |
 
-B and C carry the same ladder (trivial/standard on
-`Ollama|huihui_ai/qwen3-abliterated:8b`, hard on
-`SBP Litellm|aws/claude-5-sonnet`); the controller model is whatever
-`--model` gives, so the two files exist to keep the run's `routing` label
-honest. Both set `controller = true` (the main agent only spawns, checks
-and joins), `spend_confirm = "auto"` (no prompt; `--allow-spend` is still
-required, see below) and `secret_scan = true`.
+Configs 1 and 2 carry the same ladder: trivial tasks on
+`SBP Litellm|aws/claude-4-5-haiku`, standard on
+`SBP Litellm|aws/claude-5-sonnet` (the default rung), hard on
+`SBP Litellm|aws/claude-5-5-opus`. Both set `controller = true` (the main
+agent only spawns, checks and joins), `spend_confirm = "auto"` (no prompt;
+`--allow-spend` is still required, see below) and `secret_scan = true`.
+Config 2 adds a `[decisions]` table: `mode = "shadow"` with the `panel`
+point on the `encoder` judge and the `injection` point on the `injection`
+judge, no sidecar LLM. In shadow mode the judges only log their verdicts
+next to the heuristic's in the ledger `decisions` stream (data collection
+for the review loop); they never change what the run does.
 
 The `adapter` in every rung must match the `name` of an `[[adapter]]` in
-`~/.guru/adapters.toml` exactly (here `Ollama` and `SBP Litellm`); a rung on
-an unknown adapter is dropped with a warning and the ladder shrinks.
+`~/.guru/adapters.toml` exactly (here `SBP Litellm`); a rung on an unknown
+adapter is dropped with a warning and the ladder shrinks.
+
+## Requirements
+
+- An `SBP Litellm` adapter in `~/.guru/adapters.toml` that serves the
+  three model ids above.
+- Config 2 only: the judge extra (`uv sync --extra judge`) for the encoder
+  judges. Without it the judges are skipped with a log line, the run
+  records `judges: []` and is otherwise identical to config 1.
 
 ## Commands
 
 Remote spend is denied by default in the eval runner; `--allow-spend`
-grants it for the run. Without it every remote rung is skipped and B/C
-degrade to all-local.
+grants it for the run. Without it every remote rung is skipped, and since
+every rung here is remote, sub-agents fall back to the controller's own
+(pre-approved) model.
 
 ```sh
-# A: all remote, no routing (baseline cost)
+# 0: plain Sonnet, no routing (baseline)
 .venv/bin/python -m guru.evals run --model 'SBP Litellm|aws/claude-5-sonnet' \
-    --allow-spend --note 'A: all remote'
+    --allow-spend --note '0: baseline, no routing'
 
-# B: remote controller, local workers (hard -> remote)
+# 1: Sonnet controller, Claude tiers for the workers
 .venv/bin/python -m guru.evals run --model 'SBP Litellm|aws/claude-5-sonnet' \
-    --routing evals/routing/remote-controller-local-workers.toml \
-    --allow-spend --note 'B: remote controller, local workers'
+    --routing evals/routing/claude-tiers.toml \
+    --allow-spend --note '1: claude tiers'
 
-# C: local controller, remote only for hard tasks
-.venv/bin/python -m guru.evals run --model 'Ollama|huihui_ai/qwen3-abliterated:8b' \
-    --routing evals/routing/local-controller-remote-hard.toml \
-    --allow-spend --note 'C: local controller, remote hard'
+# 2: as 1, plus panel/injection judges in shadow
+.venv/bin/python -m guru.evals run --model 'SBP Litellm|aws/claude-5-sonnet' \
+    --routing evals/routing/claude-tiers-judges.toml \
+    --allow-spend --note '2: claude tiers + shadow judges'
 
 # then
-.venv/bin/python -m guru.evals compare evals/runs/<A>.json evals/runs/<B>.json
-.venv/bin/python -m guru.evals compare evals/runs/<A>.json evals/runs/<C>.json
+.venv/bin/python -m guru.evals compare evals/runs/<0>.json evals/runs/<1>.json
+.venv/bin/python -m guru.evals compare evals/runs/<1>.json evals/runs/<2>.json
 ```
 
 Add `--tags fast` to any of them for the short gate. The run's model label
-reads `Adapter|model@ctx+routed:<file stem>+controller` for B and C.
+reads `Adapter|model+routed:<file stem>+controller` for configs 1 and 2;
+the run file's `judges` list (and the CLI summary) names the judges config
+2 installed, as `point=judge`.
 
 ## Reading the cost
 
-A case's cost is the sum of its ledger `calls` rows; local calls are $0.
-Remote ids such as `aws/claude-5-sonnet` are priced through the
-first-party table by alias (`guru/domain/pricing.py`); Bedrock partner
-pricing may differ, so treat the figure as an approximation and override
-per model with `[pricing."aws/claude-5-sonnet"]` in `settings.toml` when
-the exact rate matters.
+A case's cost is the sum of its ledger `calls` rows. Remote ids such as
+`aws/claude-5-sonnet` are priced through the first-party table by alias
+(`guru/domain/pricing.py`); Bedrock partner pricing may differ, so treat
+the figure as an approximation and override per model with
+`[pricing."aws/claude-5-sonnet"]` in `settings.toml` when the exact rate
+matters. Config 2's judges run locally and cost nothing; their rows are in
+the run's `ledger/decisions` stream, not in `calls`.
+
+## What changed since the local-worker runs
+
+The 2026-09-23 runs with local 8B/14B workers (triage
+`evals/triage/1f4f8262a80a.md`) showed the local rungs timing out and
+hallucinating; the ladder is now Claude tiers only. Two loop fixes from
+that triage apply to every config here: a `join` that opens a barrier
+ends the controller's turn (no more polling rounds), and the delegation
+nudge fires only after three distinct files were read on a request that
+is not a single-file edit, never for a controller.

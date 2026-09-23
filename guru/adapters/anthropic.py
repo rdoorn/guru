@@ -345,7 +345,8 @@ class AnthropicAdapter(Adapter):
                     'content': content,
                 })
                 session.messages.append({
-                    'role': 'tool', 'tool_name': name, 'content': content})
+                    'role': 'tool', 'tool_name': name, 'tool_args': args,
+                    'content': content})
             native.append({'role': 'user', 'content': results})
 
         def add_user(text):

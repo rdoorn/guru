@@ -1,4 +1,5 @@
-"""Typed loader for the ``[routing]`` table of ``~/.guru/settings.toml``.
+"""Typed loaders for the ``[routing]`` table of ``~/.guru/settings.toml``
+and the ``[decisions]`` table of an eval experiment file.
 
 TOML shape (the design sketch wrote per-kind ladders as
 ``[[routing.ladder.<kind>]]``; that cannot work because ``[[routing.ladder]]``
@@ -28,11 +29,16 @@ sibling table)::
 Validation is strict: unknown keys, unknown enum values and duplicate
 defaults raise ``ValueError`` naming the offender, so a typo cannot silently
 route a task to the wrong model.
+
+``[decisions]`` (:func:`load_decisions`) carries the judge setup an eval
+experiment installs for its run — ``mode`` plus the ``points``, ``active``
+and ``thresholds`` sub-tables that ``config`` documents; the sidecar and
+timing keys stay in ``settings.toml``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from guru import config, log
 from guru.domain import routing
@@ -71,6 +77,69 @@ class RoutingSettings:
     # guru behaves exactly as before: the CLI binds no secret scanner and
     # leaves ``config.SECRET_SCAN`` off, and routing is inert.
     present: bool = False
+
+
+_DECISION_KEYS = frozenset(('mode', 'points', 'active', 'thresholds'))
+
+
+@dataclass
+class DecisionsSettings:
+    """The validated ``[decisions]`` table of an experiment file: the
+    values ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` take for a
+    run."""
+    mode: str = 'off'
+    points: dict[str, str] = field(default_factory=dict)
+    active: dict[str, bool] = field(default_factory=dict)
+    thresholds: dict[str, float] = field(default_factory=dict)
+
+
+def _is_number(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _typed_table(section: dict, key: str, accept: Callable[[object], bool],
+                 what: str, convert: Callable[[Any], Any] = lambda v: v
+                 ) -> dict:
+    """``section[key]`` as ``{str: convert(v)}`` for values ``accept``
+    passes; ``ValueError`` (naming the offender) otherwise."""
+    raw = section.get(key)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f'[decisions] {key} must be a table of {what}')
+    out: dict = {}
+    for k, v in raw.items():
+        if not accept(v):
+            raise ValueError(
+                f'[decisions] {key}.{k} = {v!r}; expected {what}')
+        out[str(k)] = convert(v)
+    return out
+
+
+def load_decisions(section: dict) -> DecisionsSettings:
+    """Parse and validate a ``[decisions]`` table (an experiment file's).
+
+    An empty table yields the ``off`` defaults. Raises ``ValueError`` on an
+    unknown key, an unknown ``mode`` or a mistyped sub-table value.
+    """
+    unknown = sorted(set(section) - _DECISION_KEYS)
+    if unknown:
+        raise ValueError(
+            '[decisions] unknown keys: ' + ', '.join(unknown))
+    mode = section.get('mode', 'off')
+    if mode not in config.DECISIONS_MODES:
+        raise ValueError(
+            f'[decisions] mode = {mode!r}; expected one of '
+            + ', '.join(config.DECISIONS_MODES))
+    return DecisionsSettings(
+        mode=str(mode),
+        points=_typed_table(section, 'points',
+                            lambda v: isinstance(v, str), 'judge specs'),
+        active=_typed_table(section, 'active',
+                            lambda v: isinstance(v, bool), 'booleans'),
+        thresholds=_typed_table(section, 'thresholds', _is_number,
+                                'numbers', float),
+    )
 
 
 def _enum(section: dict, key: str, allowed: tuple, default: str) -> str:

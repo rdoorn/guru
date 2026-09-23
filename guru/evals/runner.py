@@ -19,6 +19,12 @@ case records the distinct ``Adapter|model`` its sub-agent tasks ran on
 (``CaseResult.routes``). Remote spend is denied unless ``allow_spend`` is
 set, which installs a granting spend asker per case.
 
+Judges: an experiment file may also carry a ``[decisions]`` table
+(:func:`load_decisions_file`); :func:`run_suite` then sets the decision
+seam (``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS``) from it, installs
+the judges for the duration and records their names on the run; the seam
+and the judge registry are restored (cleared) afterwards.
+
 Process-global state: the cwd, ``guru.config`` and the domain-level asker
 hooks are shared by the whole process, so cases run strictly sequentially
 and :func:`run_case` must never run concurrently with the TUI, the bench or
@@ -46,10 +52,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-from guru import bench, config, log, session, skills
+from guru import bench, config, judges, log, session, skills
 from guru.adapters import turn
 from guru.adapters.base import Adapter
-from guru.domain import conversation, files, ledger, policy, spend, tools
+from guru.domain import conversation
+from guru.domain import decisions as decision_seam
+from guru.domain import files, ledger, policy, spend, tools
 from guru.evals import cases, checks, runs
 from guru.evals.cases import Case
 from guru.evals.checks import Observed
@@ -57,7 +65,7 @@ from guru.evals.runs import CaseResult, Run
 from guru.repositories import settings as routing_settings
 from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
-from guru.repositories.settings import RoutingSettings
+from guru.repositories.settings import DecisionsSettings, RoutingSettings
 from guru.scanners.secrets import load_project_scanner
 
 _COPY_IGNORE = shutil.ignore_patterns('__pycache__', '.pytest_cache',
@@ -90,21 +98,45 @@ class Routing:
     name: str = ''
 
 
+def _read_toml(path: Path) -> dict:
+    """The parsed TOML of an experiment file; ``ValueError`` when the file
+    cannot be read or is not valid TOML."""
+    try:
+        return tomllib.loads(path.read_text(encoding='utf-8'))
+    except OSError as e:
+        raise ValueError(f'{path}: cannot read routing file: {e}') from e
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f'{path}: invalid TOML: {e}') from e
+
+
 def load_routing_file(path: Path) -> RoutingSettings:
     """Parse the ``[routing]`` table of a TOML file (same shape as
     ``settings.toml``). ``ValueError`` for a missing/unreadable file,
     invalid TOML, a missing table or an invalid key."""
     path = Path(path)
-    try:
-        data = tomllib.loads(path.read_text(encoding='utf-8'))
-    except OSError as e:
-        raise ValueError(f'{path}: cannot read routing file: {e}') from e
-    except tomllib.TOMLDecodeError as e:
-        raise ValueError(f'{path}: invalid TOML: {e}') from e
+    data = _read_toml(path)
     section = data.get('routing')
     if not isinstance(section, dict) or not section:
         raise ValueError(f'{path}: no [routing] table')
     return routing_settings.load_routing(section=section)
+
+
+def load_decisions_file(path: Path) -> Optional[DecisionsSettings]:
+    """Parse the optional ``[decisions]`` table of an experiment file
+    (``mode`` plus ``points``/``active``/``thresholds``). None when the
+    file has no such table; ``ValueError`` as :func:`load_routing_file`
+    and for an invalid key or value."""
+    path = Path(path)
+    data = _read_toml(path)
+    section = data.get('decisions')
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        raise ValueError(f'{path}: [decisions] must be a table')
+    try:
+        return routing_settings.load_decisions(section)
+    except ValueError as e:
+        raise ValueError(f'{path}: {e}') from e
 
 
 def _no_persist(value: str) -> None:
@@ -527,13 +559,43 @@ def _scanner_for(routing: Optional[RoutingSettings]) -> Iterator[None]:
         policy.set_scanner(prev_scanner)
 
 
+@contextlib.contextmanager
+def _judges_for(decisions: Optional[DecisionsSettings]
+                ) -> Iterator[list[str]]:
+    """Install the experiment's judges for the run.
+
+    Sets ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` from
+    ``decisions``, calls ``judges.install()`` and yields the installed
+    judges as ``point=name``; afterwards the config values are restored
+    and the judge registry is cleared. No-op (yields ``[]``, touches
+    nothing) without a table.
+    """
+    if decisions is None:
+        yield []
+        return
+    prev = (config.DECISIONS_MODE, config.DECISIONS_POINTS,
+            config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS)
+    config.DECISIONS_MODE = decisions.mode
+    config.DECISIONS_POINTS = dict(decisions.points)
+    config.DECISIONS_ACTIVE = dict(decisions.active)
+    config.DECISIONS_THRESHOLDS = dict(decisions.thresholds)
+    try:
+        installed = judges.install()
+        yield [f'{point}={name}' for point, name in installed.items()]
+    finally:
+        decision_seam.clear_judges()
+        (config.DECISIONS_MODE, config.DECISIONS_POINTS,
+         config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS) = prev
+
+
 def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               base_state: Optional[session.SessionState] = None,
               adapters: Optional[list[Adapter]] = None, note: str = '',
               on_result: Optional[Callable[[CaseResult], None]] = None,
               trajectory_dir: Path = DEFAULT_TRAJECTORY_DIR,
               num_ctx: int = 0, routing: Optional[RoutingSettings] = None,
-              routing_name: str = '', allow_spend: bool = False) -> Run:
+              routing_name: str = '', allow_spend: bool = False,
+              decisions: Optional[DecisionsSettings] = None) -> Run:
     """Run every case, save the run file and append the trajectory row.
 
     Synchronous; see :func:`run_case` for the loop and concurrency rules.
@@ -546,6 +608,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     ``routing_name``, the file stem recorded on the run) activates
     sub-agent routing over a registry of ``adapters`` and binds the secret
     scanner for the duration; ``allow_spend`` grants remote spend.
+    ``decisions`` installs the experiment's judges for the run (see
+    :func:`_judges_for`); their names land on ``Run.judges``.
     """
     _assert_no_running_loop('run_suite')
     skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
@@ -563,7 +627,7 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     ts = runs.now_ts()
     out_dir = out_root / run_id
     results: list[CaseResult] = []
-    with _scanner_for(routing):
+    with _scanner_for(routing), _judges_for(decisions) as judge_names:
         for case in suite:
             res = run_case(case, base_state, adapters, out_dir,
                            routing=routed, allow_spend=allow_spend)
@@ -574,7 +638,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               cases=results,
               num_ctx=base_state.num_ctx or base_state.num_ctx_override,
               routing=routing_name if routing is not None else '',
-              controller=bool(routing is not None and routing.controller))
+              controller=bool(routing is not None and routing.controller),
+              judges=judge_names)
     runs.save(run, out_root)
     runs.append_trajectory(run, Path(trajectory_dir), note=note)
     return run

@@ -85,6 +85,14 @@ class SessionState:
         self.unpriced_calls: int = 0
         self.struggle: dict[str, int] = {k: 0 for k in STRUGGLE_KEYS}
         self.last_error: str = ''
+        # Join/check contract (guru.orchestrator.do_join / do_check): set
+        # when a `join` opened a barrier, or `check` kept polling running
+        # sub-agents; the turn loop then ends the turn after the current
+        # tool round instead of asking the model again, and the mailbox
+        # resumes the agent with the results. check_polls counts the
+        # consecutive all-running `check` calls. Both reset at turn start.
+        self.turn_waiting: bool = False
+        self.check_polls: int = 0
 
 
 _default = SessionState()

@@ -40,6 +40,8 @@ class SessionState:
     unpriced_calls: int
     struggle: dict[str, int]
     last_error: str
+    turn_waiting: bool
+    check_polls: int
     def __init__(self) -> None: ...
 
 
@@ -77,3 +79,5 @@ cost_known: bool
 unpriced_calls: int
 struggle: dict[str, int]
 last_error: str
+turn_waiting: bool
+check_polls: int

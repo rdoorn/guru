@@ -238,6 +238,28 @@ class TestTurnRecord:
         assert row['controller_executed'] is False   # not a controller yet
         assert row['cost_usd'] == 0.0                # no priced calls
 
+    def test_waiting_turn_still_writes_row(self, monkeypatch, fake_repo):
+        """A turn ended by a join (``session.turn_waiting``) has no answer
+        but still closes with exactly one TurnRecord."""
+        _quiet(monkeypatch)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'review the login code'}])
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', True)
+        steps = iter([('', [('spawn', {'task': 'x'}, None)]),
+                      ('', [('join', {'targets': 'agent1'}, None)])])
+
+        def run_tools(pending):
+            if pending[0][0] == 'join':
+                session.turn_waiting = True
+        turn.run_loop(step=lambda: next(steps), run_tools=run_tools,
+                      add_user=lambda t: None, nudge=False)
+        ledger.flush()
+        [row] = fake_repo.stream('turns')
+        assert row['tools_used'] == ['spawn', 'join']
+        assert row['tasks_spawned'] == 1
+        assert row['controller_executed'] is False
+
     def test_turn_row_counts_tokens_for_this_turn_only(
             self, monkeypatch, fake_repo):
         _quiet(monkeypatch)

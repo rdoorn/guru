@@ -218,20 +218,25 @@ type_router = false         # use the per-kind ladders below (default: no)
 spend_confirm = "ask"       # ask | auto | never
 secret_scan = true          # findings force local + redact remote tool output
 
-[[routing.ladder]]          # the default ladder, lowest rung first
-adapter = "Ollama"          # an adapter name from adapters.toml
-model = "qwen3:14b"
-max_complexity = "standard" # the hardest task this rung should take
+[[routing.ladder]]          # the default ladder, lowest rung first:
+adapter = "SBP Litellm"     # Claude tiers via a LiteLLM adapter (the name
+model = "aws/claude-4-5-haiku"   # must match an [[adapter]] in adapters.toml)
+max_complexity = "trivial"  # the hardest task this rung should take
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
 default = true              # used when complexity_router = false
 
 [[routing.ladder]]
-adapter = "Anthropic"
-model = "claude-sonnet-5"
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
 max_complexity = "hard"
 
 [[routing.ladders.review]]  # optional per-kind ladder (only with type_router)
-adapter = "Anthropic"
-model = "claude-opus-5"
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
 max_complexity = "hard"
 ```
 

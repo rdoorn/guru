@@ -58,6 +58,9 @@ class Run:
     # defaults.
     routing: str = ''
     controller: bool = False
+    # Judges the experiment file's [decisions] table installed for the run,
+    # as ``point=judge name`` (empty: none configured or none available).
+    judges: list[str] = field(default_factory=list)
 
     def model_label(self) -> str:
         """``Adapter|model`` plus ``@<ctx>`` when the context is known,

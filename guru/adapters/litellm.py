@@ -25,7 +25,7 @@ from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
 from guru.domain import ledger, pricing, tools
 
-_MAX_TOKENS = 4096
+_MAX_TOKENS = 16384   # proxies may enforce a thinking budget above 8k
 _DEFAULT_CONTEXT = 128000
 # LiteLLM `mode` values that are not chat models — hidden from /models.
 _NON_CHAT_MODES = {
@@ -291,7 +291,8 @@ class LiteLLMAdapter(Adapter):
                     'role': 'tool', 'tool_call_id': call_id,
                     'content': content})
                 session.messages.append({
-                    'role': 'tool', 'tool_name': name, 'content': content})
+                    'role': 'tool', 'tool_name': name, 'tool_args': args,
+                    'content': content})
 
         def add_user(text):
             native.append({'role': 'user', 'content': text})

@@ -112,6 +112,7 @@ def check(target: str) -> str:
     Check the status and any finished results of your sub-agents, without
     blocking. Pass a sub-agent name (e.g. "agent2") or "all". Returns
     immediately, so you can keep working or delegate more while others run.
+    Do not poll in a loop: when everything is still running, call join.
     """
     if _check_handler is None:
         return "Checking sub-agents is not available in --classic (REPL) mode."
@@ -135,7 +136,8 @@ _CHECK_SPEC = {
     'description': (
         'Check the status and any finished results of your sub-agents without'
         ' blocking. Pass a sub-agent name (e.g. "agent2") or "all". Returns'
-        ' immediately.'
+        ' immediately. Do not poll in a loop: when everything is still'
+        ' running, call join instead.'
     ),
     'parameters': {
         'target': 'A sub-agent name, or "all" for every one',

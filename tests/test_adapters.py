@@ -1,6 +1,8 @@
 """Tests for the provider adapters and the shared tool-calling turn loop."""
 from types import SimpleNamespace
 
+import pytest
+
 from guru import config, session, ui
 from guru.adapters import anthropic as anth
 from guru.adapters import litellm as lite
@@ -211,22 +213,122 @@ class TestTurnLoop:
         turn.run_loop(step=step, run_tools=lambda p: None,
                       add_user=lambda t: None)   # returns, no exception
 
-    def _reads(self, n):
-        return [{'role': 'tool', 'tool_name': 'read_file', 'content': 'x'}
-                for _ in range(n)]
+    def _reads(self, n, paths=None, request='review the whole service'):
+        """A user request followed by ``n`` read_file tool messages; each
+        carries its ``path`` argument (distinct by default)."""
+        paths = paths or [f'app/mod{i}.py' for i in range(n)]
+        return [{'role': 'user', 'content': request}] + [
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'x',
+             'tool_args': {'path': paths[i % len(paths)]}}
+            for i in range(n)]
 
-    def test_delegation_nudges_broad_task(self, monkeypatch) -> None:
+    def _nudges(self, monkeypatch, messages, controller=False) -> list:
         from guru.adapters import turn
         self._quiet(monkeypatch)
         monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', controller)
         monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 3)
-        monkeypatch.setattr(session, 'messages', self._reads(3))
+        monkeypatch.setattr(session, 'messages', messages)
         seq = iter([("Here is my full assessment of the code.", []),
                     ("Consolidated report.", [])])
         nudges: list = []
         turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
                       add_user=lambda t: nudges.append(t))
+        return nudges
+
+    def test_delegation_nudges_broad_task(self, monkeypatch) -> None:
+        nudges = self._nudges(monkeypatch, self._reads(3))
         assert len(nudges) == 1 and 'decompose' in nudges[0].lower()
+
+    def test_reads_of_the_same_file_count_once(self, monkeypatch) -> None:
+        # Three reads, one distinct path: not a broad task.
+        msgs = self._reads(3, paths=['app/one.py'])
+        assert self._nudges(monkeypatch, msgs) == []
+        # Two distinct paths read five times: still under the threshold.
+        msgs = self._reads(5, paths=['a.py', 'b.py'])
+        assert self._nudges(monkeypatch, msgs) == []
+
+    def test_reads_without_args_do_not_count(self, monkeypatch) -> None:
+        msgs = [{'role': 'user', 'content': 'review the service'}] + [
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'x'}
+            for _ in range(4)]
+        assert self._nudges(monkeypatch, msgs) == []
+
+    def test_search_code_paths_count_as_reads(self, monkeypatch) -> None:
+        msgs = [{'role': 'user', 'content': 'review the service'}] + [
+            {'role': 'tool', 'tool_name': 'search_code', 'content': 'x',
+             'tool_args': {'pattern': 'p', 'path': d}}
+            for d in ('app', 'tests', 'docs')]
+        assert len(self._nudges(monkeypatch, msgs)) == 1
+
+    def test_single_target_edit_request_is_not_nudged(
+            self, monkeypatch) -> None:
+        msgs = self._reads(
+            4, request='Fix the failing test; the bug is in wordcount.py')
+        assert self._nudges(monkeypatch, msgs) == []
+
+    def test_edit_request_over_several_files_is_nudged(
+            self, monkeypatch) -> None:
+        msgs = self._reads(
+            4, request='update app.py, models.py and views.py for the API')
+        assert len(self._nudges(monkeypatch, msgs)) == 1
+
+    def test_controller_is_never_nudged(self, monkeypatch) -> None:
+        assert self._nudges(monkeypatch, self._reads(4),
+                            controller=True) == []
+
+    @pytest.mark.parametrize('request_text, single', [
+        ('fix the failing test in wordcount.py', True),
+        ('Rename count_words to word_count', True),
+        ('please patch setup.toml', True),
+        ('Update README.md.', True),
+        ('change a.py and b.py to use the new API', False),
+        ('review this repository for security issues', False),
+        ('explain how the rollback procedure works', False),
+        ('', False),
+    ])
+    def test_single_target_request(self, request_text, single) -> None:
+        from guru.adapters import turn
+        assert turn._single_target_request(request_text) is single
+
+    def test_waiting_flag_ends_turn_after_tool_round(
+            self, monkeypatch) -> None:
+        """A join that opened a barrier sets ``session.turn_waiting`` from
+        inside run_tools; the loop then ends the turn without another
+        model round and renders no answer."""
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        rendered: list = []
+        monkeypatch.setattr(turn, '_render_answer',
+                            lambda c: rendered.append(c))
+        printed: list = []
+        monkeypatch.setattr(turn.ui.console, 'print',
+                            lambda *a, **k: printed.append(str(a[0])))
+        steps = {'n': 0}
+
+        def step():
+            steps['n'] += 1
+            return ("", [("join", {"targets": "agent1"}, "r1")])
+
+        def run_tools(pending):
+            session.turn_waiting = True
+
+        turn.run_loop(step=step, run_tools=run_tools,
+                      add_user=lambda t: None)
+        assert steps['n'] == 1                  # no second round
+        assert rendered == []
+        assert any('waiting for sub-agents' in p for p in printed)
+
+    def test_waiting_flag_reset_at_turn_start(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        self._quiet(monkeypatch)
+        monkeypatch.setattr(session, 'turn_waiting', True)
+        monkeypatch.setattr(session, 'check_polls', 2)
+        seq = iter([("", [("read_file", {"path": "x"}, "r1")]),
+                    ("done", [])])
+        turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
+                      add_user=lambda t: None)
+        assert session.turn_waiting is False and session.check_polls == 0
 
     def test_no_delegation_nudge_for_subagent(self, monkeypatch) -> None:
         from guru.adapters import turn
@@ -454,6 +556,7 @@ class TestRunTurnIntegration:
         tool_msgs = [m for m in session.messages
                      if isinstance(m, dict) and m.get('role') == 'tool']
         assert tool_msgs and tool_msgs[0]['tool_name'] == 'list_dir'
+        assert tool_msgs[0]['tool_args'] == {'path': str(tmp_path)}
         assert 'hello.txt' in tool_msgs[0]['content']
         finals = [m for m in session.messages
                   if conversation.msg_role(m) == 'assistant'

@@ -312,8 +312,10 @@ REVIEW_PANEL = [
 ]
 
 # Delegation nudge: if a delegation-capable MAIN agent answers a broad task
-# (>= this many file reads) having spawned no sub-agent, nudge it once to
-# decompose into a parallel domain panel. Set 0 to disable the nudge.
+# (>= this many DISTINCT paths read with the read tools, and a request
+# that is not a single-file edit) having spawned no sub-agent, nudge it
+# once to decompose into a parallel domain panel. Never for a controller.
+# Set 0 to disable the nudge.
 DELEGATION_NUDGE_MIN_READS = 3
 DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
 

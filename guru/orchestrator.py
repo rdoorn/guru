@@ -46,6 +46,18 @@ from guru.repositories.settings import RoutingSettings
 
 _NO_ANSWER = '(no answer produced)'
 _INERT_REASON = 'routing:disabled (no registry)'
+
+# Check-poll rule (design decision 10, cost bug: a controller polled
+# `check` ~20 times after spawning). The Nth consecutive `check` that finds
+# every checked sub-agent still running ends the turn like a `join`; the
+# one before it tells the model to join.
+CHECK_POLL_LIMIT = 3
+CHECK_JOIN_HINT = (
+    "All of them are still running. Do not poll again: call join with"
+    " their names to be resumed when they finish.")
+CHECK_WAIT_TEXT = (
+    "All sub-agents are still running; this turn ends here and you will"
+    " be resumed with their results.")
 _DEFERRED_REASON = 'confirmation:deferred (loop thread)'
 _RETRY_REASON = 'retry:local after remote failure'
 
@@ -597,6 +609,14 @@ class Orchestrator:
         return titles
 
     def do_check(self, caller_state, target: str) -> str:
+        """Status of the caller's sub-agents (``target`` a title or 'all').
+
+        Polling is counted: when every checked sub-agent is still running
+        the caller's ``check_polls`` grows; the second such poll in a row
+        tells the model to ``join``, the third ends the turn like a join
+        (``turn_waiting``, barrier over the running children, see
+        ``CHECK_POLL_LIMIT``). Any done sub-agent resets the count.
+        """
         caller = self.agent_for_state(caller_state)
         children = [a for a in self.manager.agents if a.parent is caller]
         if not children:
@@ -605,15 +625,43 @@ class Orchestrator:
         if target in ('all', '*', ''):
             lines = [f"{a.title}: {'running' if a.busy else 'done'}"
                      for a in children]
-            return "Sub-agents:\n" + "\n".join(lines)
+            text = "Sub-agents:\n" + "\n".join(lines)
+            return self._count_poll(caller, caller_state, children, text)
         match = next((a for a in children if a.title == target), None)
         if match is None:
             names = ', '.join(a.title for a in children)
             return f"No sub-agent named '{target}'. Yours: {names}."
         if match.busy:
-            return f"{match.title}: running (task: {match.task})"
+            text = f"{match.title}: running (task: {match.task})"
+            return self._count_poll(caller, caller_state, [match], text)
+        caller_state.check_polls = 0
         return (f"{match.title}: done\ntask: {match.task}\n"
                 f"{self.final_answer(match)}")
+
+    def _count_poll(self, caller, caller_state, checked: list,
+                    text: str) -> str:
+        """Apply the check-poll rule to one ``check`` over ``checked``."""
+        running = [a for a in checked if a.busy]
+        if len(running) < len(checked):
+            caller_state.check_polls = 0
+            return text
+        caller_state.check_polls += 1
+        if caller_state.check_polls >= CHECK_POLL_LIMIT:
+            self._open_barrier(caller, {a.title for a in running})
+            caller_state.turn_waiting = True
+            return CHECK_WAIT_TEXT
+        if caller_state.check_polls >= CHECK_POLL_LIMIT - 1:
+            return text + "\n" + CHECK_JOIN_HINT
+        return text
+
+    def _open_barrier(self, caller, titles: set) -> None:
+        """Wait for ``titles`` on ``caller``'s join barrier, merging into an
+        open one so a single joined payload delivers everything."""
+        bar = self.barriers.get(caller)
+        if bar is None:
+            self.barriers[caller] = {'remaining': set(titles), 'results': {}}
+        else:
+            bar['remaining'].update(titles)
 
     def do_join(self, caller_state, titles: list) -> str:
         caller = self.agent_for_state(caller_state)
@@ -633,6 +681,9 @@ class Orchestrator:
         if remaining:
             self.barriers[caller] = {
                 'remaining': remaining, 'results': results}
+            # End the caller's turn after this tool round (turn loop);
+            # the barrier resumes it with the combined results.
+            caller_state.turn_waiting = True
             waiting = ', '.join(sorted(remaining))
             return (f"Waiting for {waiting} to finish; I'll be resumed"
                     f" automatically with their combined results.")

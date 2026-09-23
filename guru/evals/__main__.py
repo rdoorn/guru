@@ -85,6 +85,8 @@ def _print_run(run: Run, out_root: Path) -> None:
         summary += f' · routing {run.routing}'
         if run.controller:
             summary += ' (controller)'
+    if run.judges:
+        summary += ' · judges ' + ', '.join(run.judges)
     print(summary)
     trajectory = runner.DEFAULT_TRAJECTORY_DIR / runs.TRAJECTORY_FILE
     print(f'run {run.run_id} saved under {out_root} '
@@ -124,9 +126,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     out_root = Path(args.out)
     routing = None
     routing_name = ''
+    decisions = None
     if args.routing:
         try:
             routing = runner.load_routing_file(Path(args.routing))
+            decisions = runner.load_decisions_file(Path(args.routing))
         except ValueError as e:
             print(f'error: {e}', file=sys.stderr)
             return 2
@@ -141,7 +145,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         run = runner.run_suite(suite, model, out_root, note=args.note,
                                on_result=progress, num_ctx=num_ctx,
                                routing=routing, routing_name=routing_name,
-                               allow_spend=args.allow_spend)
+                               allow_spend=args.allow_spend,
+                               decisions=decisions)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
@@ -214,8 +219,10 @@ def _parser() -> argparse.ArgumentParser:
     run_p.add_argument('--note', default='',
                        help='free text for the trajectory row')
     run_p.add_argument('--routing', default=None, metavar='FILE',
-                       help='TOML file with a [routing] table (as in '
-                            'settings.toml) to route sub-agents; see '
+                       help='experiment TOML: a [routing] table (as in '
+                            'settings.toml) to route sub-agents, plus an '
+                            'optional [decisions] table whose judges are '
+                            'installed for the run; see '
                             'evals/routing/README.md')
     run_p.add_argument('--allow-spend', action='store_true',
                        help='grant the remote-spend question for the run '

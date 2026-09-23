@@ -21,6 +21,7 @@ the record of the judge measurements.
 | 7 | Secret found in a remote sub-agent's tool output | Redact and continue, with a typed marker and a ledger finding. |
 | 8 | Code structure | Domain / repository / endpoint layers with Protocols between them; new code never imports an endpoint from the domain. |
 | 9 | Plan order | Ledger core folded into phase 1 so shadow rows are joinable from day one. |
+| 10 | Who runs the work (2026-09-23, after the local-worker runs) | **Claude is the controller and every worker.** The ladder's rungs are Claude tiers (Haiku for trivial, Sonnet for standard, Opus for hard). Local models act only as small judges (encoders) on the decision seam; the local LLM workers and the local controller were dropped after the 2026-09-23 runs (`evals/triage/1f4f8262a80a.md`: timeouts, hallucinated syntheses, a one-file fix nudged into a panel). The sidecar LLM judge is optional and off by default. |
 
 ## 1. Components and layers
 
@@ -61,20 +62,20 @@ type_router = false              # per-kind ladders; off until measured
 spend_confirm = "ask"            # ask (once per run) | auto | never
 secret_scan = true
 
-[[routing.ladder]]               # default ladder, lowest rung first
-adapter = "Ollama"
-model = "qwen3:4b"
+[[routing.ladder]]               # default ladder, lowest rung first:
+adapter = "SBP Litellm"          # the Claude tiers behind a LiteLLM adapter
+model = "aws/claude-4-5-haiku"
 max_complexity = "trivial"
 
 [[routing.ladder]]
-adapter = "Ollama"
-model = "qwen3:14b"
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
 max_complexity = "standard"
 default = true
 
 [[routing.ladder]]
-adapter = "Anthropic Enterprise"
-model = "claude-sonnet-5"
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
 max_complexity = "hard"
 
 # [[routing.ladders.review]]  ... per-kind ladders: plural key, same rung shape
@@ -194,9 +195,12 @@ function.
   to the task record verbatim.
 
 Non-goals now: learned thresholds, probability gating, per-task cost
-estimates. Memory: controller 14B + 4B sidecar + encoders ≈ 14 GB on the
-24 GB machine; a rung that does not fit is a runtime warning, and the GPU
-fit must account for the sidecar before routing goes active (phase 3).
+estimates. Memory: with Claude tiers as rungs (decision 10) nothing on the
+ladder runs locally; the only local load is the encoder judges (small).
+The sidecar LLM judge (`ollama` spec under `[decisions.points]`) is
+optional and off by default; when it is configured the GPU fit reserves
+its size before the main model's context is fitted, and a local rung that
+does not fit is a runtime warning.
 
 ## 5. Error handling and fallbacks
 
@@ -314,5 +318,23 @@ in the triage notes so fixes can be traced to causes.
 
 Guardrails: never edit a case to make it pass without a note in the triage
 file; add a new case for every bug found in real use (the ledger's turn
-records are the source of new prompts); keep the suite under ~20 minutes on
-the 14B so it is run often.
+records are the source of new prompts); keep the suite short enough
+(`--tags fast` for the gate, the full suite under ~20 minutes) so it is run
+often.
+
+### 8.5 Experiment matrix (Claude-only, decision 10)
+
+Files under `evals/routing/`; commands in `evals/routing/README.md`. Every
+run uses `--model 'SBP Litellm|aws/claude-5-sonnet'` and `--allow-spend`.
+
+| config | main agent | workers | file | measures |
+|---|---|---|---|---|
+| 0 | plain Sonnet, no routing | Sonnet (inherited) | none | baseline pass rate, time, cost |
+| 1 | Sonnet controller | Claude tiers by complexity (Haiku / Sonnet / Opus) | `claude-tiers.toml` | does controller + ladder keep the pass rate and cut cost |
+| 2 | Sonnet controller | as 1 | `claude-tiers-judges.toml` | as 1 plus shadow `panel` (encoder) and `injection` judges: data for the review loop, no behaviour change |
+
+The runner installs config 2's judges for the run only (`[decisions]` in
+the experiment file, `judges.install()`, restored afterwards) and records
+the installed judges on the run file. The earlier matrix (local 8B
+workers, local controller) is superseded by decision 10 and kept only in
+the triage notes.
