@@ -5,7 +5,9 @@ timeout_s = 120
 tags = ["search", "fast"]
 
 [expect.behaviour]
-tools_used_any = ["search_code", "read_file"]
+# find_symbol/outline are the audited verbs for this question; run 69bc45821a7d
+# answered correctly with find_symbol alone.
+tools_used_any = ["search_code", "read_file", "find_symbol", "outline"]
 
 [expect.content]
 answer_contains = ["upload.py", "handlers.py"]

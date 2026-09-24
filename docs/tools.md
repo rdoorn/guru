@@ -17,10 +17,14 @@ search_tools("fetch webpage url")
 search_tools("get latest github release version")
 ```
 
-`search_tools` returns matching tool names, descriptions, and parameter
-signatures, and adds the matched tools to the model's active set. They stay
-active for the rest of the conversation — no re-discovery — and are restored
-when a saved conversation is resumed.
+`search_tools` returns a short digest — at most six rows of
+`name — first sentence of the description` (`SEARCH_TOOLS_LIMIT`) — and
+adds exactly those tools to the model's active set; the full description
+and parameter schema reach the model through the activated tool spec, so
+repeating them in the result only cost context (about 5 KB per call in the
+first audited eval run, 2026-09-24). Activated tools stay active for the rest
+of the conversation — no re-discovery — and are restored when a saved
+conversation is resumed.
 
 Implementation: `guru/domain/tools.py`. Each adapter translates the active tool
 set to its provider's native tool schema (`active_specs()` provides the
@@ -40,7 +44,8 @@ Each entry in `TOOL_REGISTRY` has a `description`, `tags` list, and
 | Parameter description | +1 |
 
 Stop words (`for`, `the`, `this`, …) are filtered before matching. If no tool
-scores above zero, all tools are returned (the fallback).
+scores above zero, the ranking falls back to every advertised tool; either
+way only the top six are listed and activated.
 
 Action phrases work better than the user's raw words: the model reasons about
 what it wants to DO, and action phrases map directly to what tools do, giving

@@ -717,6 +717,26 @@ def _match_tools(query: str) -> list:
     return sorted(scores, key=scores.__getitem__, reverse=True)
 
 
+SEARCH_TOOLS_LIMIT = 6
+"""Most tools one ``search_tools`` call lists (and activates)."""
+
+
+def _top_matches(query: str) -> list:
+    """The ``_match_tools`` ranking cut to ``SEARCH_TOOLS_LIMIT`` names.
+
+    Both the digest ``search_tools`` returns and the activation
+    ``execute_tool`` performs use this, so the model is told about exactly
+    the tools it can now call and the tool specs stay small.
+    """
+    return _match_tools(query)[:SEARCH_TOOLS_LIMIT]
+
+
+def _first_sentence(text: str) -> str:
+    """The first sentence of a tool description (up to the first '. ')."""
+    head, sep, _rest = text.partition('. ')
+    return head + ('.' if sep else '')
+
+
 def search_tools(query: str) -> str:
     """
     Search the tool directory for tools matching an action you want to perform.
@@ -728,19 +748,17 @@ def search_tools(query: str) -> str:
       search_tools("get latest github release version")
 
     Matched tools are added to your active tool set and can be called directly.
+
+    The result is a digest — at most ``SEARCH_TOOLS_LIMIT`` rows of
+    ``name — first sentence of the description`` — because the full
+    description and parameters reach the model through the activated tool
+    spec anyway (a full listing cost ~5 KB per call in the eval audit).
     """
-    matched = _match_tools(query)
     lines: list = [f"Tools matching '{query}':\n"]
-    for name in matched:
-        info = TOOL_REGISTRY[name]
-        param_lines = "\n".join(
-            f"      {k}: {v}" for k, v in info['parameters'].items()
-        )
-        lines.append(
-            f"  {name}\n"
-            f"    {info['description']}\n"
-            f"    Parameters:\n{param_lines}\n"
-        )
+    for name in _top_matches(query):
+        desc = _first_sentence(TOOL_REGISTRY[name]['description'])
+        lines.append(f"  {name} — {desc}")
+    lines.append("")
     lines.append("These tools are now active — call them directly by name.")
     return "\n".join(lines)
 
@@ -956,7 +974,7 @@ def execute_tool(name: str, arguments: dict) -> str:
         denied = 'policy'
     elif name == "search_tools":
         result = search_tools(**arguments)
-        for tn in _match_tools(arguments.get("query", "")):
+        for tn in _top_matches(arguments.get("query", "")):
             activate(tn)
     elif name == "use_skill":
         result = use_skill(**arguments)

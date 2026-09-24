@@ -21,3 +21,4 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-24T08:55:47+00:00 | 660eb67121bb | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/3 | 96.9 | $1.95 | haiku controller v2 (examples+tie-break), repeat 1 |
 | 2026-09-24T09:01:25+00:00 | 4dd3f4cb1061 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 102.1 | $2.58 | haiku controller v2 (examples+tie-break), repeat 2 |
 | 2026-09-24T09:07:01+00:00 | 39a114b8a034 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 115.5 | $2.90 | haiku controller v2 (examples+tie-break), repeat 3 |
+| 2026-09-24T17:59:40+00:00 | 69bc45821a7d | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 11/13 | 37.6 | $2.53 | audited tools v1: haiku controller, fast+edit+real cases |

@@ -16,6 +16,51 @@ class TestMatchTools:
         assert tools._match_tools('fetch a webpage url')[0] == 'web_fetch'
 
 
+class TestSearchToolsDigest:
+    """search_tools returns a short digest: at most six ``name — first
+    sentence`` rows (the full schema reaches the model through the
+    activated tool spec), and activates exactly the tools it lists."""
+
+    @pytest.fixture(autouse=True)
+    def _session(self, monkeypatch, fake_repo):
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', False)
+        monkeypatch.setattr(session, 'active_tool_names', set())
+        monkeypatch.setattr(session, 'active_tools', [])
+
+    @staticmethod
+    def _listed(out: str) -> list:
+        return [ln.strip().split(' — ')[0] for ln in out.splitlines()
+                if ln.startswith('  ')]
+
+    def test_digest_is_short_and_capped(self) -> None:
+        out = tools.search_tools('file')          # matches most tools
+        names = self._listed(out)
+        assert 1 <= len(names) <= tools.SEARCH_TOOLS_LIMIT == 6
+        assert len(out) < 800
+        assert out.rstrip().endswith(
+            'These tools are now active — call them directly by name.')
+        assert 'Parameters' not in out
+
+    def test_row_is_name_and_first_sentence(self) -> None:
+        out = tools.search_tools('find symbol definition')
+        assert self._listed(out)[0] == 'find_symbol'
+        first = tools.TOOL_REGISTRY['find_symbol']['description']
+        first = first.split('. ')[0] + '.'
+        assert f'  find_symbol — {first}' in out.splitlines()
+        assert 'Prefer this over search_code' not in out   # 2nd sentence
+
+    def test_fallback_is_capped_too(self) -> None:
+        assert len(self._listed(tools.search_tools(''))) == 6
+        assert len(self._listed(tools.search_tools('zzqqxx'))) == 6
+
+    def test_execute_activates_only_the_listed(self) -> None:
+        out = tools.execute_tool('search_tools', {'query': ''})
+        assert session.active_tool_names == set(self._listed(out))
+        assert len(session.active_tool_names) == 6
+
+
 class TestActiveSpecs:
     """Tests for tools.active_specs."""
 
@@ -640,6 +685,15 @@ class TestCodeVerbRegistry:
         assert out == "Tool 'apply_patch' is disabled by .guru/tools.toml"
         assert self._event()['denied'] == 'policy'
 
+    def test_prompt_makes_listed_tools_directly_callable(self) -> None:
+        # Triage 2026-09-24-audited-tools: 9 of 11 search_tools hops were
+        # for preactivated verbs; the prompt must not demand a search first.
+        assert 'directly callable' in config.SYSTEM_PROMPT
+        assert 'only for a capability that is not listed' \
+            in config.SYSTEM_PROMPT
+        assert 'never call a tool it has not' not in config.SYSTEM_PROMPT
+        assert 'begin with a\nsingle tool' not in config.SYSTEM_PROMPT
+
     def test_prompts_mention_the_verbs(self) -> None:
         assert 'run_tests' in config.CONTROLLER_HINT
         assert 'check_syntax' in config.CONTROLLER_HINT
@@ -689,8 +743,8 @@ class TestDisabledToolsNotAdvertised:
         assert 'read_file' not in tools._match_tools('')      # fallback
         assert 'read_file' not in tools._match_tools('zzqqxx')  # no hits
         out = tools.search_tools('read the contents of a file')
-        listed = [ln.strip() for ln in out.splitlines()
-                  if ln.startswith('  ') and not ln.startswith('    ')]
+        listed = [ln.strip().split(' — ')[0] for ln in out.splitlines()
+                  if ln.startswith('  ')]
         assert 'read_file' not in listed and 'search_code' in listed
 
     def test_specs_skip_it(self) -> None:
