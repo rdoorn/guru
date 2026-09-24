@@ -3,6 +3,15 @@
 > **For Claude:** execute task-by-task with subagents; one commit at the end
 > of each chunk after `make lint && make typecheck && make test` are green.
 
+**Status (2026-09-24):** chunks A and B implemented on `feat/audited-tools`
+(runner, `tool_events`, `/tools`, `.guru/tools.toml`, the eight verbs,
+registry and prompts); chunk C in progress (eval cases and docs landed, the
+real comparison run is outstanding); container jailing of the runner is
+deferred. Security-review follow-ups: disabled tools are no longer
+advertised (not pre-activated, not returned by `search_tools`, not in the
+specs) and a verb surfacing the runner's `Denied:` text is recorded as
+`denied = "mode"`.
+
 **Goal:** give guru's workers real coding and verification capability —
 outline, symbol search, tests, syntax and lint checks, git diff, patches —
 through fixed Python procedures with minimal digests, full audit, and no

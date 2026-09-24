@@ -245,7 +245,8 @@ class TestShippedCases:
     """The committed cases under evals/cases."""
 
     FAST = {'greet', 'trivial-fact', 'explain-readme', 'find-symbol',
-            'security-only', 'logic-bug'}
+            'security-only', 'logic-bug', 'find-symbol-outline',
+            'planted-failure-digest'}
 
     def test_fast_gate_is_tagged_and_short(self) -> None:
         fast = cases.load_cases(cases.CASES_DIR, tags=['fast'])
@@ -259,6 +260,23 @@ class TestShippedCases:
         assert {'review', 'security'} <= set(by_name['security-only'].tags)
         assert 'review' in by_name['logic-bug'].tags
         assert 'no-tools' in by_name['greet'].tags
+        assert 'search' in by_name['find-symbol-outline'].tags
+        assert 'tests' in by_name['planted-failure-digest'].tags
+
+    def test_verb_cases_expect_the_audited_tools(self) -> None:
+        by_name = {c.name: c for c in cases.load_cases(cases.CASES_DIR)}
+        for name in ('fix-failing-test', 'edit-then-verify',
+                     'guru-add-version-flag', 'planted-failure-digest'):
+            assert by_name[name].expect.tools_used_all == ['run_tests'], \
+                name
+        sym = by_name['find-symbol-outline']
+        assert sym.expect.tools_used_any == ['find_symbol', 'outline']
+        assert sym.expect.tools_used_none == ['read_file']
+        assert sym.expect.answer_contains == ['upload.py', 'handlers.py']
+        digest = by_name['planted-failure-digest']
+        assert digest.expect.tools_used_none == ['read_file']
+        assert digest.expect.answer_regex == [
+            'test_words_across_newlines', 'newline']
 
 
 GIT_MINIMAL = '''

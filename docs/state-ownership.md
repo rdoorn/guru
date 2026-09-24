@@ -56,7 +56,10 @@ is injected through setters rather than hard-coded:
   The CLI installs it at startup; the default (no file, or `set_policy(None)`)
   enables everything. `tools.execute_tool` consults it through
   `tools.is_enabled` and writes a `denied = "policy"` `tool_events` row for a
-  refused call. The always-on tools (`search_tools`, `use_skill`, `spawn`,
+  refused call. The same predicate filters what the model is told about:
+  `_core_tool_fns` (pre-activation), `activate`, `search_tools` results and
+  `specs_for` all skip a disabled tool, so a policy never has to rely on the
+  refusal alone. The always-on tools (`search_tools`, `use_skill`, `spawn`,
   `check`, `join`) are never subject to it.
 
 These are the dependency-injection points, and they already exist where

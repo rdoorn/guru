@@ -6,6 +6,7 @@ tags = ["edit"]
 
 [expect.behaviour]
 tools_used_any = ["edit_file", "write_file"]
+tools_used_all = ["run_tests"]
 
 [expect.content]
 files_changed = ["wordcount.py"]

@@ -14,7 +14,7 @@ from ddgs import DDGS
 
 from guru import config, log, session, skills, ui
 from guru.domain import (code, decisions, files, gitread, ledger, patch,
-                         policy, quality, routing)
+                         policy, procs, quality, routing)
 
 # The tools a controller (``[routing] controller = true``) keeps: it
 # coordinates and never executes (design doc §2).
@@ -76,6 +76,14 @@ def is_enabled(name: str) -> bool:
     if _policy.enabled:
         return name in _policy.enabled
     return True
+
+
+def _advertised() -> list:
+    """The registry tool names the project policy lets run, in registry
+    order. Discovery, pre-activation and the specs sent to the model all
+    draw from this list, so a disabled tool is never described to the
+    model (and ``execute_tool`` refuses it anyway if called by name)."""
+    return [name for name in TOOL_REGISTRY if is_enabled(name)]
 
 
 # Pluggable domain approval — overridable by the TUI so it doesn't call the
@@ -725,10 +733,12 @@ def _match_tools(query: str) -> list:
         w.lower() for w in query.replace('-', ' ').split()
         if len(w) > 2 and w.lower() not in _STOP_WORDS
     ]
+    names = _advertised()
     if not keywords:
-        return list(TOOL_REGISTRY.keys())
+        return names
     scores: dict = {}
-    for name, info in TOOL_REGISTRY.items():
+    for name in names:
+        info = TOOL_REGISTRY[name]
         score = 0
         tags_text = ' '.join(info['tags']).lower()
         desc_text = info['description'].lower()
@@ -745,7 +755,7 @@ def _match_tools(query: str) -> list:
         if score > 0:
             scores[name] = score
     if not scores:
-        return list(TOOL_REGISTRY.keys())
+        return names
     return sorted(scores, key=scores.__getitem__, reverse=True)
 
 
@@ -818,13 +828,15 @@ def specs_for(active_tool_names, can_spawn: bool,
     Lets callers (e.g. the context breakdown) price a specific agent's tool
     schemas without binding that agent's session context. A controller gets
     only spawn/check/join/use_skill, whatever ``active_tool_names`` holds.
+    A tool the project policy disables is left out even if it is in
+    ``active_tool_names`` (e.g. activated before the policy changed).
     """
     if controller:
         return [_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC, _USE_SKILL_SPEC]
     specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC]
     if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
-    for name in TOOL_REGISTRY:
+    for name in _advertised():
         if name in active_tool_names:
             info = TOOL_REGISTRY[name]
             specs.append({
@@ -841,13 +853,13 @@ def _core_tool_fns() -> list:
     directly without going through search_tools first. Normally the
     config-driven core set; when [tools] flat = true it is the ENTIRE registry,
     so a capable model gets the whole toolset up front (no search_tools
-    hop)."""
+    hop). Either way a tool the project policy disables is skipped."""
     names = (list(TOOL_REGISTRY) if config.FLAT_TOOLS
              else config.PREACTIVATE_TOOLS)
     out = []
     for name in names:
         info = TOOL_REGISTRY.get(name)
-        if info:
+        if info and is_enabled(name):
             out.append((name, info['fn']))
     return out
 
@@ -884,8 +896,10 @@ def reset_active_tools() -> None:
 
 
 def activate(name: str) -> None:
-    """Add a registry tool to the active set if not already present."""
-    if name in TOOL_REGISTRY and name not in session.active_tool_names:
+    """Add a registry tool to the active set if not already present; a
+    tool the project policy disables is never activated."""
+    if (name in TOOL_REGISTRY and is_enabled(name)
+            and name not in session.active_tool_names):
         session.active_tool_names.add(name)
         session.active_tools.append(TOOL_REGISTRY[name]['fn'])
         ui.console.print(f"[green]\\[ACTIVATED][/green] {name}")
@@ -917,9 +931,13 @@ def _redact_for_remote(name: str, result: str) -> str:
 
 def _mode_denial(result: str) -> bool:
     """Whether a tool result text is an access-mode/allow-list refusal
-    (message texts owned by guru.domain.files / ensure_domain_allowed)."""
+    (message texts owned by guru.domain.files / ensure_domain_allowed), or
+    the subprocess runner's own refusal (``procs.DENIED_PREFIX``, which the
+    verbs surface bare or behind ``Refused: ``)."""
     head = result[:300]
     return (head.startswith('Refused: read-only mode')
+            or head.startswith(procs.DENIED_PREFIX)
+            or head.startswith(f'Refused: {procs.DENIED_PREFIX}')
             or 'was denied by the user' in head
             or (head.startswith('Write access to ') and head.rstrip()
                 .endswith('was denied.')))

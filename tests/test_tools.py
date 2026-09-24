@@ -646,3 +646,99 @@ class TestCodeVerbRegistry:
         for text in (config.SYSTEM_PROMPT, config.DELEGATION_HINT):
             assert 'outline' in text and 'find_symbol' in text
             assert 'run_tests' in text
+
+
+class TestDisabledToolsNotAdvertised:
+    """A tool the project policy disables is neither preactivated, nor
+    discoverable, nor described to the model — and still refused if the
+    model calls it by name anyway (security review follow-up)."""
+
+    @pytest.fixture(autouse=True)
+    def _policy(self, monkeypatch, fake_repo):
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', False)
+        monkeypatch.setattr(session, 'active_tool_names', set())
+        monkeypatch.setattr(session, 'active_tools', [])
+        tools.set_policy(tools.ToolsPolicy(disabled={'read_file'}))
+        yield
+        tools.set_policy(None)
+
+    def test_not_preactivated(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            config, 'PREACTIVATE_TOOLS', ['read_file', 'search_code'])
+        assert [n for n, _ in tools._core_tool_fns()] == ['search_code']
+        _, names = tools.initial_tools(can_spawn=False)
+        assert names == {'search_code'}
+
+    def test_flat_mode_skips_disabled(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'FLAT_TOOLS', True)
+        names = {n for n, _ in tools._core_tool_fns()}
+        assert 'read_file' not in names and 'search_code' in names
+
+    def test_activate_is_a_no_op(self) -> None:
+        tools.activate('read_file')
+        assert 'read_file' not in session.active_tool_names
+        assert tools.TOOL_REGISTRY['read_file']['fn'] \
+            not in session.active_tools
+        tools.activate('search_code')
+        assert 'search_code' in session.active_tool_names
+
+    def test_search_tools_does_not_list_it(self) -> None:
+        assert 'read_file' not in tools._match_tools('read a file')
+        assert 'read_file' not in tools._match_tools('')      # fallback
+        assert 'read_file' not in tools._match_tools('zzqqxx')  # no hits
+        out = tools.search_tools('read the contents of a file')
+        listed = [ln.strip() for ln in out.splitlines()
+                  if ln.startswith('  ') and not ln.startswith('    ')]
+        assert 'read_file' not in listed and 'search_code' in listed
+
+    def test_specs_skip_it(self) -> None:
+        names = [s['name'] for s in tools.specs_for(
+            {'read_file', 'search_code'}, can_spawn=False)]
+        assert 'read_file' not in names
+        assert names[:2] == ['search_tools', 'use_skill']
+        assert 'search_code' in names
+
+    def test_execute_still_refuses(self, fake_repo) -> None:
+        from guru.domain import ledger
+        out = tools.execute_tool('read_file', {'path': 'a.py'})
+        assert out == "Tool 'read_file' is disabled by .guru/tools.toml"
+        ledger.flush()
+        [row] = fake_repo.stream('tool_events')
+        assert row['denied'] == 'policy'
+
+    def test_allowlist_hides_the_rest(self) -> None:
+        tools.set_policy(tools.ToolsPolicy(enabled={'search_code'}))
+        assert tools._match_tools('read a file') == ['search_code']
+        names = [s['name'] for s in tools.specs_for(
+            set(tools.TOOL_REGISTRY), can_spawn=True)]
+        assert set(names) == {'search_tools', 'use_skill', 'spawn',
+                              'check', 'join', 'search_code'}
+
+
+class TestRunnerDenialIsMode:
+    """A verb surfacing the runner's ``Denied:`` text is recorded as a
+    mode denial in tool_events."""
+
+    def test_mode_denial_recognises_the_prefix(self) -> None:
+        from guru.domain import procs
+        text = f"{procs.DENIED_PREFIX} cwd '/x' is outside the allowed dirs"
+        assert tools._mode_denial(text) is True
+        assert tools._mode_denial(f'Refused: {text}') is True
+        assert tools._mode_denial('Denied by nobody') is False
+        assert tools._mode_denial('ok') is False
+
+    def test_event_row_is_denied_mode(self, monkeypatch, fake_repo) -> None:
+        from guru.domain import ledger, procs
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', False)
+        monkeypatch.setitem(tools.TOOL_REGISTRY, 'run_tests', {
+            **tools.TOOL_REGISTRY['run_tests'],
+            'fn': lambda **kw: (f"Refused: {procs.DENIED_PREFIX} cwd '/x'"
+                                ' is outside the allowed directories')})
+        tools.execute_tool('run_tests', {'target': '/x'})
+        ledger.flush()
+        [row] = fake_repo.stream('tool_events')
+        assert row['denied'] == 'mode' and row['ok'] is False

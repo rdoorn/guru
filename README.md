@@ -437,7 +437,7 @@ state travels with the project (created lazily on first write):
 - `.guru/domains_allow.txt` — this project's network allow-list (see below).
 - `.guru/read_dirs_allow.txt` / `.guru/write_dirs_allow.txt` — approved
   file-read / file-write directories.
-- `.guru/tools.toml` — the project's tool policy (see **Tools policy**).
+- `.guru/tools.toml` — the project's tool policy (see **Audited tools**).
 - `.guru/memory/*.memory` — saved conversations, one JSON file per `/save`.
 
 ## Access modes & safeguards
@@ -476,19 +476,56 @@ Registry tools:
   (grep), `write_file`, `edit_file`, `delete_file`. All are restricted to
   allowed directories and gated by the access mode.
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
-- **Code (audited, no shell)** — `outline` (def/class map with line ranges),
-  `find_symbol` (definitions and references), `run_tests` (pytest/unittest
-  digest), `check_syntax`, `lint` (flake8, mypy when configured),
-  `git_status`, `git_diff` (read-only), `apply_patch` (unified diff,
-  all-or-nothing, write-gated). Subprocesses run with a fixed argv, a
-  scrubbed environment and resource limits; the model sees a short digest.
+- **Code** — the eight audited verbs below.
 
 `search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
 `check`, `join` are always available and not part of the registry.
 
-### Tools policy
+### Audited tools
 
-A project can narrow the toolset with `.guru/tools.toml`:
+guru has no shell tool. Coding and verification go through fixed Python
+procedures: the model chooses a **verb and a target**, guru builds the argv
+list, runs it under limits, and hands back a short digest. Design and plan:
+[`docs/plans/2026-09-24-audited-tools-plan.md`](docs/plans/2026-09-24-audited-tools-plan.md).
+
+The verbs:
+
+- `outline(path)` — def/class map of a file with line ranges (non-Python:
+  the first 40 numbered lines), so the model can pick lines to read instead
+  of reading whole files.
+- `find_symbol(name, kind='')` — definitions (AST) and references (word
+  grep) across the project's `.py` files; `kind` filters `def`/`ref`.
+- `run_tests(target='', k='', maxfail=1, detail='')` — pytest (or unittest,
+  per policy) via a fixed argv; the digest is the summary line plus the
+  failing test ids with their assertion line.
+- `check_syntax(path)` — `py_compile` in-process; `ok` or the SyntaxError.
+- `lint(path='')` — flake8, and mypy when configured; skips a linter that
+  is not installed and says so.
+- `git_status()` — changed files (porcelain); read-only.
+- `git_diff(path='', detail=False)` — `--stat` digest, or the unified diff
+  for one path; read-only, never `add`/`commit`/`checkout`.
+- `apply_patch(diff)` — a unified diff for one or more project files,
+  validated hunk by hunk before anything is written, all-or-nothing, through
+  the same write gates and sha ledger as `edit_file`.
+
+**Digest and detail.** Every verb returns at most a few hundred characters
+by default; a `detail` argument expands one item (one failing test, one
+file's diff, one linter's issues). The full subprocess output goes to the
+log and the ledger transcript, never to the model — that is what keeps a
+test run from flooding the context.
+
+**Limits.** Every subprocess runs with a fixed argv (a shell binary as the
+program is refused), in its own process group (killed whole on timeout,
+strays included), with an environment built from scratch (a secret in
+guru's own environment never reaches the child), rlimits on CPU, memory and
+file size, and output captured to files under a throw-away `HOME` so
+`fsize_mb` bounds it on disk and only the first `out_kb` reaches guru. The
+ceilings come from `[tools.limits]` in `settings.toml` (`timeout_s`,
+`cpu_s`, `mem_mb`, `fsize_mb`, `out_kb`) and a project can lower them again
+in its policy file. The runner refuses a working directory outside the read
+allow-list; that refusal is recorded like an access-mode denial.
+
+**Policy file.** A project can narrow the toolset with `.guru/tools.toml`:
 
 ```toml
 [tools]
@@ -505,25 +542,24 @@ timeout_s = 60             # per-project subprocess ceilings (see [tools.limits]
 No file means everything is enabled. `disabled` wins over `enabled`; a
 non-empty `enabled` list is an allowlist for registry tools. The always-on
 tools (`search_tools`, `use_skill`, `spawn`, `check`, `join`) are never
-subject to it. A disabled tool answers `Tool '<name>' is disabled by
-.guru/tools.toml` and the call is recorded with `denied = "policy"`. The
-file **fails closed**: if it is present but invalid (unknown key, unknown
-runner, bad limit, broken TOML) or unreadable, guru reports the problem at
-startup (naming the file) and disables *every* registry tool until it is
-fixed or removed — only `search_tools`, `use_skill`, `spawn`, `check`, `join`
-remain. A policy meant to restrict tools can never widen them by mistake.
+subject to it. A disabled tool is not advertised at all — it is not
+pre-activated, `search_tools` does not return it and it is absent from the
+tool schemas the model sees — and if the model names it anyway the call
+answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
+`denied = "policy"`.
 
-Every subprocess a tool starts runs in its own process group (killed whole on
-timeout, strays included), with output captured to files under a throw-away
-`HOME` so `fsize_mb` bounds it on disk and only the first `out_kb` reaches
-guru; shell binaries are refused as the program, and the environment is built
-from scratch (a secret in guru's own environment never reaches the child).
+**Fail closed.** If the policy file is present but invalid (unknown key,
+unknown runner, bad limit, broken TOML) or unreadable, guru reports the
+problem at startup (naming the file) and disables *every* registry tool
+until it is fixed or removed — only `search_tools`, `use_skill`, `spawn`,
+`check`, `join` remain. A policy meant to restrict tools can never widen
+them by mistake.
 
-Every tool call — allowed, refused or unknown — writes one row to the
-ledger's `tool_events` stream (tool, args head, seconds, bytes produced vs
-shown to the model, files touched, denial). `/tools` shows the last turn's
-rows; `bench/ledger_report.py` aggregates them per tool in its **Tools**
-section.
+**Audit.** Every tool call — allowed, refused or unknown — writes one row to
+the ledger's `tool_events` stream (tool, args head, seconds, bytes produced
+vs shown to the model, files touched, denial: `policy`, `mode` or
+`controller`). `/tools` shows the last turn's rows; `bench/ledger_report.py`
+aggregates them per tool in its **Tools** section.
 
 ## Architecture
 

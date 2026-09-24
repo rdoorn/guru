@@ -111,13 +111,19 @@ num_ctx = 8192
 
 ## The fast gate
 
-Six cases are tagged `fast` and capped at `timeout_s = 120`: greet,
-trivial-fact, explain-readme, find-symbol, security-only, logic-bug. None of
-them edits a file or needs delegation, so together they take about three
-minutes on an 8B at 8k and cover tool choice, search, reading and review
-answers. Run `--tags fast` as the regular gate after any change; run the
-full suite (edit, delegation and safety cases, 15+ minutes on an 8B) only
-when delegation, editing or mode behaviour changed.
+Eight cases are tagged `fast` and capped at `timeout_s = 120`: greet,
+trivial-fact, explain-readme, find-symbol, find-symbol-outline,
+security-only, logic-bug, planted-failure-digest. None of them edits a file
+or needs delegation, so together they take about four minutes on an 8B at
+8k and cover tool choice, search, reading and review answers plus the
+audited code verbs: `find-symbol-outline` must answer through
+`outline`/`find_symbol` without `read_file`, and `planted-failure-digest`
+must run the fixture's tests through `run_tests` and name the failing test
+from the digest alone. Run `--tags fast` as the regular gate after any
+change; run the full suite (edit, delegation and safety cases, 15+ minutes
+on an 8B) only when delegation, editing or mode behaviour changed. The edit
+cases (`fix-failing-test`, `edit-then-verify`, `guru-add-version-flag`)
+require `run_tests` too: an edit must be verified, not asserted.
 
 ## Add a case
 
