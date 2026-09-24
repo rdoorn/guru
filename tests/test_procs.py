@@ -38,6 +38,12 @@ class TestLimits:
         lim = procs.Limits.from_dict({'timeout_s': 5, 'bogus': 1})
         assert lim.timeout_s == 5 and lim.cpu_s == config.PROC_CPU_S
 
+    def test_from_dict_keeps_default_on_bad_value(self, caplog) -> None:
+        with caplog.at_level('WARNING', logger='guru'):
+            lim = procs.Limits.from_dict({'timeout_s': 'soon', 'cpu_s': 3})
+        assert lim.timeout_s == config.PROC_TIMEOUT_S and lim.cpu_s == 3
+        assert any('timeout_s' in r.getMessage() for r in caplog.records)
+
 
 class TestRun:
     def test_runs_fixed_argv_and_captures_output(self, allowed) -> None:
@@ -105,11 +111,12 @@ class TestRun:
         outside = tmp_path_factory.mktemp('outside')
         calls: list = []
         import subprocess
-        monkeypatch.setattr(subprocess, 'run',
+        monkeypatch.setattr(subprocess, 'Popen',
                             lambda *a, **k: calls.append(a))
         res = procs.run(_py('print(1)'), outside)
         assert res.returncode == -1
-        assert 'denied' in res.denied.lower() or str(outside) in res.denied
+        assert res.denied.startswith(procs.DENIED_PREFIX)
+        assert str(outside) in res.denied
         assert res.stdout == '' and calls == []
 
     def test_nonexistent_cwd_is_denied_not_raised(self, allowed) -> None:
@@ -118,5 +125,120 @@ class TestRun:
 
     def test_missing_executable_is_an_error_result(self, allowed) -> None:
         res = procs.run(['/nonexistent/binary-xyz'], allowed)
-        assert res.returncode == -1
-        assert 'nonexistent' in res.stderr or 'No such file' in res.stderr
+        assert res.returncode == 127            # the shim's not-found exit
+        assert 'nonexistent' in res.stderr
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_dead(pid: int, seconds: float = 3.0) -> bool:
+    import time
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+_SPAWN_SLEEPER = ('import subprocess, sys; '
+                  'p = subprocess.Popen(["sleep", "20"]); '
+                  'print(p.pid); sys.stdout.flush(); ')
+
+
+class TestProcessGroup:
+    """Children run in their own session; the whole group dies with them."""
+
+    def test_timeout_kills_the_grandchild_too(self, allowed) -> None:
+        res = procs.run(_py(_SPAWN_SLEEPER + 'import time; time.sleep(30)'),
+                        allowed, limits=procs.Limits(timeout_s=1))
+        assert res.timed_out is True and res.returncode == -1
+        pid = int(res.stdout.split()[0])
+        assert _wait_dead(pid), f'grandchild {pid} survived the timeout'
+
+    def test_normal_exit_is_not_timed_out_and_strays_are_reaped(
+            self, allowed) -> None:
+        res = procs.run(_py(_SPAWN_SLEEPER), allowed,
+                        limits=procs.Limits(timeout_s=10))
+        assert res.timed_out is False and res.returncode == 0
+        pid = int(res.stdout.split()[0])
+        assert _wait_dead(pid), f'stray grandchild {pid} survived'
+
+
+class TestBoundedCapture:
+    """Output goes to files under the temp HOME so RLIMIT_FSIZE bounds it;
+    guru reads only the head."""
+
+    def test_reads_only_the_head_and_fsize_bounds_the_file(
+            self, allowed, monkeypatch) -> None:
+        import shutil
+        sizes: dict = {}
+        real_rmtree = shutil.rmtree
+
+        def spy(path, *a, **k):
+            for f in Path(path).iterdir():
+                sizes[f.name] = f.stat().st_size
+            return real_rmtree(path, *a, **k)
+        monkeypatch.setattr(procs.shutil, 'rmtree', spy)
+        res = procs.run(
+            _py('import sys\n'
+                'for _ in range(40): sys.stdout.write("y" * 65536)\n'
+                'sys.stdout.flush()'),
+            allowed, limits=procs.Limits(out_kb=4, fsize_mb=1))
+        assert res.truncated is True
+        assert len(res.stdout) == 4096
+        assert sizes, 'capture files were not inspected before removal'
+        assert max(sizes.values()) <= 1024 * 1024
+        assert res.returncode != 0             # SIGXFSZ stopped the writer
+
+    def test_capture_files_are_removed(self, allowed) -> None:
+        res = procs.run(_py('import os; print(os.environ["HOME"])'), allowed)
+        assert not Path(res.stdout.strip()).exists()
+
+
+class TestArgvDefence:
+    @pytest.mark.parametrize('shell', sorted(procs.SHELLS))
+    def test_shell_binaries_are_refused(self, allowed, shell,
+                                        monkeypatch) -> None:
+        import subprocess
+        calls: list = []
+        monkeypatch.setattr(subprocess, 'Popen',
+                            lambda *a, **k: calls.append(a))
+        res = procs.run([f'/bin/{shell}', '-c', 'echo hi'], allowed)
+        assert res.returncode == -1 and calls == []
+        assert res.denied.startswith(procs.DENIED_PREFIX)
+        assert shell in res.denied
+
+    def test_env_extra_cannot_override_protected_keys(
+            self, allowed, caplog) -> None:
+        import json
+        with caplog.at_level('WARNING', logger='guru'):
+            res = procs.run(
+                _py('import os, json; print(json.dumps(dict(os.environ)))'),
+                allowed, env_extra={'PATH': '/evil', 'HOME': '/evil',
+                                    'PYTHONPATH': '/evil',
+                                    'PYTHONDONTWRITEBYTECODE': '0',
+                                    'OK_KEY': 'fine'})
+        env = json.loads(res.stdout)
+        assert env['PATH'] != '/evil' and env['HOME'] != '/evil'
+        assert env['PYTHONPATH'] == str(allowed)
+        assert env['PYTHONDONTWRITEBYTECODE'] == '1'
+        assert env['OK_KEY'] == 'fine'
+        assert any('PATH' in r.getMessage() for r in caplog.records)
+
+    def test_argv0_is_resolved_on_the_scrubbed_path(self, allowed) -> None:
+        res = procs.run(['true'], allowed)
+        assert res.returncode == 0 and res.denied == ''
+
+    def test_unresolvable_argv0_is_an_error_result(self, allowed) -> None:
+        res = procs.run(['no-such-binary-xyz'], allowed)
+        assert res.returncode == 127
+        assert 'no-such-binary-xyz' in res.stderr

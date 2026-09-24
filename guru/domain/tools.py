@@ -13,7 +13,8 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 from guru import config, log, session, skills, ui
-from guru.domain import decisions, files, ledger, policy, routing
+from guru.domain import (code, decisions, files, gitread, ledger, patch,
+                         policy, quality, routing)
 
 # The tools a controller (``[routing] controller = true``) keeps: it
 # coordinates and never executes (design doc §2).
@@ -560,6 +561,161 @@ TOOL_REGISTRY: dict = {
             "path": "File to delete",
         },
     },
+    # --- audited coding verbs (design plan chunk B) --------------------------
+    "outline": {
+        "fn": code.outline,
+        "description": (
+            "Outline a source file instead of reading it: one row per"
+            " def/class with its line range and signature (nested ones"
+            " indented) plus the module docstring, so you can pick the exact"
+            " lines to read_file next. Non-Python files show their first 40"
+            " numbered lines. Returns the file's sha. Use this BEFORE"
+            " read_file on any file you have not seen."
+        ),
+        "tags": [
+            "outline", "structure", "skeleton", "functions", "classes",
+            "signatures", "summary", "navigate", "code", "file", "ast",
+            "overview", "local",
+        ],
+        "parameters": {
+            "path": "Source file to outline",
+        },
+    },
+    "find_symbol": {
+        "fn": code.find_symbol,
+        "description": (
+            "Find where a function, class, method or module-level name is"
+            " defined and where it is referenced across the project's Python"
+            " files, in one call ('def: path:line (kind)' rows, then"
+            " 'ref: path:line: text' rows, max 30). kind narrows to 'def' or"
+            " 'ref'. Prefer this over search_code for 'where is X defined /"
+            " who calls X'."
+        ),
+        "tags": [
+            "symbol", "definition", "references", "callers", "usages",
+            "find", "where", "defined", "function", "class", "locate",
+            "code", "local",
+        ],
+        "parameters": {
+            "name": "The identifier to look up (e.g. 'compact_messages')",
+            "kind": "Optional filter: 'def' or 'ref' (default both)",
+        },
+        "optional": ["kind"],
+    },
+    "run_tests": {
+        "fn": quality.run_tests,
+        "description": (
+            "Run the project's test suite (pytest by default; unittest when"
+            " the project policy says so) and get a short digest: the"
+            " summary line and the failing test ids with their assertion"
+            " line. target = a test file, directory or 'file::test' node id"
+            " (default: whole project); k = pytest -k expression; maxfail ="
+            " stop after N failures (default 1); detail = a failing test id"
+            " to see that failure in full. Always run this to verify an edit"
+            " before reporting it done."
+        ),
+        "tags": [
+            "test", "tests", "pytest", "unittest", "run", "verify", "check",
+            "failing", "suite", "assert", "regression", "ci", "local",
+        ],
+        "parameters": {
+            "target": "Test file, directory or node id (default: project)",
+            "k": "Optional pytest -k expression to select tests",
+            "maxfail": "Stop after this many failures (default 1)",
+            "detail": "A failing test id to expand into its full block",
+        },
+        "optional": ["target", "k", "maxfail", "detail"],
+        "retain": "keep",
+    },
+    "check_syntax": {
+        "fn": quality.check_syntax,
+        "description": (
+            "Compile one Python file (in-process, nothing written) and"
+            " report 'ok' or the SyntaxError with line, column and text."
+            " Cheap: call it after every edit to a .py file, before"
+            " run_tests."
+        ),
+        "tags": [
+            "syntax", "compile", "check", "verify", "python", "error",
+            "parse", "valid", "code", "local",
+        ],
+        "parameters": {
+            "path": "Python file to compile",
+        },
+        "retain": "keep",
+    },
+    "lint": {
+        "fn": quality.lint,
+        "description": (
+            "Run the project's linters (flake8; mypy when the project"
+            " configures it) on a file or directory and get counts plus the"
+            " first 10 issues per linter. detail = 'flake8' or 'mypy'"
+            " returns that linter's output (up to 4 KB). Read-only."
+        ),
+        "tags": [
+            "lint", "flake8", "mypy", "style", "pep8", "typecheck", "types",
+            "static", "analysis", "quality", "warnings", "code", "local",
+        ],
+        "parameters": {
+            "path": "File or directory to lint (default: project)",
+            "detail": "Optional: 'flake8' or 'mypy' to expand that output",
+        },
+        "optional": ["path", "detail"],
+        "retain": "keep",
+    },
+    "git_status": {
+        "fn": gitread.git_status,
+        "description": (
+            "Show the working tree status of the project's git repository"
+            " (porcelain 'XY path' rows incl. untracked files) with a count."
+            " Read-only: never stages or commits."
+        ),
+        "tags": [
+            "git", "status", "changed", "modified", "untracked", "staged",
+            "working tree", "dirty", "repository", "vcs", "local",
+        ],
+        "parameters": {},
+        "retain": "keep",
+    },
+    "git_diff": {
+        "fn": gitread.git_diff,
+        "description": (
+            "Show unstaged changes in the project's git repository: a"
+            " per-file +/- stat by default, optionally limited to path;"
+            " detail=true returns the unified diff itself (capped at 8 KB)."
+            " Read-only."
+        ),
+        "tags": [
+            "git", "diff", "changes", "patch", "modified", "review", "what"
+            " changed", "unstaged", "repository", "vcs", "local",
+        ],
+        "parameters": {
+            "path": "Optional file or directory to limit the diff to",
+            "detail": "true to return the unified diff instead of the stat",
+        },
+        "optional": ["path", "detail"],
+        "retain": "keep",
+    },
+    "apply_patch": {
+        "fn": patch.apply_patch,
+        "description": (
+            "Apply a unified diff (one or more files, '--- a/x' / '+++ b/x'"
+            " or plain paths relative to the working directory). Every"
+            " hunk's context must match the file exactly; the whole patch is"
+            " validated first and applied all-or-nothing. New files inside"
+            " the project are allowed; renames, deletions and binary patches"
+            " are refused. Write-gated like edit_file (refused in read-only"
+            " mode). Returns per file the hunks applied and the new sha."
+            " Verify with check_syntax/run_tests afterwards."
+        ),
+        "tags": [
+            "patch", "diff", "apply", "unified", "hunk", "edit", "change",
+            "modify", "multi-file", "write", "code", "local",
+        ],
+        "parameters": {
+            "diff": "The unified diff text to apply",
+        },
+    },
 }
 
 
@@ -773,11 +929,24 @@ def _record_event(name: str, arguments: dict, raw: str, shown: str,
                   seconds: float, denied: str) -> None:
     """One ``tool_events`` audit row for a finished execute_tool call."""
     ok = not denied and not raw.startswith(('Tool error:', 'Unknown tool:'))
-    path = arguments.get('path') if isinstance(arguments, dict) else None
     ledger.record_tool_event(
         name, arguments, seconds=seconds, ok=ok, produced_bytes=len(raw),
-        shown_bytes=len(shown),
-        files_touched=[str(path)] if path else [], denied=denied)
+        shown_bytes=len(shown), files_touched=_files_touched(name, arguments),
+        denied=denied)
+
+
+def _files_touched(name: str, arguments: dict) -> list:
+    """The paths a tool call named: its ``path`` (or ``target`` for
+    run_tests) argument, or every file an apply_patch diff addresses."""
+    if not isinstance(arguments, dict):
+        return []
+    if name == 'apply_patch':
+        return patch.targets(str(arguments.get('diff', '')))
+    for key in ('path', 'target'):
+        value = arguments.get(key)
+        if value:
+            return [str(value)]
+    return []
 
 
 def execute_tool(name: str, arguments: dict) -> str:
@@ -793,6 +962,9 @@ def execute_tool(name: str, arguments: dict) -> str:
     # path — or skipped for delete, which prints its own line.
     if name in ('write_file', 'edit_file'):
         ui.note_tool(name, str(arguments.get('path', '')))
+    elif name == 'apply_patch':
+        ui.note_tool(name, ', '.join(patch.targets(
+            str(arguments.get('diff', '')))))
     elif name != 'delete_file':
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
     denied = ''

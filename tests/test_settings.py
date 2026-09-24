@@ -363,3 +363,10 @@ class TestToolsPolicyLoader:
     def test_invalid_toml_names_the_path(self, tmp_path) -> None:
         with pytest.raises(ValueError, match='tools.toml'):
             self._load(tmp_path, '[tools\nx = \n')
+
+    def test_unreadable_file_raises_not_defaults(self, tmp_path) -> None:
+        from guru.repositories.settings import load_tools_policy
+        d = tmp_path / 'tools.toml'
+        d.mkdir()                     # exists but cannot be read as a file
+        with pytest.raises(ValueError, match='tools.toml'):
+            load_tools_policy(d)

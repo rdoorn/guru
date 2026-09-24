@@ -409,7 +409,8 @@ Remote models are queried for their context window; no memory is shown.
 - `[tools]`
   - `preactivate = [...]` — core tools pre-activated on every agent so weaker
     models can call them directly without the `search_tools` hop (default
-    `["list_dir", "list_tree", "read_file", "search_code"]`).
+    `["list_dir", "list_tree", "read_file", "search_code", "outline",
+    "find_symbol", "run_tests", "check_syntax"]`).
   - `flat = true` — pre-activate the ENTIRE registry on every agent, so a
     capable, large-context model gets the whole toolset up front (costs more
     prompt tokens; off by default).
@@ -475,6 +476,12 @@ Registry tools:
   (grep), `write_file`, `edit_file`, `delete_file`. All are restricted to
   allowed directories and gated by the access mode.
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
+- **Code (audited, no shell)** — `outline` (def/class map with line ranges),
+  `find_symbol` (definitions and references), `run_tests` (pytest/unittest
+  digest), `check_syntax`, `lint` (flake8, mypy when configured),
+  `git_status`, `git_diff` (read-only), `apply_patch` (unified diff,
+  all-or-nothing, write-gated). Subprocesses run with a fixed argv, a
+  scrubbed environment and resource limits; the model sees a short digest.
 
 `search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
 `check`, `join` are always available and not part of the registry.
@@ -499,9 +506,18 @@ No file means everything is enabled. `disabled` wins over `enabled`; a
 non-empty `enabled` list is an allowlist for registry tools. The always-on
 tools (`search_tools`, `use_skill`, `spawn`, `check`, `join`) are never
 subject to it. A disabled tool answers `Tool '<name>' is disabled by
-.guru/tools.toml` and the call is recorded with `denied = "policy"`. Unknown
-keys, an unknown runner or a bad limit are reported at startup (naming the
-file) and the default policy is used.
+.guru/tools.toml` and the call is recorded with `denied = "policy"`. The
+file **fails closed**: if it is present but invalid (unknown key, unknown
+runner, bad limit, broken TOML) or unreadable, guru reports the problem at
+startup (naming the file) and disables *every* registry tool until it is
+fixed or removed — only `search_tools`, `use_skill`, `spawn`, `check`, `join`
+remain. A policy meant to restrict tools can never widen them by mistake.
+
+Every subprocess a tool starts runs in its own process group (killed whole on
+timeout, strays included), with output captured to files under a throw-away
+`HOME` so `fsize_mb` bounds it on disk and only the first `out_kb` reaches
+guru; shell binaries are refused as the program, and the environment is built
+from scratch (a secret in guru's own environment never reaches the child).
 
 Every tool call — allowed, refused or unknown — writes one row to the
 ledger's `tool_events` stream (tool, args head, seconds, bytes produced vs

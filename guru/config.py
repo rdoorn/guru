@@ -75,7 +75,8 @@ OUTLINE_FILE_OVER_CHARS = 8000
 # Tools pre-activated on every agent so weaker models can call them directly
 # without first calling search_tools (which they often "announce" instead of
 # doing). Overridable via settings.toml's [tools] preactivate = [...].
-PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
+PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code',
+                     'outline', 'find_symbol', 'run_tests', 'check_syntax']
 
 # Flat toolset: when true, EVERY registry tool is pre-activated on each agent,
 # so a capable model gets the whole toolset up front and never needs the
@@ -266,6 +267,10 @@ the results show. If a needed detail (a name, a location) is missing, ask.
 Before concluding code or a feature is missing, grep for its definition and
 read the file that defines it; when reviewing a file, follow its local
 imports. Never infer that something is absent from a single file.
+Prefer outline (a file's def/class map with line ranges) and find_symbol
+(where a name is defined and used) over read_file on a whole file; then
+read_file only the line range you need. After editing a .py file, verify with
+check_syntax and run_tests before you report the change.
 
 To create, change, or delete a file you MUST call write_file, edit_file, or
 delete_file in this turn and wait for it to return success — never state that
@@ -300,6 +305,8 @@ DELEGATION_HINT = (
     " (design) or SRE (reliability) sub-agent when those concerns apply."
     " Use check to poll and join to be resumed when a group finishes."
     " Prefer delegating a domain panel over reading many files yourself."
+    " Prefer outline and find_symbol over read_file on whole files, and"
+    " verify edits with check_syntax/run_tests before reporting them."
 )
 
 # Appended instead of DELEGATION_HINT when [routing] controller = true: the
@@ -323,6 +330,9 @@ CONTROLLER_HINT = (
     " refactor, review, explain, docs, ops, other and complexity as one of"
     " trivial, standard, hard (the labels pick the model that runs it);"
     " add the role (persona) and skill (method) from the catalog that fit."
+    " Every task that edits code must say: verify with run_tests/"
+    "check_syntax before reporting; tell workers to prefer outline/"
+    "find_symbol over reading whole files."
     " Complexity: " + '; '.join(
         f'{tier} = {desc}'
         for tier, desc in _routing.COMPLEXITY_DESCRIPTIONS.items())
@@ -351,7 +361,8 @@ REVIEW_PANEL = [
 # once to decompose into a parallel domain panel. Never for a controller.
 # Set 0 to disable the nudge.
 DELEGATION_NUDGE_MIN_READS = 3
-DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
+DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree',
+                         'outline', 'find_symbol'}
 # Over-read guard (turn._drive): a delegation-capable MAIN agent that reads
 # this many DISTINCT paths in one turn without spawning is nudged to
 # delegate right away, mid-turn, once per turn (triage 2026-09-24: plain

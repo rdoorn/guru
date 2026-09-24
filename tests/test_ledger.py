@@ -604,14 +604,63 @@ class TestToolEvents:
 
     def test_args_are_stringified_and_headed(self, fake_repo) -> None:
         ledger.record_tool_event(
-            'write_file', {'path': 'x', 'content': 'y' * 5000, 'depth': 3},
+            'write_file', {'path': 'x', 'content': 'y' * 5000, 'depth': 3,
+                           'pattern': 'p' * 5000},
             seconds=0.0, ok=False, produced_bytes=0, shown_bytes=0,
             files_touched=[], denied='policy')
         ledger.flush()
         [(_, row)] = fake_repo.rows
-        assert len(row['args']['content']) == ledger.ARGS_HEAD
+        assert row['args']['content'] == '<5000 chars>'
+        assert len(row['args']['pattern']) == ledger.ARGS_HEAD
         assert row['args']['depth'] == '3'
         assert row['denied'] == 'policy' and row['ok'] is False
+
+    def test_bulk_args_are_stored_as_sizes(self, fake_repo) -> None:
+        ledger.record_tool_event(
+            'edit_file', {'path': 'x.py', 'old': 'a' * 50, 'new': 'b' * 7,
+                          'content': '', 'diff': 'd' * 3, 'sha': 'abc'},
+            seconds=0.0, ok=True, produced_bytes=1, shown_bytes=1,
+            files_touched=['x.py'])
+        ledger.flush()
+        [(_, row)] = fake_repo.rows
+        assert row['args'] == {'path': 'x.py', 'old': '<50 chars>',
+                               'new': '<7 chars>', 'content': '<0 chars>',
+                               'diff': '<3 chars>', 'sha': 'abc'}
+
+    def test_remaining_args_are_redacted_when_scanning(
+            self, fake_repo, monkeypatch) -> None:
+        from guru.domain import policy
+        from tests.test_tools import _Marker
+        monkeypatch.setattr(config, 'SECRET_SCAN', True)
+        policy.set_scanner(_Marker())
+        try:
+            ledger.record_tool_event(
+                'search_code', {'pattern': 'token SECRET here',
+                                'content': 'SECRET' * 3},
+                seconds=0.0, ok=True, produced_bytes=1, shown_bytes=1,
+                files_touched=[])
+            ledger.flush()
+        finally:
+            policy.set_scanner(None)
+        [(_, row)] = fake_repo.rows
+        assert row['args']['pattern'] == 'token [REDACTED:marker] here'
+        assert row['args']['content'] == '<18 chars>'
+
+    def test_no_redaction_when_scan_is_off(
+            self, fake_repo, monkeypatch) -> None:
+        from guru.domain import policy
+        from tests.test_tools import _Marker
+        monkeypatch.setattr(config, 'SECRET_SCAN', False)
+        policy.set_scanner(_Marker())
+        try:
+            ledger.record_tool_event(
+                'search_code', {'pattern': 'SECRET'}, seconds=0.0, ok=True,
+                produced_bytes=1, shown_bytes=1, files_touched=[])
+            ledger.flush()
+        finally:
+            policy.set_scanner(None)
+        [(_, row)] = fake_repo.rows
+        assert row['args']['pattern'] == 'SECRET'
 
     def test_never_raises(self, monkeypatch) -> None:
         monkeypatch.setattr(config, 'LEDGER_ENABLED', True)

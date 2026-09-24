@@ -54,11 +54,14 @@ policy — the ``ToolsPolicy`` entity lives in ``guru.domain.tools``::
     [tools.limits]
     timeout_s = 60                         # see config.PROC_LIMIT_KEYS
 
-A missing file is the default policy (everything enabled); unknown keys,
-an unknown runner or a mistyped limit raise ``ValueError`` naming the file.
+An absent file is the default policy (everything enabled); an unreadable
+file, unknown keys, an unknown runner or a mistyped limit raise
+``ValueError`` naming the file (the CLI then fails closed: every registry
+tool disabled).
 """
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -353,21 +356,21 @@ def _tools_limits(raw: object, where: str) -> dict:
 def load_tools_policy(path: Optional[Path] = None) -> ToolsPolicy:
     """Parse and validate a project's ``.guru/tools.toml``.
 
-    ``path`` defaults to ``config.TOOLS_POLICY_PATH``; a missing file
-    yields the default policy (everything enabled). Raises ``ValueError``
-    naming the file on invalid TOML, an unknown key or table, a runner
-    outside ``TEST_RUNNERS`` or a bad ``[tools.limits]`` value.
+    ``path`` defaults to ``config.TOOLS_POLICY_PATH``. An *absent* file
+    yields the default policy (everything enabled); a file that exists but
+    cannot be read raises like an invalid one, so the caller can fail
+    closed. Raises ``ValueError`` naming the file on an unreadable file,
+    invalid TOML, an unknown key or table, a runner outside
+    ``TEST_RUNNERS`` or a bad ``[tools.limits]`` value.
     """
-    try:
-        import tomllib
-    except ModuleNotFoundError:                       # Python < 3.11
-        import tomli as tomllib                        # type: ignore
     target = Path(path) if path is not None else config.TOOLS_POLICY_PATH
     where = str(target)
     try:
         text = target.read_text(encoding='utf-8')
-    except OSError:
+    except FileNotFoundError:
         return ToolsPolicy()
+    except OSError as e:
+        raise ValueError(f'{where}: cannot read tool policy: {e}') from e
     try:
         data = tomllib.loads(text)
     except ValueError as e:                        # TOMLDecodeError

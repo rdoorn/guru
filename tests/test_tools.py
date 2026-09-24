@@ -519,3 +519,130 @@ class TestToolEvents:
         row = self._event()
         assert row['produced_bytes'] == len('token SECRET for x')
         assert row['shown_bytes'] == len(out) != row['produced_bytes']
+
+
+class TestCodeVerbRegistry:
+    """Plan B5: the audited coding verbs are registry tools with clear
+    specs, are pre-activated where the plan says, dispatch through
+    execute_tool and audit the files they touch."""
+
+    VERBS = ('outline', 'find_symbol', 'run_tests', 'check_syntax', 'lint',
+             'git_status', 'git_diff', 'apply_patch')
+
+    @pytest.fixture(autouse=True)
+    def _quiet(self, monkeypatch, fake_repo):
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', False)
+        self.repo = fake_repo
+        yield
+        tools.set_policy(None)
+
+    def _event(self) -> dict:
+        from guru.domain import ledger
+        ledger.flush()
+        return self.repo.stream('tool_events')[-1]
+
+    def test_entries_are_complete(self) -> None:
+        from guru.domain import code, gitread, patch, quality
+        fns = {'outline': code.outline, 'find_symbol': code.find_symbol,
+               'run_tests': quality.run_tests,
+               'check_syntax': quality.check_syntax, 'lint': quality.lint,
+               'git_status': gitread.git_status, 'git_diff': gitread.git_diff,
+               'apply_patch': patch.apply_patch}
+        for name in self.VERBS:
+            info = tools.TOOL_REGISTRY[name]
+            assert info['fn'] is fns[name]
+            assert len(info['description']) > 80 and info['tags']
+            assert isinstance(info['parameters'], dict)
+            for opt in info.get('optional', []):
+                assert opt in info['parameters'], (name, opt)
+        assert tools.TOOL_REGISTRY['run_tests']['optional'] == [
+            'target', 'k', 'maxfail', 'detail']
+        assert tools.TOOL_REGISTRY['git_status']['parameters'] == {}
+        assert tools.TOOL_REGISTRY['apply_patch']['parameters'] == {
+            'diff': tools.TOOL_REGISTRY['apply_patch']['parameters']['diff']}
+
+    def test_retain_policies(self) -> None:
+        for name in ('run_tests', 'lint', 'check_syntax', 'git_status',
+                     'git_diff', 'outline', 'find_symbol', 'apply_patch'):
+            assert tools.retain_policy(name) == 'keep', name
+
+    def test_preactivated_set(self) -> None:
+        for name in ('outline', 'find_symbol', 'run_tests', 'check_syntax'):
+            assert name in config.PREACTIVATE_TOOLS
+        for name in ('lint', 'git_status', 'git_diff', 'apply_patch'):
+            assert name not in config.PREACTIVATE_TOOLS
+        base, names = tools.initial_tools(can_spawn=False)
+        assert {'outline', 'find_symbol', 'run_tests',
+                'check_syntax'} <= names
+
+    def test_search_tools_finds_the_verbs(self) -> None:
+        assert tools._match_tools('run the tests')[0] == 'run_tests'
+        assert tools._match_tools('apply a unified diff patch')[0] == \
+            'apply_patch'
+        assert tools._match_tools('outline file structure')[0] == 'outline'
+        assert 'find_symbol' in tools._match_tools(
+            'find symbol definition references')[:2]
+
+    def test_execute_dispatches_and_audits(self, tmp_path,
+                                           monkeypatch) -> None:
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', {str(tmp_path)})
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', {str(tmp_path)})
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(files, '_show_change', lambda block: None)
+        monkeypatch.chdir(tmp_path)
+        files.set_path_asker(lambda q: False)
+        try:
+            (tmp_path / 'm.py').write_text('def f():\n    return 1\n')
+            out = tools.execute_tool('outline', {'path': 'm.py'})
+            assert 'L1-2 def f()' in out
+            assert self._event()['files_touched'] == ['m.py']
+            out = tools.execute_tool('check_syntax', {'path': 'm.py'})
+            assert out.startswith('ok:')
+            out = tools.execute_tool('find_symbol', {'name': 'f'})
+            assert 'def: m.py:1 (def)' in out
+            diff = ('--- a/m.py\n+++ b/m.py\n@@ -1,2 +1,2 @@\n def f():\n'
+                    '-    return 1\n+    return 2\n'
+                    '--- /dev/null\n+++ b/n.py\n@@ -0,0 +1 @@\n+x = 1\n')
+            out = tools.execute_tool('apply_patch', {'diff': diff})
+            assert out.startswith('Applied patch:')
+            row = self._event()
+            assert row['files_touched'] == ['m.py', 'n.py']
+            assert row['ok'] is True and row['denied'] == ''
+            assert (tmp_path / 'm.py').read_text().endswith('return 2\n')
+        finally:
+            files.set_path_asker(None)
+
+    def test_run_tests_audits_target(self, monkeypatch) -> None:
+        from guru.domain import quality
+        monkeypatch.setattr(quality, 'run_tests',
+                            lambda target='', k='', maxfail=1, detail='':
+                            f'ran {target}')
+        monkeypatch.setitem(tools.TOOL_REGISTRY, 'run_tests', {
+            **tools.TOOL_REGISTRY['run_tests'], 'fn': quality.run_tests})
+        out = tools.execute_tool('run_tests', {'target': 'tests/test_x.py'})
+        assert out == 'ran tests/test_x.py'
+        assert self._event()['files_touched'] == ['tests/test_x.py']
+
+    def test_apply_patch_read_only_is_denied_mode(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_READ_ONLY)
+        out = tools.execute_tool('apply_patch', {
+            'diff': '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n'})
+        assert out.startswith('Refused: read-only mode')
+        row = self._event()
+        assert row['denied'] == 'mode' and row['files_touched'] == ['x']
+
+    def test_policy_can_disable_a_verb(self) -> None:
+        tools.set_policy(tools.ToolsPolicy(disabled={'apply_patch'}))
+        out = tools.execute_tool('apply_patch', {'diff': 'x'})
+        assert out == "Tool 'apply_patch' is disabled by .guru/tools.toml"
+        assert self._event()['denied'] == 'policy'
+
+    def test_prompts_mention_the_verbs(self) -> None:
+        assert 'run_tests' in config.CONTROLLER_HINT
+        assert 'check_syntax' in config.CONTROLLER_HINT
+        for text in (config.SYSTEM_PROMPT, config.DELEGATION_HINT):
+            assert 'outline' in text and 'find_symbol' in text
+            assert 'run_tests' in text

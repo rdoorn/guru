@@ -21,7 +21,7 @@ from typing import Optional, Protocol
 
 import guru
 from guru import config, log, session
-from guru.domain import pricing
+from guru.domain import policy, pricing
 
 RUN_ID = uuid.uuid4().hex[:12]           # one per guru process
 try:
@@ -488,13 +488,29 @@ def record_label(target_id: str, labeller: str, label: str,
 
 # --- tool events -------------------------------------------------------------
 
-# Longest stored value of a tool argument (write_file's content, edit_file's
-# old/new) so the audit row stays a row; the transcript holds the full text.
+# Longest stored value of a tool argument so the audit row stays a row; the
+# transcript holds the full text.
 ARGS_HEAD = 200
+# Arguments that carry file text (write_file's content, edit_file's old/new,
+# apply_patch's diff): stored as ``<N chars>`` only — never even a head, so
+# source (and any secret in it) stays out of the audit stream.
+BULK_ARG_KEYS = frozenset(('content', 'old', 'new', 'diff'))
 
 
 def _args_head(args: dict) -> dict:
-    return {str(k): str(v)[:ARGS_HEAD] for k, v in (args or {}).items()}
+    """Audit form of a tool's arguments: bulk keys as ``<N chars>``, the
+    rest stringified, cut at ``ARGS_HEAD`` and — when ``config.SECRET_SCAN``
+    is on — redacted with the bound scanner like a remote-bound result."""
+    out: dict = {}
+    for k, v in (args or {}).items():
+        if k in BULK_ARG_KEYS:
+            out[str(k)] = f'<{len(str(v))} chars>'
+            continue
+        text = str(v)[:ARGS_HEAD]
+        if config.SECRET_SCAN:
+            text = policy.redact(text, policy.scan(text))
+        out[str(k)] = text
+    return out
 
 
 def record_tool_event(tool: str, args: dict, *, seconds: float, ok: bool,
@@ -506,7 +522,9 @@ def record_tool_event(tool: str, args: dict, *, seconds: float, ok: bool,
     model saw after redaction/digest; ``files_touched`` the paths the call
     named; ``denied`` names the gate that refused it (``policy``, ``mode``,
     ``controller``) or is empty. Argument values are stringified and cut at
-    ``ARGS_HEAD``. Session join keys as for calls. Never raises.
+    ``ARGS_HEAD``, ``BULK_ARG_KEYS`` become ``<N chars>`` and the rest are
+    redacted when the secret scan is on. Session join keys as for calls.
+    Never raises.
     """
     try:
         submit('tool_events', {

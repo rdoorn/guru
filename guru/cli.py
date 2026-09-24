@@ -104,15 +104,23 @@ def load_routing() -> routing_settings.RoutingSettings:
 
 
 def load_tools_policy() -> tools.ToolsPolicy:
-    """The project's ``.guru/tools.toml`` policy; an invalid file warns and
-    yields the default (everything enabled) rather than aborting startup."""
+    """The project's ``.guru/tools.toml`` policy.
+
+    An absent file is the default (everything enabled). A file that is
+    present but invalid or unreadable FAILS CLOSED: every registry tool is
+    disabled (the always-on tools stay) and a warning names the file, so a
+    typo in a policy meant to restrict tools never widens them.
+    """
     from guru import log
     try:
         return routing_settings.load_tools_policy()
     except ValueError as e:
-        log.warning('%s; all tools stay enabled', e)
-        ui.console.print(f"[yellow]{e}; all tools stay enabled.[/yellow]")
-        return tools.ToolsPolicy()
+        log.warning('%s; failing closed: every registry tool disabled', e)
+        ui.console.print(
+            f"[yellow]{e}; every registry tool is disabled until the file "
+            "is fixed or removed.[/yellow]")
+        return tools.ToolsPolicy(enabled=set(),
+                                 disabled=set(tools.TOOL_REGISTRY))
 
 
 def _enabled_adapters() -> list:

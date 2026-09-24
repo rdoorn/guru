@@ -104,6 +104,27 @@ def ensure_path_allowed(path: Path) -> bool:
                     config.persist_read_dir, question)
 
 
+def project_root(path: Path, fallback: bool = True):
+    """The project a path belongs to: the NEAREST (deepest) allow-listed
+    directory — read or write list — that contains the resolved ``path``.
+
+    The audited tools (outline, find_symbol, run_tests, lint, git tools,
+    apply_patch) use it as their working root. With ``fallback`` the current
+    working directory is returned when no allow-listed dir contains the
+    path; otherwise None.
+    """
+    resolved = Path(path).expanduser().resolve()
+    best = None
+    for d in set(config.ALLOWED_READ_DIRS) | set(config.ALLOWED_WRITE_DIRS):
+        base = Path(d)
+        if resolved == base or base in resolved.parents:
+            if best is None or len(base.parts) > len(best.parts):
+                best = base
+    if best is not None:
+        return best
+    return Path.cwd().resolve() if fallback else None
+
+
 def ensure_write_path_allowed(path: Path, detail: str) -> bool:
     """Gate a WRITE of ``path`` against the write allow-list. Refuses in
     read-only mode; the prompt states the exact write (``detail``)."""

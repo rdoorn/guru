@@ -302,3 +302,45 @@ class TestToolsCommand:
         assert lines[0].split()[:2] == ['tool', 'args']
         assert any(ln.startswith('read_file') for ln in lines)
         assert '0.01' in text and '0.50' in text
+
+
+class TestLoadToolsPolicyFailClosed:
+    """cli.load_tools_policy: absent file -> default; present but invalid or
+    unreadable -> every registry tool disabled (fail closed)."""
+
+    def test_absent_file_is_the_default_policy(self, tmp_path,
+                                               monkeypatch) -> None:
+        from guru.domain import tools
+        monkeypatch.setattr(config, 'TOOLS_POLICY_PATH',
+                            tmp_path / 'tools.toml')
+        pol = cli.load_tools_policy()
+        assert pol == tools.ToolsPolicy()
+        assert tools.is_enabled('read_file')
+
+    def test_invalid_file_disables_every_registry_tool(
+            self, tmp_path, monkeypatch, capsys, caplog) -> None:
+        from guru.domain import tools
+        p = tmp_path / 'tools.toml'
+        p.write_text('[tools]\nenable = ["x"]\n', encoding='utf-8')
+        monkeypatch.setattr(config, 'TOOLS_POLICY_PATH', p)
+        with caplog.at_level('WARNING', logger='guru'):
+            pol = cli.load_tools_policy()
+        assert pol.enabled == set()
+        assert pol.disabled == set(tools.TOOL_REGISTRY)
+        assert any(str(p) in r.getMessage() for r in caplog.records)
+        assert 'disabled' in capsys.readouterr().out.lower()
+        tools.set_policy(pol)
+        try:
+            assert all(not tools.is_enabled(n) for n in tools.TOOL_REGISTRY)
+            assert tools.is_enabled('search_tools')
+        finally:
+            tools.set_policy(None)
+
+    def test_unreadable_file_fails_closed(self, tmp_path,
+                                          monkeypatch) -> None:
+        from guru.domain import tools
+        d = tmp_path / 'tools.toml'
+        d.mkdir()
+        monkeypatch.setattr(config, 'TOOLS_POLICY_PATH', d)
+        pol = cli.load_tools_policy()
+        assert pol.disabled == set(tools.TOOL_REGISTRY)
