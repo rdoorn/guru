@@ -40,7 +40,8 @@ from rich.console import Console
 
 from guru import config, log, session, ui
 from guru.agents import Agent, AgentManager
-from guru.domain import conversation, ledger, policy, routing, spend, tools
+from guru.domain import (conversation, decisions, ledger, policy, routing,
+                         spend, tools)
 from guru.repositories import settings as routing_settings
 from guru.repositories.settings import RoutingSettings
 
@@ -461,8 +462,14 @@ class Orchestrator:
                     local_only: bool = False) -> _Plan:
         """Decide how a child for ``task`` would run: normalise the labels,
         scan the task text (findings force a local rung), resolve the route
-        and gather the reasons. Pure apart from the spend question."""
+        and gather the reasons. Pure apart from the spend question and the
+        ``labels`` shadow judge, which sees the normalised labels as its
+        heuristics (skipped for the local retry: same task, same labels).
+        """
         kind, complexity = routing.normalise_labels(kind, complexity)
+        if not local_only:
+            decisions.shadow('labels', decisions.label_questions(task),
+                             heuristics=[complexity, kind])
         cfg = self._routing()
         reason: list = []
         findings = len(policy.scan(task)) if cfg.secret_scan else 0

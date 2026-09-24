@@ -20,12 +20,17 @@ Two label granularities share the ``labels`` stream:
   ``task_id``, label ``good``/``bad`` — a verdict on the outcome;
 * decision labels (``guru.ledger_cli review``): ``target_id`` is
   :func:`decision_key` = ``<point>:<question>:<input_sha>``, label ``yes``
-  / ``no`` — the *correct answer* to that question for that input. Rows
-  with the same input share the key, so one label covers repeats.
+  / ``no`` for a noul, or the correct option key for a choice question
+  (the ``labels`` point) — the *correct answer* to that question for that
+  input. Rows with the same input share the key, so one label covers
+  repeats.
 
 :func:`judge_metrics` scores judge and heuristic against the decision
 labels (precision / recall / F1 / false-positive rate, positive = ``yes``)
 and suggests the P(yes) threshold maximising F1 on the labelled rows.
+Choice rows (``chosen`` is an option key) are never coerced to a bool:
+agreement is ``chosen == heuristic`` as for any row, and labelled choice
+rows count as correct/incorrect under ``choice``.
 """
 from __future__ import annotations
 
@@ -177,13 +182,15 @@ def judge_vs_labels(decisions_rows: list, labels_rows: list) -> dict:
 # --- review loop: decision labels, precision/recall, thresholds -------------
 
 def decision_labels(labels_rows: list) -> dict:
-    """``decision_key -> True/False`` from ``yes``/``no`` labels (last label
-    per key wins); other labels are ignored."""
+    """``decision_key -> truth`` (last label per key wins): ``yes``/``no``
+    become True/False (noul rows); any other non-empty label is kept as
+    the correct option key of a choice question."""
     out: dict = {}
     for r in labels_rows:
         target, label = r.get('target_id'), r.get('label')
-        if target and label in REVIEW_LABELS:
-            out[target] = label == 'yes'
+        if not target or not label:
+            continue
+        out[target] = label == 'yes' if label in REVIEW_LABELS else label
     return out
 
 
@@ -240,12 +247,15 @@ def judge_metrics(decisions_rows: list, labels_rows: list,
     ``metrics``: ``rows``, ``used`` (``{'judge': n, 'heuristic': n}``),
     ``fallbacks`` (``{reason: n}``), ``agree_rate`` (judge vs heuristic
     over decided rows), ``labelled`` (rows with a decision label),
-    ``judge`` and ``heuristic`` (:func:`prf` vs the labels, plus
+    ``judge`` and ``heuristic`` (:func:`prf` vs yes/no labels, plus
     ``undecided`` rows excluded from the counts), ``threshold``
     (:func:`suggest_threshold` over labelled rows with ``dist['yes']``, or
-    None) and ``queued_ms`` (``{'n', 'p50', 'p95'}`` of the rows' worker
-    queue wait; a high value with a normal judge ``ms`` means the worker
-    was busy, not the judge slow).
+    None), ``choice`` (``{'labelled', 'judge_correct',
+    'heuristic_correct', 'judge_undecided'}`` over rows labelled with an
+    option key, or None when there are none) and ``queued_ms``
+    (``{'n', 'p50', 'p95'}`` of the rows' worker queue wait; a high value
+    with a normal judge ``ms`` means the worker was busy, not the judge
+    slow).
     """
     truth = decision_labels(labels_rows)
     groups: dict = {}
@@ -267,6 +277,8 @@ def judge_metrics(decisions_rows: list, labels_rows: list,
             thr_pairs: list = []
             undecided = {'judge': 0, 'heuristic': 0}
             labelled = 0
+            choice: dict = {'labelled': 0, 'judge_correct': 0,
+                            'heuristic_correct': 0, 'judge_undecided': 0}
             queued: list = []
             for r in rows:
                 if isinstance(r.get('queued_ms'), (int, float)):
@@ -285,6 +297,15 @@ def judge_metrics(decisions_rows: list, labels_rows: list,
                     continue
                 labelled += 1
                 t = truth[key]
+                if not isinstance(t, bool):        # a choice's option key
+                    choice['labelled'] += 1
+                    if r.get('chosen') is None:
+                        choice['judge_undecided'] += 1
+                    elif r['chosen'] == t:
+                        choice['judge_correct'] += 1
+                    if r.get('heuristic') == t:
+                        choice['heuristic_correct'] += 1
+                    continue
                 if r.get('chosen') is None:
                     undecided['judge'] += 1
                 else:
@@ -306,6 +327,7 @@ def judge_metrics(decisions_rows: list, labels_rows: list,
                 'heuristic': {**_score(heur_pairs),
                               'undecided': undecided['heuristic']},
                 'threshold': suggest_threshold(thr_pairs),
+                'choice': choice if choice['labelled'] else None,
                 'queued_ms': {'n': len(queued), 'p50': percentile(queued, 50),
                               'p95': percentile(queued, 95)}}
     return out
@@ -457,6 +479,13 @@ def render_metrics(metrics: dict) -> str:
                 '  threshold  n/a (no labelled rows with dist)' if thr is None
                 else f"  threshold  suggested {thr['threshold']:.2f} (f1 "
                      f"{_rate(thr['f1'])} on {thr['n']} rows)")
+            ch = m.get('choice')
+            if ch:
+                out.append(
+                    f"  choice     judge {ch['judge_correct']}/"
+                    f"{ch['labelled']} correct  heuristic "
+                    f"{ch['heuristic_correct']}/{ch['labelled']} correct  "
+                    f"(judge undecided {ch['judge_undecided']})")
             out.append('')
     return '\n'.join(out).rstrip() + '\n'
 

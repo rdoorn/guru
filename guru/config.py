@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from guru import log
+from guru.domain import routing as _routing
 
 # Global config lives in ~/.guru; project-specific state lives in a .guru/
 # folder inside the current project so it travels with the project.
@@ -301,12 +302,10 @@ CONTROLLER_HINT = (
     " refactor, review, explain, docs, ops, other and complexity as one of"
     " trivial, standard, hard (the labels pick the model that runs it);"
     " add the role (persona) and skill (method) from the catalog that fit."
-    " Complexity: trivial = greetings, one-line lookups (where is X"
-    " defined, what does this flag do), a single-file summary, a"
-    " definition; standard = read or inspect a few files, explain or fix"
-    " one bug, a one-file edit with its tests; hard = multi-file refactors,"
-    " an architecture or security review of a whole codebase, subtle"
-    " concurrency or data-race bugs. Use all three tiers — a task that a"
+    " Complexity: " + '; '.join(
+        f'{tier} = {desc}'
+        for tier, desc in _routing.COMPLEXITY_DESCRIPTIONS.items())
+    + ". Use all three tiers — a task that a"
     " small model can do on trivial, one that needs care on hard.\n"
     "Spawn independent tasks in parallel, use check to poll and join to be"
     " resumed when a group finishes, then SYNTHESISE the results into one"

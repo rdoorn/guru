@@ -395,3 +395,61 @@ class TestScript:
                               capture_output=True, text=True, cwd=REPO_ROOT)
         assert proc.returncode == 0, proc.stderr
         assert '(no rows)' in proc.stdout
+
+
+def _choice(question: str, chosen: Optional[str], heuristic: str, *,
+            sha: str, judge: str = 'enc', point: str = 'labels') -> dict:
+    agree = (chosen == heuristic) if chosen is not None else None
+    return {'point': point, 'question': question, 'kind': 'choice',
+            'chosen': chosen, 'heuristic': heuristic, 'agree': agree,
+            'input_sha': sha, 'judge': judge, 'dist': {}, 'used': 'heuristic',
+            'fallback_reason': '', 'task_id': '', 'turn_id': 't1'}
+
+
+class TestChoiceRows:
+    """Choice questions (the ``labels`` point): agreement is
+    ``chosen == heuristic``; a decision label is the correct option key."""
+
+    def _rows(self) -> list:
+        return [_choice('complexity', 'hard', 'hard', sha='a'),
+                _choice('complexity', 'trivial', 'standard', sha='b'),
+                _choice('kind', 'debug', 'debug', sha='c'),
+                _choice('kind', None, 'review', sha='d')]
+
+    def test_judge_vs_heuristic_counts_choice_agreement(self) -> None:
+        a = lr.judge_vs_heuristic(self._rows())
+        assert a['labels'] == {'n': 4, 'agree': 2, 'disagree': 1,
+                               'undecided': 1, 'rate': 2 / 3}
+
+    def test_judge_metrics_agree_rate_and_option_labels(self) -> None:
+        labels = [_label('labels:complexity:a', 'hard'),      # judge+heur ok
+                  _label('labels:complexity:b', 'trivial'),   # judge ok
+                  _label('labels:kind:c', 'review'),          # both wrong
+                  _label('labels:kind:d', 'review')]          # heur ok
+        m = lr.judge_metrics(self._rows(), labels)['labels']['enc']
+        assert m['rows'] == 4 and m['labelled'] == 4
+        assert m['agree_rate'] == pytest.approx(2 / 3)
+        # yes/no scoring does not apply: nothing is coerced to a bool
+        assert m['judge']['tp'] == m['judge']['fp'] == 0
+        assert m['heuristic']['tp'] == m['heuristic']['fp'] == 0
+        assert m['threshold'] is None
+        assert m['choice'] == {'labelled': 4, 'judge_correct': 2,
+                               'heuristic_correct': 2, 'judge_undecided': 1}
+
+    def test_noul_rows_have_no_choice_block(self) -> None:
+        rows = [_judged('stall', 0.9, True, sha='a')]
+        m = lr.judge_metrics(rows, [_label('stall:stall:a', 'yes')])
+        assert m['stall']['fake']['choice'] is None
+        assert m['stall']['fake']['judge']['tp'] == 1
+
+    def test_render_shows_choice_accuracy(self) -> None:
+        labels = [_label('labels:complexity:a', 'hard')]
+        text = lr.render_metrics(lr.judge_metrics(self._rows(), labels))
+        assert 'choice' in text and 'judge 1/1' in text
+        assert 'heuristic 1/1' in text
+
+    def test_review_labels_keep_yes_no_as_bools(self) -> None:
+        truth = lr.decision_labels([_label('k1', 'yes'), _label('k2', 'no'),
+                                    _label('k3', 'hard'),
+                                    {'target_id': 'k4', 'label': ''}])
+        assert truth == {'k1': True, 'k2': False, 'k3': 'hard'}

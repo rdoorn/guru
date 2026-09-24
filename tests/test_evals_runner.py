@@ -1487,3 +1487,101 @@ class TestCliRouting:
                               transcript_path='t', cost_usd=None)
         assert cli._row(res, routed=True)[-1] == 'routes: -'
         assert cli._row(res, routed=False)[-1] == ''
+
+
+class TestGitFixture:
+    """A ``[fixture_git]`` case archives a local git repo at a pinned ref
+    into the copy, then inits git as for a directory fixture."""
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> tuple:
+        d = tmp_path / 'src'
+        d.mkdir()
+        env = ['-c', 'user.name=t', '-c', 'user.email=t@t',
+               '-c', 'commit.gpgsign=false']
+
+        def git(*args: str) -> str:
+            return subprocess.run(['git', *env, *args], cwd=d, check=True,
+                                  capture_output=True, text=True).stdout
+        git('init', '-q')
+        (d / 'pkg').mkdir()
+        (d / 'pkg' / '__init__.py').write_text('X = 1\n')
+        (d / 'tests').mkdir()
+        (d / 'tests' / 'test_x.py').write_text(
+            'from pkg import X\n\ndef test_x():\n    assert X == 1\n')
+        (d / 'pyproject.toml').write_text(
+            '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')
+        git('add', '-A')
+        git('commit', '-q', '-m', 'one')
+        first = git('rev-parse', 'HEAD').strip()
+        (d / 'later.txt').write_text('second commit\n')
+        (d / 'pkg' / '__pycache__').mkdir()
+        (d / 'pkg' / '__pycache__' / 'x.pyc').write_bytes(b'\x00')
+        git('add', '-A')
+        git('commit', '-q', '-m', 'two')
+        second = git('rev-parse', 'HEAD').strip()
+        return d, first, second
+
+    def test_archive_at_first_sha_excludes_later_file(self, tmp_path,
+                                                      repo) -> None:
+        d, first, _ = repo
+        copy = runner.prepare_fixture(cases.GitFixture(d, first),
+                                      tmp_path / 'work')
+        assert copy == tmp_path / 'work' / 'src'
+        assert (copy / 'pkg' / '__init__.py').read_text() == 'X = 1\n'
+        assert not (copy / 'later.txt').exists()
+        assert not list(copy.rglob('__pycache__'))
+        assert _git(copy, 'rev-list', '--count', 'HEAD').strip() == '1'
+        assert runner.files_changed(copy) == []
+        (copy / 'new.txt').write_text('n')
+        assert runner.files_changed(copy) == ['new.txt']
+
+    def test_archive_at_second_sha_has_it_but_no_cache(self, tmp_path,
+                                                       repo) -> None:
+        d, _, second = repo
+        copy = runner.prepare_fixture(cases.GitFixture(d, second),
+                                      tmp_path / 'work')
+        assert (copy / 'later.txt').exists()
+        assert not list(copy.rglob('__pycache__'))
+        assert not list(copy.rglob('*.pyc'))
+
+    def test_unknown_ref_raises(self, tmp_path, repo) -> None:
+        d, _, _ = repo
+        with pytest.raises(ValueError, match='git archive'):
+            runner.prepare_fixture(cases.GitFixture(d, 'no-such-ref'),
+                                   tmp_path / 'work')
+
+    def test_fixture_tests_run_with_copy_on_pythonpath(self, tmp_path,
+                                                       repo, monkeypatch):
+        d, first, _ = repo
+        monkeypatch.delenv('PYTHONPATH', raising=False)
+        copy = runner.prepare_fixture(cases.GitFixture(d, first),
+                                      tmp_path / 'work')
+        assert runner.fixture_tests_pass(copy) is True
+        (copy / 'pkg' / '__init__.py').write_text('X = 2\n')
+        assert runner.fixture_tests_pass(copy) is False
+
+    def test_pythonpath_prepends_and_keeps_existing(self, tmp_path,
+                                                    monkeypatch) -> None:
+        monkeypatch.setenv('PYTHONPATH', '/elsewhere')
+        env = runner._fixture_env(tmp_path)
+        assert env['PYTHONPATH'] == f'{tmp_path}{os.pathsep}/elsewhere'
+        monkeypatch.delenv('PYTHONPATH')
+        assert runner._fixture_env(tmp_path)['PYTHONPATH'] == str(tmp_path)
+
+    def test_run_case_records_fixture_git_in_observed(self, tmp_path, repo,
+                                                      canned) -> None:
+        d, first, _ = repo
+        case = _case()
+        case.fixture = ''
+        case.fixture_git = cases.GitFixture(d, first)
+        res = runner.run_case(case, _base(), [_base().adapter], tmp_path)
+        assert res.observed['fixture_git'] == {'path': str(d),
+                                               'ref': first}
+        assert canned['has_upload'] is False
+        assert Path(canned['cwd']).name == 'src'
+
+    def test_directory_fixture_has_no_fixture_git(self, tmp_path,
+                                                  canned) -> None:
+        res = runner.run_case(_case(), _base(), [_base().adapter], tmp_path)
+        assert res.observed['fixture_git'] is None

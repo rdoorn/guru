@@ -187,7 +187,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
-    rows = [[c.name, c.fixture, c.mode, c.model, ','.join(c.tags) or '-',
+    rows = [[c.name, c.fixture_label, c.mode, c.model, ','.join(c.tags) or '-',
              c.prompt if len(c.prompt) <= 50 else c.prompt[:47] + '...']
             for c in suite]
     print(_table(['case', 'fixture', 'mode', 'model', 'tags', 'prompt'],

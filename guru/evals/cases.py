@@ -5,6 +5,12 @@ A case is one prompt against one fixture plus the expectations under
 the repo) and ``[expect.rubric]`` (text graded by hand during triage).
 Unknown keys anywhere raise ``ValueError`` naming the key, so typos cannot
 silently disable a check.
+
+The fixture is either ``fixture = "<name>"`` (a frozen directory under
+``evals/fixtures``) or a ``[fixture_git]`` table (``path`` to a local git
+repository, absolute or relative to this checkout, and ``ref``, a commit sha
+or tag): the runner archives the repo at that ref, so a real project can be
+a fixture without being copied into the suite. Exactly one of the two.
 """
 from __future__ import annotations
 
@@ -45,9 +51,28 @@ class Expect:
     rubric: str = ''
 
 
+@dataclass(frozen=True)
+class GitFixture:
+    """A local git repository pinned to ``ref`` (commit sha or tag)."""
+    path: Path
+    ref: str
+
+    @property
+    def label(self) -> str:
+        """``git:<dir>@<ref>`` with a full sha cut to 7 characters."""
+        ref = self.ref
+        if len(ref) == 40 and all(c in '0123456789abcdef' for c in ref):
+            ref = ref[:7]
+        return f'git:{self.path.name}@{ref}'
+
+
 @dataclass
 class Case:
-    """One eval case: prompt, fixture, run settings and expectations."""
+    """One eval case: prompt, fixture, run settings and expectations.
+
+    ``fixture`` names a directory fixture; ``fixture_git`` pins a git
+    repository instead (then ``fixture`` is ``''``).
+    """
     name: str
     fixture: str
     prompt: str
@@ -56,15 +81,23 @@ class Case:
     timeout_s: int = DEFAULT_TIMEOUT_S
     tags: list[str] = field(default_factory=list)
     expect: Expect = field(default_factory=Expect)
+    fixture_git: Optional[GitFixture] = None
+
+    @property
+    def fixture_label(self) -> str:
+        """What ``list`` shows: the fixture name or the git pin."""
+        return (self.fixture_git.label if self.fixture_git is not None
+                else self.fixture)
 
 
 # Accepted TOML value types per key. ``int`` is also accepted where a float
 # is expected; ``bool`` is never accepted as an int.
 _TOP_TYPES: dict[str, type] = {
     'name': str, 'fixture': str, 'prompt': str, 'mode': str, 'model': str,
-    'timeout_s': int, 'tags': list,
+    'timeout_s': int, 'tags': list, 'fixture_git': dict,
 }
-_REQUIRED = ('name', 'fixture', 'prompt')
+_REQUIRED = ('name', 'prompt')
+_GIT_KEYS = ('path', 'ref')
 _EXPECT_TYPES: dict[str, type] = {
     'tools_used_any': list, 'tools_used_all': list, 'tools_used_none': list,
     'spawned_min': int, 'spawned_max': int, 'roles_include': list,
@@ -137,10 +170,35 @@ def _build_expect(where: str, raw: Any) -> Expect:
     return Expect(**kw)
 
 
+def _build_git_fixture(where: str, raw: dict) -> GitFixture:
+    """``[fixture_git]`` -> :class:`GitFixture`: both keys required, no
+    others; a relative ``path`` is taken from the checkout root; the path
+    must hold a git repository (a ``.git`` entry). The ref itself is
+    checked when the fixture is prepared (``git archive`` fails)."""
+    for key in raw:
+        if key not in _GIT_KEYS:
+            raise ValueError(f'{where}: unknown key [fixture_git].{key} '
+                             f'(known: {", ".join(_GIT_KEYS)})')
+    for key in _GIT_KEYS:
+        if key not in raw:
+            raise ValueError(f'{where}: [fixture_git] needs {key}')
+        if not _typed(where, f'[fixture_git].{key}', raw[key], str).strip():
+            raise ValueError(f'{where}: [fixture_git].{key} is empty')
+    repo = Path(raw['path']).expanduser()
+    if not repo.is_absolute():
+        repo = REPO_ROOT / repo
+    repo = repo.resolve()
+    if not repo.is_dir() or not (repo / '.git').exists():
+        raise ValueError(f'{where}: fixture_git path {raw["path"]!r} is '
+                         f'not a git repository ({repo})')
+    return GitFixture(repo, raw['ref'].strip())
+
+
 def load_case(path: Path, fixtures_dir: Optional[Path] = None) -> Case:
     """Parse one case file; raise ``ValueError`` on any problem.
 
-    The fixture directory must exist under ``fixtures_dir`` (default:
+    Exactly one of ``fixture`` and ``[fixture_git]`` must be given. A
+    fixture directory must exist under ``fixtures_dir`` (default:
     ``evals/fixtures`` in this checkout).
     """
     path = Path(path)
@@ -163,11 +221,20 @@ def load_case(path: Path, fixtures_dir: Optional[Path] = None) -> Case:
     if kw.get('mode', DEFAULT_MODE) not in config.MODES:
         raise ValueError(f'{where}: mode {kw["mode"]!r} not one of '
                          f'{", ".join(config.MODES)}')
-    base = Path(fixtures_dir) if fixtures_dir is not None else FIXTURES_DIR
-    fixture_path = base / kw['fixture']
-    if not fixture_path.is_dir():
-        raise ValueError(f'{where}: fixture {kw["fixture"]!r} not found '
-                         f'at {fixture_path}')
+    if ('fixture' in kw) == ('fixture_git' in kw):
+        raise ValueError(f'{where}: give exactly one of fixture (a name '
+                         'under evals/fixtures) or [fixture_git] (path, '
+                         'ref)')
+    if 'fixture_git' in kw:
+        kw['fixture_git'] = _build_git_fixture(where, kw['fixture_git'])
+        kw['fixture'] = ''
+    else:
+        base = (Path(fixtures_dir) if fixtures_dir is not None
+                else FIXTURES_DIR)
+        fixture_path = base / kw['fixture']
+        if not fixture_path.is_dir():
+            raise ValueError(f'{where}: fixture {kw["fixture"]!r} not found '
+                             f'at {fixture_path}')
     kw['expect'] = _build_expect(where, raw.get('expect', {}))
     return Case(**kw)
 

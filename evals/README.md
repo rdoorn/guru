@@ -8,6 +8,7 @@ checks on what guru *did* (tools, delegation, stalls, edits) and on what it
 evals/
   cases/<name>.toml      one prompt + expectations each
   fixtures/<name>/       frozen repos (see each FIXTURE.md for the planted facts)
+                         (or a [fixture_git] pin to a real repo, see below)
   runs/                  run files, transcripts and ledgers (git-ignored)
   TRAJECTORY.md          one row per recorded run (committed)
   triage/<run>.md        triage notes per run (committed)
@@ -163,7 +164,8 @@ during triage. Keep `answer_contains` to short, robust substrings (the
 planted strings in `FIXTURE.md`, file names) — the model's wording varies.
 
 3. `.venv/bin/python -m guru.evals list` must show it; `run --cases <name>`
-   to try it.
+   to try it. (For a real repository use `[fixture_git]` instead of
+   `fixture`; see "Git-pinned fixtures".)
 
 Guardrails: never edit a case to make it pass without a note in the triage
 file; add a case for every bug found in real use (the ledger's turn records
@@ -171,6 +173,39 @@ are the source of prompts); keep the `fast` gate under about 3 minutes and
 the whole suite under about 20 minutes on the 14B so both are run often.
 A new case that does not edit or delegate and answers in under two minutes
 should carry the `fast` tag and `timeout_s = 120`.
+
+## Git-pinned fixtures
+
+A case can run against a real local git repository instead of a directory
+under `fixtures/`: replace `fixture = "..."` with a `[fixture_git]` table
+(exactly one of the two must be present):
+
+```toml
+[fixture_git]
+path = "."                                          # absolute, or relative to this checkout
+ref = "dc0cd3111db9c6beec89ebf56315980323c441e9"    # commit sha or tag
+```
+
+The runner materialises the copy with `git archive <ref>` (so only tracked
+files at that commit are present; caches and `.git` are excluded as for a
+directory fixture), then `git init`s and commits it, so `files_changed`
+works the same way. `fixture_tests_pass` runs `python -m pytest -q` in the
+copy with this interpreter and the copy first on `PYTHONPATH` (a real repo
+has no venv of its own in the copy); the case's `observed.fixture_git`
+records `{path, ref}` for traceability, and `list` shows the pin as
+`git:<dir>@<sha7>`.
+
+Three `real` cases run guru itself this way (`--tags real`):
+`guru-explain-gpu-fit` (read), `guru-review-adapters` (review, delegation)
+and `guru-add-version-flag` (auto edit; its `fixture_tests_pass` runs
+guru's whole suite, about 30-60 s). They are pinned to the literal sha in
+each file, so runs stay comparable when the checkout moves on. **Re-pin
+deliberately**: bump the sha in the three files in one commit, say so in
+the trajectory note, and re-check the expectations still hold at the new
+commit (the prompts name files and symbols of that revision). Never
+re-pin as a side effect of another change. `--version` must not exist in
+`guru/cli.py` at the pinned commit for `guru-add-version-flag` to mean
+anything.
 
 ## Triage
 

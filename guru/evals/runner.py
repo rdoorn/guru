@@ -1,6 +1,8 @@
 """Eval runner (endpoint): one case = one prompt through the headless bench.
 
-Per case: copy the fixture into a temp dir and ``git init`` it, chdir there
+Per case: copy the fixture into a temp dir (a ``[fixture_git]`` case is
+``git archive``-d from its repository at the pinned ref) and ``git init``
+it, chdir there
 with the case's access mode and auto-deny askers (an unattended run must
 never sit on a prompt), point the ledger at the run's ``ledger/`` dir, run
 the prompt through :class:`guru.bench.BenchRun`, then collect the answer,
@@ -39,18 +41,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy as copymod
+import fnmatch
 import gzip
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Union
 
 from guru import bench, config, judges, log, session, skills
 from guru.adapters import turn
@@ -59,7 +64,7 @@ from guru.domain import conversation
 from guru.domain import decisions as decision_seam
 from guru.domain import files, ledger, policy, spend, tools
 from guru.evals import cases, checks, runs
-from guru.evals.cases import Case
+from guru.evals.cases import Case, GitFixture
 from guru.evals.checks import Observed
 from guru.evals.runs import CaseResult, Run
 from guru.repositories import settings as routing_settings
@@ -68,8 +73,8 @@ from guru.repositories.jsonl_ledger import JsonlLedger
 from guru.repositories.settings import DecisionsSettings, RoutingSettings
 from guru.scanners.secrets import load_project_scanner
 
-_COPY_IGNORE = shutil.ignore_patterns('__pycache__', '.pytest_cache',
-                                      '*.pyc', '.git')
+_IGNORE_PATTERNS = ('__pycache__', '.pytest_cache', '*.pyc', '.git')
+_COPY_IGNORE = shutil.ignore_patterns(*_IGNORE_PATTERNS)
 _GIT_EXCLUDE = '__pycache__/\n.pytest_cache/\n*.pyc\n'
 _GIT_IDENTITY = ['-c', 'user.name=evals', '-c', 'user.email=evals@local',
                  '-c', 'commit.gpgsign=false']
@@ -167,26 +172,62 @@ def _assert_no_running_loop(what: str) -> None:
 
 # --- fixture copy -----------------------------------------------------------
 
-def prepare_fixture(name: str, workdir: Path,
-                    fixtures_dir: Optional[Path] = None) -> Path:
-    """Copy fixture ``name`` to ``workdir/<name>`` and commit it in a new git.
+def _ignored(member: str) -> bool:
+    """True when any path component of ``member`` matches a cache pattern
+    (the same set ``shutil.copytree`` skips for directory fixtures)."""
+    return any(fnmatch.fnmatch(part, pat)
+               for part in Path(member).parts for pat in _IGNORE_PATTERNS)
 
-    ``files_changed`` is later computed with ``git status --porcelain`` in
-    the copy, so untracked files count as changes; caches are excluded.
-    """
-    base = Path(fixtures_dir) if fixtures_dir is not None \
-        else cases.FIXTURES_DIR
-    src = base / name
-    if not src.is_dir():
-        raise ValueError(f'fixture {name!r} not found at {src}')
-    dst = Path(workdir) / name
-    shutil.copytree(src, dst, ignore=_COPY_IGNORE)
+
+def _archive(git: GitFixture, dst: Path) -> None:
+    """Extract ``git archive <ref>`` of the repository into ``dst``
+    (skipping cache members); ``ValueError`` when git refuses the ref."""
+    proc = subprocess.run(
+        ['git', '-C', str(git.path), 'archive', '--format=tar', git.ref],
+        capture_output=True)
+    if proc.returncode != 0:
+        raise ValueError(f'git archive {git.ref!r} in {git.path} failed: '
+                         f'{proc.stderr.decode(errors="replace").strip()}')
+    dst.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+        members = [m for m in tar.getmembers() if not _ignored(m.name)]
+        tar.extractall(dst, members=members, filter='data')
+
+
+def _init_git(dst: Path) -> None:
+    """``git init`` the copy and commit everything (caches excluded) so
+    ``files_changed`` can diff against it."""
     _git(dst, 'init', '-q')
     exclude = dst / '.git' / 'info' / 'exclude'
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text(_GIT_EXCLUDE, encoding='utf-8')
     _git(dst, 'add', '-A')
     _git(dst, 'commit', '-q', '--allow-empty', '-m', 'fixture')
+
+
+def prepare_fixture(source: Union[str, GitFixture], workdir: Path,
+                    fixtures_dir: Optional[Path] = None) -> Path:
+    """Materialise the fixture under ``workdir`` and commit it in a new git.
+
+    A ``str`` names a directory under ``fixtures_dir`` (default
+    ``evals/fixtures``), copied to ``workdir/<name>``; a
+    :class:`GitFixture` is ``git archive``-d at its ref to
+    ``workdir/<repo dir name>``. ``files_changed`` is later computed with
+    ``git status --porcelain`` in the copy, so untracked files count as
+    changes; caches are excluded either way.
+    """
+    if isinstance(source, GitFixture):
+        dst = Path(workdir) / source.path.name
+        _archive(source, dst)
+    else:
+        base = Path(fixtures_dir) if fixtures_dir is not None \
+            else cases.FIXTURES_DIR
+        src = base / source
+        if not src.is_dir():
+            raise ValueError(f'fixture {source!r} not found at {src}')
+        dst = Path(workdir) / source
+        shutil.copytree(src, dst, ignore=_COPY_IGNORE)
+    _init_git(dst)
     return dst
 
 
@@ -206,13 +247,25 @@ def files_changed(repo: Path) -> list[str]:
     return sorted(paths)
 
 
+def _fixture_env(repo: Path) -> dict:
+    """The environment for the fixture's pytest: ``PYTHONPATH`` starts with
+    the copy, so a copied package (a git fixture of a real project, which
+    has no venv of its own) shadows any installed one."""
+    env = dict(os.environ)
+    prev = env.get('PYTHONPATH', '')
+    env['PYTHONPATH'] = str(repo) + (os.pathsep + prev if prev else '')
+    return env
+
+
 def fixture_tests_pass(repo: Path,
                        timeout: float = FIXTURE_PYTEST_TIMEOUT_S) -> bool:
-    """Run the fixture's own pytest in ``repo``; True when it exits 0."""
+    """Run the fixture's own pytest in ``repo`` (this interpreter, the copy
+    first on ``PYTHONPATH``); True when it exits 0."""
     try:
         proc = subprocess.run(
             [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider'],
-            cwd=repo, capture_output=True, text=True, timeout=timeout)
+            cwd=repo, capture_output=True, text=True, timeout=timeout,
+            env=_fixture_env(repo))
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0
@@ -484,7 +537,8 @@ def run_case(case: Case, base_state: session.SessionState,
     ledger rows under ``out_dir/ledger``. A timeout is detected as the
     bench does: wall time reached ``case.timeout_s``. ``routing`` routes
     sub-agents (see :class:`Routing`); ``allow_spend`` grants remote spend
-    for the case.
+    for the case. A ``[fixture_git]`` case records ``{'path', 'ref'}`` as
+    ``observed.fixture_git``.
     """
     _assert_no_running_loop('run_case')
     out_dir = Path(out_dir)
@@ -499,7 +553,8 @@ def run_case(case: Case, base_state: session.SessionState,
     changed: list[str] = []
     tests_pass: Optional[bool] = None
     try:
-        copy = prepare_fixture(case.fixture, workdir, fixtures_dir)
+        copy = prepare_fixture(case.fixture_git or case.fixture, workdir,
+                               fixtures_dir)
         try:
             agents, seconds, error = _execute(case, copy, base_state,
                                               adapters, repo, routing,
@@ -515,6 +570,9 @@ def run_case(case: Case, base_state: session.SessionState,
         shutil.rmtree(workdir, ignore_errors=True)
     timed_out = bool(case.timeout_s) and seconds >= case.timeout_s
     obs = _observe(agents, seconds, timed_out, changed, tests_pass, error)
+    if case.fixture_git is not None:
+        obs.fixture_git = {'path': str(case.fixture_git.path),
+                           'ref': case.fixture_git.ref}
     tpath = out_dir / 'transcripts' / f'{case.name}.json.gz'
     _save_transcript(agents, tpath)
     results = checks.evaluate(case.expect, obs)

@@ -1,0 +1,23 @@
+# Real-repo case: guru itself, pinned to a commit (see evals/README.md,
+# "Git-pinned fixtures"; re-pin deliberately, never by search-and-replace).
+# No spawned_min: a controller run delegates, a plain run answers itself;
+# the answer checks hold for both.
+name = "guru-review-adapters"
+prompt = "Review guru/adapters/ollama.py, anthropic.py and litellm.py for consistency of provider error handling and ledger call recording; report differences and risks."
+timeout_s = 480
+tags = ["real", "review", "delegation"]
+
+[fixture_git]
+path = "."
+ref = "dc0cd3111db9c6beec89ebf56315980323c441e9"
+
+[expect.behaviour]
+tools_used_none = ["write_file", "edit_file", "delete_file"]
+max_seconds = 420
+
+[expect.content]
+answer_regex = ["_record_call|record_call", "provider_errors|_note_error|last_error"]
+files_changed = []
+
+[expect.rubric]
+text = "Compares the three adapters: anthropic.py and litellm.py share the _note_error(e) pattern (ledger.bump('provider_errors') + session.last_error) and a _record_call(phase, resp, seconds) wrapper around ledger.record_call, while ollama.py records calls with prompt/eval counts and handles errors differently; names at least one concrete divergence (what is counted, what is caught, what a failed call records) and its risk for the ledger's cost/latency numbers."

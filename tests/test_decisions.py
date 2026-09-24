@@ -424,3 +424,105 @@ class TestQuestionBuilders:
                                state='s', options={'a': 'A', 'b': 'B'})
         decisions.Question(id='x', kind=decisions.CHOICE, instructions='?',
                            state='s', options={'a': 'A', 'b': 'B'})
+
+
+class ChoiceJudge:
+    """Judge picking a fixed option key for every choice question."""
+    name = 'choice-fake'
+
+    def __init__(self, pick: dict) -> None:
+        self.pick, self.calls = pick, []
+
+    def ask(self, questions: list) -> list:
+        self.calls.append(questions)
+        out = []
+        for q in questions:
+            key = self.pick[q.id]
+            dist = {k: (0.7 if k == key else 0.1) for k in q.options}
+            out.append(decisions.Answer(chosen=key, dist=dist,
+                                        confidence=0.6, judge=self.name,
+                                        ms=2))
+        return out
+
+
+class TestLabelQuestions:
+    """``label_questions``: complexity and kind choices over a task."""
+
+    def test_ids_kinds_and_options(self) -> None:
+        from guru.domain import routing
+        qs = decisions.label_questions('fix the failing test in cli.py')
+        assert [q.id for q in qs] == ['complexity', 'kind']
+        assert all(q.kind == decisions.CHOICE for q in qs)
+        assert tuple(qs[0].options) == routing.COMPLEXITY
+        assert tuple(qs[1].options) == routing.KINDS
+        assert all('fix the failing test in cli.py' in q.state for q in qs)
+
+    def test_complexity_options_carry_the_controller_descriptions(self):
+        from guru.domain import routing
+        q = decisions.label_questions('t')[0]
+        for tier, desc in routing.COMPLEXITY_DESCRIPTIONS.items():
+            assert desc in q.options[tier]
+            assert desc in config.CONTROLLER_HINT
+        assert len(set(q.options.values())) == len(q.options)
+
+    def test_kind_options_are_one_line_and_distinct(self) -> None:
+        q = decisions.label_questions('t')[1]
+        for key, desc in q.options.items():
+            assert '\n' not in desc and desc.strip(), key
+        assert len(set(q.options.values())) == len(q.options)
+
+    def test_long_task_is_cut(self) -> None:
+        q = decisions.label_questions('x' * 10000)[0]
+        assert len(q.state) <= 4100
+
+
+class TestShadowPerQuestionHeuristics:
+    """``shadow(..., heuristics=[...])``: one heuristic per question."""
+
+    @pytest.fixture(autouse=True)
+    def _repo(self, fake_repo, monkeypatch) -> None:
+        decisions.clear_judges()
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
+        self.repo = fake_repo
+
+    def _rows(self) -> list:
+        decisions.flush()
+        ledger.flush()
+        return [r for s, r in self.repo.rows if s == 'decisions']
+
+    def test_each_row_gets_its_own_heuristic_and_agreement(self) -> None:
+        decisions.set_judge('labels', ChoiceJudge(
+            {'complexity': 'hard', 'kind': 'debug'}))
+        decisions.shadow('labels', decisions.label_questions('fix it'),
+                         heuristics=['standard', 'debug'])
+        rows = {r['question']: r for r in self._rows()}
+        assert set(rows) == {'complexity', 'kind'}
+        assert rows['complexity']['kind'] == decisions.CHOICE
+        assert rows['complexity']['heuristic'] == 'standard'
+        assert rows['complexity']['chosen'] == 'hard'
+        assert rows['complexity']['agree'] is False
+        assert rows['kind']['heuristic'] == 'debug'
+        assert rows['kind']['chosen'] == 'debug'
+        assert rows['kind']['agree'] is True
+        assert rows['kind']['threshold'] is None
+
+    def test_scalar_heuristic_still_applies_to_every_question(self):
+        decisions.set_judge('stall', FakeJudge(0.9))
+        decisions.shadow('stall', [_noul('a'), _noul('b')], heuristic=True)
+        assert [r['heuristic'] for r in self._rows()] == [True, True]
+
+    def test_wrong_length_list_logs_none_heuristics(self, caplog) -> None:
+        decisions.set_judge('stall', FakeJudge(0.9))
+        with caplog.at_level('WARNING'):
+            decisions.shadow('stall', [_noul('a'), _noul('b')],
+                             heuristics=[True])
+        rows = self._rows()
+        assert [r['heuristic'] for r in rows] == [None, None]
+        assert [r['agree'] for r in rows] == [None, None]
+        assert any('heuristics' in m for m in caplog.messages)
+
+    def test_heuristics_wins_over_heuristic(self) -> None:
+        decisions.set_judge('stall', FakeJudge(0.9))
+        decisions.shadow('stall', [_noul('a'), _noul('b')], heuristic=True,
+                         heuristics=[False, True])
+        assert [r['heuristic'] for r in self._rows()] == [False, True]

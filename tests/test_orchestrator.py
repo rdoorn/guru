@@ -1153,3 +1153,108 @@ class TestLocalRetry:
         # is reported; the refused retry attempt is recorded after it
         assert statuses == ['running', 'error', 'refused']
         assert launched == [] and main.queue
+
+
+class TestLabelsShadow:
+    """_plan_child shadows the controller's kind/complexity labels at the
+    ``labels`` point, one heuristic per question."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch):
+        from guru.domain import decisions, policy, spend
+        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
+        spend.reset()
+        spend.set_spend_asker(None)
+        policy.set_scanner(None)
+        decisions.clear_judges()
+        yield
+        decisions.clear_judges()
+        spend.reset()
+        spend.set_spend_asker(None)
+        policy.set_scanner(None)
+
+    def _seen(self, monkeypatch) -> list:
+        from guru.domain import decisions
+        seen: list = []
+
+        def fake_shadow(point, questions, heuristic=None, *,
+                        heuristics=None):
+            seen.append((point, [q.id for q in questions],
+                         [q.state for q in questions], heuristic,
+                         heuristics))
+        monkeypatch.setattr(decisions, 'shadow', fake_shadow)
+        return seen
+
+    def _orch(self):
+        from guru.orchestrator import Orchestrator
+        from guru.repositories.adapters import AdapterRegistry
+        from guru.repositories.settings import RoutingSettings, RungSpec
+        registry = AdapterRegistry([_fake_adapter('Local', False)])
+        o = Orchestrator(registry=registry, routing=RoutingSettings(
+            ladders={'default': [RungSpec('Local', 'qwen3:14b', 'hard',
+                                          default=True)]},
+            spend_confirm='auto'))
+        main = o.manager.active
+        main.busy = True
+        main.state.adapter = registry.get('Local')
+        main.state.model = 'qwen3:32b'
+        return o, main
+
+    def test_spawn_shadows_normalised_labels_per_question(
+            self, monkeypatch, fake_repo) -> None:
+        seen = self._seen(monkeypatch)
+        o, main = self._orch()
+        child = o._make_child(main, 'fix the flaky test', kind='Debug',
+                              complexity='HARD')
+        assert child is not None
+        assert len(seen) == 1
+        point, ids, states, heuristic, heuristics = seen[0]
+        assert point == 'labels'
+        assert ids == ['complexity', 'kind']
+        assert heuristic is None
+        assert heuristics == ['hard', 'debug']
+        assert all('fix the flaky test' in s for s in states)
+
+    def test_inert_routing_still_shadows(self, monkeypatch,
+                                         fake_repo) -> None:
+        from guru.orchestrator import Orchestrator
+        seen = self._seen(monkeypatch)
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        o._make_child(main, 'explain X', kind='explain')
+        assert [(s[0], s[4]) for s in seen] == [
+            ('labels', ['standard', 'explain'])]
+
+    def test_local_retry_does_not_shadow_again(self, monkeypatch,
+                                               fake_repo) -> None:
+        seen = self._seen(monkeypatch)
+        o, main = self._orch()
+        o._plan_child(main, 't', 'review', 'standard', local_only=True)
+        assert seen == []
+
+    def test_rows_reach_the_ledger_with_a_choice_judge(self, fake_repo):
+        from guru.domain import decisions
+
+        class Pick:
+            name = 'pick'
+
+            def ask(self, questions):
+                return [decisions.Answer(
+                    chosen=list(q.options)[0], dist={}, confidence=1.0,
+                    judge=self.name, ms=1) for q in questions]
+        decisions.set_judge('labels', Pick())
+        o, main = self._orch()
+        o._make_child(main, 'summarise README', kind='explain',
+                      complexity='trivial')
+        decisions.flush()
+        ledger.flush()
+        rows = {r['question']: r for s, r in fake_repo.rows
+                if s == 'decisions' and r['point'] == 'labels'}
+        assert rows['complexity']['heuristic'] == 'trivial'
+        assert rows['complexity']['chosen'] == 'trivial'
+        assert rows['complexity']['agree'] is True
+        assert rows['kind']['heuristic'] == 'explain'
+        assert rows['kind']['chosen'] == 'debug'
+        assert rows['kind']['agree'] is False

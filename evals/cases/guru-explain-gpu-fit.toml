@@ -1,0 +1,21 @@
+# Real-repo case: guru itself, pinned to a commit (see evals/README.md,
+# "Git-pinned fixtures"; re-pin deliberately, never by search-and-replace).
+name = "guru-explain-gpu-fit"
+prompt = "Explain how guru decides the context window that fits on the GPU for an Ollama model: which functions are involved, what is measured, and where the result is persisted."
+timeout_s = 360
+tags = ["real", "read"]
+
+[fixture_git]
+path = "."
+ref = "dc0cd3111db9c6beec89ebf56315980323c441e9"
+
+[expect.behaviour]
+tools_used_any = ["read_file", "search_code"]
+max_seconds = 300
+
+[expect.content]
+answer_regex = ["ollama\\.ps|size_vram|_measure_at|calibrat", "model_ctx\\.json"]
+files_changed = []
+
+[expect.rubric]
+text = "Names the two probe loads (OllamaAdapter._calibrated_ctx calls _measure_at at a low and a high context and reads size/size_vram from ollama.ps), the KV-per-token estimate derived from the two footprints (size = weights + ctx * kv_per_token, compared with the metadata estimate), and that the chosen num_ctx is persisted per model by config.save_model_ctx in ~/.guru/model_ctx.json."

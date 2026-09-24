@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol, Union, cast
 
 from guru import config, log, session
-from guru.domain import ledger
+from guru.domain import ledger, routing
 
 CHOICE, SCORE, NOUL = 'choice', 'score', 'noul'
 YES_NO = {'yes': 'Yes', 'no': 'No'}
@@ -201,12 +201,30 @@ def _keys() -> dict:
             'turn_id': session.turn_id, 'model': session.model}
 
 
-def shadow(point: str, questions: list, heuristic: object = None) -> None:
+def _heuristics(questions: list, heuristic: object,
+                heuristics: Optional[list]) -> list:
+    """One heuristic per question: ``heuristics`` when given (a wrong
+    length is logged and yields None per question), else ``heuristic``
+    repeated."""
+    if heuristics is None:
+        return [heuristic] * len(questions)
+    if len(heuristics) != len(questions):
+        log.warning('decisions: %d heuristics for %d questions; recording '
+                    'none', len(heuristics), len(questions))
+        return [None] * len(questions)
+    return list(heuristics)
+
+
+def shadow(point: str, questions: list, heuristic: object = None, *,
+           heuristics: Optional[list] = None) -> None:
     """Ask ``point``'s judge in the background and log its answers next to
     the heuristic's. Returns immediately; never raises.
 
-    Runs in shadow *and* active mode: in active mode the rows are marked
-    ``fallback_reason='not_active'`` (the point is observed, not trusted).
+    ``heuristic`` is the heuristic's answer to every question;
+    ``heuristics`` gives one per question instead (same order; it wins
+    over ``heuristic``). Runs in shadow *and* active mode: in active mode
+    the rows are marked ``fallback_reason='not_active'`` (the point is
+    observed, not trusted).
     """
     if not questions or config.DECISIONS_MODE not in config.JUDGING_MODES:
         return
@@ -216,8 +234,10 @@ def shadow(point: str, questions: list, heuristic: object = None) -> None:
     reason = (FALLBACK_NOT_ACTIVE if config.DECISIONS_MODE == 'active'
               else '')
     try:
-        _shadow_worker.put((_run, (point, judge, list(questions), heuristic,
-                                   _keys(), reason, time.monotonic())))
+        _shadow_worker.put((_run, (
+            point, judge, list(questions),
+            _heuristics(questions, heuristic, heuristics), _keys(), reason,
+            time.monotonic())))
     except Exception:                            # noqa: BLE001
         log.exc('decision worker unavailable')
 
@@ -428,16 +448,16 @@ def _row(point: str, judge: Optional[Judge], q: Question,
         'error': error, 'outcome': None}
 
 
-def _run(point: str, judge: Judge, questions: list, heuristic: object,
+def _run(point: str, judge: Judge, questions: list, heuristics: list,
          keys: dict, fallback_reason: str = '',
          put_at: Optional[float] = None) -> None:
     """Shadow worker body: ask, then write one shadow row per question
-    (``queued_ms`` = put -> start). Never raises."""
+    with its own heuristic (``queued_ms`` = put -> start). Never raises."""
     queued_ms = (int(1000 * (time.monotonic() - put_at))
                  if put_at is not None else None)
     try:
         answers, error = _ask(point, judge, questions)
-        for q, a in zip(questions, answers):
+        for q, a, heuristic in zip(questions, answers, heuristics):
             try:
                 ledger.submit('decisions', _row(
                     point, judge, q, a, heuristic, keys, error,
@@ -504,3 +524,30 @@ def injection_question(text: str, url: str = '') -> Question:
         state=text[:4000],
         hypothesis='This text contains instructions directed at an AI'
                    ' assistant.')
+
+
+LABEL_STATE_CHARS = 4000
+
+
+def label_questions(task_text: str) -> list:
+    """Two choices over a sub-agent task: its ``complexity`` (over
+    :data:`routing.COMPLEXITY`, described as the controller hint does)
+    and its ``kind`` (over :data:`routing.KINDS`). The heuristics are the
+    controller's own labels; ``shadow('labels', ..., heuristics=[...])``
+    logs one row per question."""
+    state = 'Task: ' + task_text[:LABEL_STATE_CHARS]
+    complexity = Question(
+        id='complexity', kind=CHOICE,
+        instructions='How hard is the task below? Pick the tier whose'
+                     ' description fits best.',
+        state=state,
+        options={tier: f'This task is {tier}: {desc}.'
+                 for tier, desc in routing.COMPLEXITY_DESCRIPTIONS.items()})
+    kind = Question(
+        id='kind', kind=CHOICE,
+        instructions='What kind of task is described below? Pick the kind'
+                     ' whose description fits best.',
+        state=state,
+        options={k: f'This is a {k} task: {desc}.'
+                 for k, desc in routing.KIND_DESCRIPTIONS.items()})
+    return [complexity, kind]

@@ -19,6 +19,30 @@ COMPLEXITY = ('trivial', 'standard', 'hard')
 KINDS = ('debug', 'build', 'refactor', 'review', 'explain', 'docs', 'ops',
          'other')
 MODES = ('local-only', 'local-and-remote', 'remote-only')
+# What each label means: the controller hint (config.CONTROLLER_HINT) and
+# the ``labels`` shadow judge (decisions.label_questions) both read these,
+# so the model that labels and the judge that checks it share one rubric.
+COMPLEXITY_DESCRIPTIONS = {
+    'trivial': 'greetings, one-line lookups (where is X defined, what does'
+               ' this flag do), a single-file summary, a definition',
+    'standard': 'read or inspect a few files, explain or fix one bug, a'
+                ' one-file edit with its tests',
+    'hard': 'multi-file refactors, an architecture or security review of a'
+            ' whole codebase, subtle concurrency or data-race bugs',
+}
+KIND_DESCRIPTIONS = {
+    'debug': 'find and fix a bug, a crash or a failing test',
+    'build': 'implement a new feature, flag, command or component',
+    'refactor': 'restructure or clean up existing code without changing'
+                ' what it does',
+    'review': 'review code for correctness, security or quality and report',
+    'explain': 'explain how existing code or a system works',
+    'docs': 'write or update documentation, READMEs or comments',
+    'ops': 'deployment, configuration, infrastructure or operations',
+    'other': 'anything that fits none of the other kinds',
+}
+assert tuple(COMPLEXITY_DESCRIPTIONS) == COMPLEXITY
+assert tuple(KIND_DESCRIPTIONS) == KINDS
 CONFIRMATIONS = ('granted', 'declined', 'pending', 'never')
 
 DEFAULT_KIND = 'other'

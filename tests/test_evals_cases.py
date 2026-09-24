@@ -259,3 +259,110 @@ class TestShippedCases:
         assert {'review', 'security'} <= set(by_name['security-only'].tags)
         assert 'review' in by_name['logic-bug'].tags
         assert 'no-tools' in by_name['greet'].tags
+
+
+GIT_MINIMAL = '''
+name = "guru-real"
+prompt = "explain"
+
+[fixture_git]
+path = "{path}"
+ref = "{ref}"
+'''
+
+
+class TestGitFixture:
+    """``[fixture_git]``: a local git repo pinned to a ref replaces
+    ``fixture``; exactly one of the two must be given."""
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Path:
+        d = tmp_path / 'repo'
+        (d / '.git').mkdir(parents=True)
+        return d
+
+    def test_parses_path_and_ref(self, tmp_path, repo) -> None:
+        text = GIT_MINIMAL.format(path=repo, ref='abc123')
+        c = cases.load_case(_write(tmp_path, 'g', text))
+        assert c.fixture == ''
+        assert c.fixture_git is not None
+        assert c.fixture_git.path == repo.resolve()
+        assert c.fixture_git.ref == 'abc123'
+        assert c.fixture_label == 'git:repo@abc123'
+
+    def test_relative_path_resolves_against_the_checkout(
+            self, tmp_path) -> None:
+        text = GIT_MINIMAL.format(path='.', ref='HEAD')
+        c = cases.load_case(_write(tmp_path, 'g', text))
+        assert c.fixture_git is not None
+        assert c.fixture_git.path == cases.REPO_ROOT
+        assert c.fixture_label == f'git:{cases.REPO_ROOT.name}@HEAD'
+
+    def test_label_shortens_a_sha(self, tmp_path, repo) -> None:
+        sha = 'dc0cd3111db9c6beec89ebf56315980323c441e9'
+        c = cases.load_case(_write(tmp_path, 'g', GIT_MINIMAL.format(
+            path=repo, ref=sha)))
+        assert c.fixture_label == 'git:repo@dc0cd31'
+
+    def test_plain_fixture_label_is_its_name(self, tmp_path,
+                                             fixtures_dir) -> None:
+        c = cases.load_case(_write(tmp_path, 'greet', MINIMAL),
+                            fixtures_dir=fixtures_dir)
+        assert c.fixture_label == 'docs-only'
+
+    def test_both_fixture_and_fixture_git_raise(self, tmp_path, repo,
+                                                fixtures_dir) -> None:
+        text = MINIMAL + f'\n[fixture_git]\npath = "{repo}"\nref = "x"\n'
+        with pytest.raises(ValueError, match='exactly one'):
+            cases.load_case(_write(tmp_path, 'g', text),
+                            fixtures_dir=fixtures_dir)
+
+    def test_neither_raises_naming_both(self, tmp_path, fixtures_dir):
+        text = 'name = "x"\nprompt = "p"\n'
+        with pytest.raises(ValueError) as ei:
+            cases.load_case(_write(tmp_path, 'g', text),
+                            fixtures_dir=fixtures_dir)
+        assert 'fixture' in str(ei.value) and 'fixture_git' in str(ei.value)
+
+    @pytest.mark.parametrize('body, msg', [
+        ('path = "{path}"', 'ref'),
+        ('ref = "x"', 'path'),
+        ('path = "{path}"\nref = 7', 'ref must be str'),
+        ('path = "{path}"\nref = "x"\nextra = 1', 'extra'),
+        ('path = "{path}"\nref = ""', 'ref'),
+    ])
+    def test_invalid_table_raises(self, tmp_path, repo, body, msg) -> None:
+        text = ('name = "x"\nprompt = "p"\n\n[fixture_git]\n'
+                + body.format(path=repo) + '\n')
+        with pytest.raises(ValueError, match=msg):
+            cases.load_case(_write(tmp_path, 'g', text))
+
+    def test_table_must_be_a_table(self, tmp_path) -> None:
+        text = 'name = "x"\nprompt = "p"\nfixture_git = "nope"\n'
+        with pytest.raises(ValueError, match='fixture_git must be dict'):
+            cases.load_case(_write(tmp_path, 'g', text))
+
+    def test_path_must_be_a_git_repo(self, tmp_path) -> None:
+        plain = tmp_path / 'plain'
+        plain.mkdir()
+        with pytest.raises(ValueError, match='not a git repository'):
+            cases.load_case(_write(tmp_path, 'g', GIT_MINIMAL.format(
+                path=plain, ref='x')))
+        with pytest.raises(ValueError, match='not a git repository'):
+            cases.load_case(_write(tmp_path, 'g', GIT_MINIMAL.format(
+                path=tmp_path / 'missing', ref='x')))
+
+    def test_real_cases_pin_a_full_sha(self) -> None:
+        """The committed guru cases pin a 40-hex sha (re-pinned only on
+        purpose; see evals/README.md)."""
+        real = [c for c in cases.load_cases(cases.CASES_DIR)
+                if 'real' in c.tags]
+        assert {c.name for c in real} == {
+            'guru-explain-gpu-fit', 'guru-review-adapters',
+            'guru-add-version-flag'}
+        for c in real:
+            assert c.fixture_git is not None, c.name
+            assert c.fixture_git.path == cases.REPO_ROOT
+            assert len(c.fixture_git.ref) == 40, c.name
+            assert int(c.fixture_git.ref, 16) >= 0
+            assert c.timeout_s >= (c.expect.max_seconds or 0)

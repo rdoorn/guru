@@ -27,6 +27,9 @@ class Observed:
     fixture_tests_pass: Optional[bool]
     timed_out: bool
     error: str = ''
+    # ``{'path', 'ref'}`` of a ``[fixture_git]`` case (traceability);
+    # None for a directory fixture.
+    fixture_git: Optional[dict] = None
 
 
 @dataclass
