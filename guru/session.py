@@ -75,6 +75,9 @@ class SessionState:
         self.agent_id: str = 'main'
         self.task_id: str = ''
         self.turn_id: str = ''
+        # The sub-agent task text (empty for the main agent): the sandbox
+        # quality gate hands it to the reviewer next to the user's request.
+        self.task_text: str = ''
         # Ledger accumulators (guru.domain.ledger.record_call / bump): calls
         # made, USD spent (cost_known drops to False once any call could not
         # be priced; unpriced_calls counts them so a turn can tell whether

@@ -32,7 +32,7 @@ from typing import Iterable, Optional
 from guru import log
 from guru.domain import procs
 from guru.domain.procs import ProcResult
-from guru.sandbox.colima import DOCKER, _limits, docker_env
+from guru.sandbox.colima import DOCKER, cli_limits, docker_env
 
 PROXY_PORT = 8888
 PROXY_PIDS = 64
@@ -88,8 +88,11 @@ def allowlist_from_domains(domains: Iterable[str]) -> list[str]:
 def render_filter(allowlist: list[str]) -> str:
     """The tinyproxy filter file: one anchored extended-regex per host,
     ``^host:443$`` — the exact request-URI of ``CONNECT host:443``. A
-    plain-HTTP URL (``http://host/…``) or another port never matches."""
-    return ''.join(f'^{re.escape(host)}:{CONNECT_PORT}$\n'
+    plain-HTTP URL (``http://host/…``) or another port never matches.
+    Hostnames are ``[a-z0-9.-]`` (see :func:`allowlist_from_domains`), so
+    only ``.`` needs escaping; ``-`` is left bare because ``\\-`` outside a
+    bracket expression is undefined in POSIX ERE."""
+    return ''.join(f"^{host.replace('.', chr(92) + '.')}:{CONNECT_PORT}$\n"
                    for host in allowlist)
 
 
@@ -145,7 +148,7 @@ def write_config(config_dir: Path, allowlist: list[str],
 def _docker(args: list[str], cwd: Optional[Path], timeout_s: int,
             out_kb: int = 64) -> ProcResult:
     where = Path(cwd) if cwd is not None else Path.cwd()
-    return procs.run([DOCKER, *args], where, _limits(timeout_s, out_kb),
+    return procs.run([DOCKER, *args], where, cli_limits(timeout_s, out_kb),
                      env_extra=docker_env())
 
 
@@ -154,16 +157,30 @@ def _failed(res: ProcResult) -> str:
             or f'exit {res.returncode}')[:400]
 
 
+def network_is_internal(name: str, cwd: Optional[Path] = None) -> bool:
+    """``docker network inspect --format '{{.Internal}}'`` is ``true``."""
+    res = _docker(['network', 'inspect', '--format', '{{.Internal}}', name],
+                  cwd, NETWORK_TIMEOUT_S)
+    return res.returncode == 0 and not res.denied and \
+        res.stdout.strip() == 'true'
+
+
 def network_up(name: str, cwd: Optional[Path] = None) -> None:
-    """``docker network create --internal <name>``; an existing network of
-    that name is reused. ``ProxyError`` otherwise."""
+    """``docker network create --internal <name>``. An existing network of
+    that name is reused only when ``docker network inspect`` confirms it is
+    internal (a same-named routable network would be a bypass);
+    ``ProxyError`` otherwise."""
     res = _docker(['network', 'create', '--internal', name], cwd,
                   NETWORK_TIMEOUT_S)
     if res.returncode == 0 and not res.denied:
         return
     if 'already exists' in res.stderr:
-        log.info('sandbox proxy: reusing existing network %s', name)
-        return
+        if network_is_internal(name, cwd):
+            log.info('sandbox proxy: reusing existing internal network %s',
+                     name)
+            return
+        raise ProxyError(f'network {name} already exists and is not '
+                         'internal; refusing to provision on it')
     raise ProxyError(f'docker network create {name} failed: {_failed(res)}')
 
 
@@ -208,13 +225,13 @@ def proxy_up(name: str, network: str, config_dir: Path, image: str,
     """Start the proxy container ``name`` on the internal ``network`` with
     ``config_dir`` (see :func:`write_config`) mounted read-only, connect
     it to the default bridge for its external route, and confirm it is
-    running. A stale container of that name is removed first. Returns the
-    container name; on any failure the container is removed and
-    ``ProxyError`` raised."""
+    running. A stale container of exactly that name (this session's own,
+    per-session unique) is removed first. Returns the container name; on
+    any failure the container is removed and ``ProxyError`` raised."""
     proxy_down(name, cwd, quiet=True)
     argv = proxy_run_argv(name, network, Path(config_dir), image)
     res = procs.run(argv, Path(cwd) if cwd is not None else Path.cwd(),
-                    _limits(RUN_TIMEOUT_S, 64), env_extra=docker_env())
+                    cli_limits(RUN_TIMEOUT_S, 64), env_extra=docker_env())
     if res.returncode != 0 or res.denied:
         proxy_down(name, cwd, quiet=True)
         raise ProxyError(f'proxy container {name} failed to start: '

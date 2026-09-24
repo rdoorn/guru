@@ -34,14 +34,34 @@ _STOP_WORDS = {
 }
 
 
+# The sandbox verbs (guru.sandbox.verbs): advertised and pre-activated only
+# while the project has a provisioned sandbox image; refused otherwise.
+SANDBOX_TOOLS = ('sandbox_run', 'sandbox_python', 'sandbox_diff',
+                 'sandbox_submit', 'request_dependency')
+
+
 # --- project tool policy (.guru/tools.toml) ----------------------------------
+
+def _sandbox_available() -> bool:
+    """Whether the sandbox verbs can run for the current project (the
+    endpoint module is imported lazily; any failure means no)."""
+    try:
+        from guru.sandbox import verbs
+        return bool(verbs.available())
+    except Exception:                                # noqa: BLE001
+        log.exc('sandbox availability check failed')
+        return False
+
 
 def _advertised() -> list:
     """The registry tool names the project policy lets run, in registry
     order. Discovery, pre-activation and the specs sent to the model all
     draw from this list, so a disabled tool is never described to the
-    model (and ``execute_tool`` refuses it anyway if called by name)."""
-    return [name for name in TOOL_REGISTRY if is_enabled(name)]
+    model (and ``execute_tool`` refuses it anyway if called by name). The
+    sandbox verbs are listed only while the project has a sandbox image."""
+    sandbox = _sandbox_available()
+    return [name for name in TOOL_REGISTRY if is_enabled(name)
+            and (sandbox or name not in SANDBOX_TOOLS)]
 
 
 # Pluggable domain approval — overridable by the TUI so it doesn't call the
@@ -338,6 +358,62 @@ def fetch_github_releases(repo: str) -> str:
         f"URL: {data.get('html_url')}\n"
         f"Release notes: {notes}\n"
     )
+
+
+# --- sandbox verbs (guru.sandbox.verbs; endpoint, imported lazily) -----------
+
+def sandbox_run(argv: str, detail: str = '') -> str:
+    """
+    Run a command inside the project's sandbox container on this task's copy
+    of the project (no network; nothing touches the real tree). argv is a
+    JSON list or a whitespace-separated command whose first word is one of
+    python, python3, pytest, uv, ruff, mypy, flake8, make. Returns the exit
+    code and the first lines of output; detail=true returns the last 4 KB.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_run(argv, detail)
+
+
+def sandbox_python(code: str, detail: str = '') -> str:
+    """
+    Run a Python snippet inside the sandbox container on this task's copy of
+    the project (the snippet may edit files in the copy). Returns the exit
+    code and the first lines of output; detail=true returns the last 4 KB.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_python(code, detail)
+
+
+def sandbox_diff() -> str:
+    """
+    Show which files this task's sandbox copy changed (per-file +/- counts)
+    compared with the real project. Nothing is applied by this call.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_diff()
+
+
+def sandbox_submit(intent: str) -> str:
+    """
+    Submit the sandbox copy's changes to the quality gate with your stated
+    intent (what the change does and why). The gate checks the diff and
+    reviews it against the user's request; an intended change is applied to
+    the real project (or shown to the user first), an unclear one is asked
+    about, a suspicious one is refused. The only way sandbox edits reach the
+    real tree.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_submit(intent)
+
+
+def request_dependency(name: str, constraint: str = '') -> str:
+    """
+    Ask for a package to be added to the project's lockfile (e.g. name='six',
+    constraint='>=1.16'). Nothing is installed: the request is recorded and
+    the user approves it, which updates uv.lock and rebuilds the sandbox.
+    """
+    from guru.sandbox import verbs
+    return verbs.request_dependency(name, constraint)
 
 
 # Each entry: fn (callable), description, tags, parameters.
@@ -682,6 +758,101 @@ TOOL_REGISTRY: dict = {
             "diff": "The unified diff text to apply",
         },
     },
+    # --- sandbox verbs (design plan sandbox §1; chunk S3) --------------------
+    "sandbox_run": {
+        "fn": sandbox_run,
+        "description": (
+            "Run a command (pytest, python, uv, ruff, mypy, flake8, make)"
+            " inside the project's sandbox container on this task's copy of"
+            " the project: no network, nothing touches the real tree. argv is"
+            " a JSON list or a whitespace-separated command. Returns the exit"
+            " code and the first 30 lines of stdout/stderr; detail=true"
+            " returns the last 4 KB instead. Use sandbox_submit to bring"
+            " changes back."
+        ),
+        "tags": [
+            "sandbox", "container", "run", "command", "isolated", "pytest",
+            "python", "execute", "docker", "safe", "test", "local",
+        ],
+        "parameters": {
+            "argv": ("The command as a JSON list (e.g. [\"pytest\", \"-q\"])"
+                     " or whitespace-separated words"),
+            "detail": "true to return the last 4 KB of output",
+        },
+        "optional": ["detail"],
+        "retain": "keep",
+    },
+    "sandbox_python": {
+        "fn": sandbox_python,
+        "description": (
+            "Run a Python snippet inside the sandbox container on this"
+            " task's copy of the project. The snippet may edit files in the"
+            " copy (that is how you make changes in the sandbox); nothing"
+            " touches the real tree. Returns the exit code and the first 30"
+            " lines of output; detail=true returns the last 4 KB."
+        ),
+        "tags": [
+            "sandbox", "python", "script", "snippet", "execute", "code",
+            "isolated", "container", "edit", "safe", "local",
+        ],
+        "parameters": {
+            "code": "The Python source to run",
+            "detail": "true to return the last 4 KB of output",
+        },
+        "optional": ["detail"],
+        "retain": "keep",
+    },
+    "sandbox_diff": {
+        "fn": sandbox_diff,
+        "description": (
+            "Show which files this task's sandbox copy changed compared with"
+            " the real project (per-file +/- counts). Nothing is applied."
+        ),
+        "tags": [
+            "sandbox", "diff", "changes", "changed", "files", "stat",
+            "review", "pending", "local",
+        ],
+        "parameters": {},
+        "retain": "keep",
+    },
+    "sandbox_submit": {
+        "fn": sandbox_submit,
+        "description": (
+            "Submit the sandbox copy's changes to the quality gate with your"
+            " stated intent (what the change does and why). Deterministic"
+            " checks and an AI reviewer compare the diff with the user's"
+            " request: an intended change is applied to the real project (or"
+            " shown to the user first), an unclear one is asked about, a"
+            " suspicious one is refused. The only way sandbox edits reach"
+            " the real tree; verify with run_tests afterwards."
+        ),
+        "tags": [
+            "sandbox", "submit", "apply", "gate", "review", "patch",
+            "changes", "commit", "finish", "local",
+        ],
+        "parameters": {
+            "intent": "One or two sentences: what the change does and why",
+        },
+    },
+    "request_dependency": {
+        "fn": request_dependency,
+        "description": (
+            "Request a package for the project's lockfile (name plus an"
+            " optional version constraint). Nothing is installed: the request"
+            " is recorded and the user approves it, which updates uv.lock and"
+            " rebuilds the sandbox image. Use when the sandbox lacks a"
+            " dependency you need."
+        ),
+        "tags": [
+            "dependency", "package", "install", "pip", "uv", "add",
+            "requirement", "library", "lockfile", "sandbox", "local",
+        ],
+        "parameters": {
+            "name": "The package name (e.g. 'six')",
+            "constraint": "Optional version constraint (e.g. '>=1.16')",
+        },
+        "optional": ["constraint"],
+    },
 }
 
 
@@ -830,14 +1001,16 @@ def _core_tool_fns() -> list:
     config-driven core set; when [tools] flat = true it is the ENTIRE registry,
     so a capable model gets the whole toolset up front (no search_tools
     hop). Either way a tool the project policy disables is skipped."""
-    names = (list(TOOL_REGISTRY) if config.FLAT_TOOLS
-             else config.PREACTIVATE_TOOLS)
-    out = []
-    for name in names:
-        info = TOOL_REGISTRY.get(name)
-        if info and is_enabled(name):
-            out.append((name, info['fn']))
-    return out
+    if config.FLAT_TOOLS:
+        names = list(TOOL_REGISTRY)
+    else:
+        # The sandbox verbs join the core set whenever the project has a
+        # sandbox image (a worker must find them without a search hop).
+        names = list(config.PREACTIVATE_TOOLS) + [
+            n for n in SANDBOX_TOOLS if n not in config.PREACTIVATE_TOOLS]
+    advertised = set(_advertised())
+    return [(name, TOOL_REGISTRY[name]['fn']) for name in names
+            if name in advertised]
 
 
 def initial_tools(can_spawn: bool, controller: bool = False) -> tuple:
@@ -959,6 +1132,10 @@ def execute_tool(name: str, arguments: dict) -> str:
     elif name == 'apply_patch':
         ui.note_tool(name, ', '.join(patch.targets(
             str(arguments.get('diff', '')))))
+    elif name == 'sandbox_python':
+        code = str(arguments.get('code', ''))
+        ui.note_tool(name, f'{len(code)} chars, {len(code.splitlines())} '
+                           'lines')
     elif name != 'delete_file':
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
     denied = ''

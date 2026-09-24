@@ -236,7 +236,9 @@ class TestInitialTools:
         monkeypatch.setattr(config, 'FLAT_TOOLS', True)
         monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', [])
         base, names = tools.initial_tools(can_spawn=False)
-        assert names == set(tools.TOOL_REGISTRY)     # every registry tool
+        # Every registry tool except the sandbox verbs, which are only
+        # advertised while the project has a provisioned sandbox image.
+        assert names == set(tools.TOOL_REGISTRY) - set(tools.SANDBOX_TOOLS)
         assert len(names) > len(['read_file', 'search_code'])
 
 

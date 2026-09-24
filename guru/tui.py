@@ -111,6 +111,8 @@ def run(registry=None, routing=None) -> None:
     tools.set_domain_asker(_access_asker)
     files.set_path_asker(_access_asker)
     spend.set_spend_asker(_access_asker)    # once per run, same prompt style
+    from guru.sandbox import provision      # sandbox deps / gate approvals
+    provision.set_approve_asker(_access_asker)
 
     # --- per-agent output (sub-agents use buffer consoles) ------------------
 

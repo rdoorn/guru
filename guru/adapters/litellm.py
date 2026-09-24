@@ -23,7 +23,7 @@ import requests
 
 from guru import log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import Adapter, ModelInfo
+from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo
 from guru.domain import ledger, pricing, tools
 
 _MAX_TOKENS = 16384   # proxies may enforce a thinking budget above 8k
@@ -191,14 +191,15 @@ class LiteLLMAdapter(Adapter):
     # --- ledger --------------------------------------------------------------
 
     def _record_call(self, phase: str, resp, seconds: float,
-                     cost_header=None) -> None:
+                     cost_header=None, model: str = '') -> None:
         """Write one CallRecord. ``cost_header`` is the proxy's per-response
-        cost (from :func:`_complete`); it wins over the price table. Never
+        cost (from :func:`_complete`); it wins over the price table;
+        ``model`` names the model when it is not the session's. Never
         raises into the turn."""
         try:
             usage = getattr(resp, 'usage', None)
             ledger.record_call(
-                adapter=self.name, model=session.model,
+                adapter=self.name, model=model or session.model,
                 usage=pricing.Usage(
                     input_tokens=getattr(usage, 'prompt_tokens', 0) or 0,
                     output_tokens=getattr(
@@ -327,6 +328,18 @@ class LiteLLMAdapter(Adapter):
         except Exception as e:
             _note_error(e)
             return f'(summary failed: {e})'
+
+    def complete(self, prompt: str, max_tokens: int = 1024,
+                 model: str = '') -> str:
+        t0 = time.perf_counter()
+        resp, cost = _complete(
+            self._client(), model=model or session.model,
+            max_tokens=int(max_tokens),
+            messages=[{'role': 'system', 'content': JSON_ONLY},
+                      {'role': 'user', 'content': prompt}])
+        self._record_call('complete', resp, time.perf_counter() - t0, cost,
+                          model=model)
+        return (resp.choices[0].message.content or '').strip()
 
 
 _COST_HEADER = 'x-litellm-response-cost'

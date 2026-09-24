@@ -454,7 +454,21 @@ class Orchestrator:
             transcript_path=transcript, tools_used=[
                 m.get('tool_name') for m in st.messages
                 if isinstance(m, dict) and m.get('role') == 'tool'])
+        task_id = agent.task_rec.task_id
         agent.task_rec = None
+        self._cleanup_sandbox(task_id)
+
+    @staticmethod
+    def _cleanup_sandbox(task_id: str) -> None:
+        """Remove the sandbox working copies a finished task left behind
+        (``guru.sandbox.verbs.cleanup_task``); imported lazily so the
+        orchestrator does not load the runtime unless a task used it.
+        Never raises."""
+        try:
+            from guru.sandbox import verbs
+            verbs.cleanup_task(task_id)
+        except Exception:                            # noqa: BLE001
+            log.exc(f'sandbox copy cleanup failed for task {task_id}')
 
     # --- delegation handlers (installed via tools.set_*_handler) -------------
 
@@ -575,6 +589,7 @@ class Orchestrator:
             confirmation=plan.confirmation, retry_of=retry_of)
         child.task_rec = rec
         child.state.task_id = rec.task_id
+        child.state.task_text = task
         child.state.turn_id = parent.state.turn_id
         ledger.record_task(rec)
         where = (f" · {rec.adapter}|{rec.model}" if route is not None

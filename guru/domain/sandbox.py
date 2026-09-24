@@ -9,7 +9,9 @@ limits. :func:`dockerfile_for` generates the Dockerfile from
 lockfile's (``uv sync --frozen``); the base image must be pinned by digest.
 :func:`copy_excludes` lists what never enters the working copy (and thus
 the image): noise directories, ``.env*`` and every small text file the
-bound secret scanner flags.
+secret scanner flags — the scanner is a parameter (default: the bound
+``policy`` scanner) so the endpoint can bind the project scanner and copy
+hygiene never depends on whether routing bound one.
 
 Stdlib only; imports ``guru.config``, ``guru.log`` and sibling domain
 modules. The docker CLI lives in the endpoint ``guru.sandbox.colima``.
@@ -22,12 +24,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from guru.domain.policy import ContentScanner
+
 from guru import log
 from guru.domain import files, policy
 from guru.domain.procs import DENIED_PREFIX
 
 # The uv release installed into the image (pinned: the build runs on the
-# provisioning network, the run phase has none).
+# provisioning network, the run phase has none). Version-pinned, not
+# hash-pinned: ``pip --require-hashes`` would need the hash of every
+# platform wheel the multi-arch base image may select (manylinux/musllinux
+# x aarch64/x86_64) kept in step with the version; the reliable alternative
+# is ``COPY --from=ghcr.io/astral-sh/uv:<ver>@sha256:… /uv`` (digest-pinned
+# binary, no pip at all), a follow-up.
 UV_VERSION = '0.11.6'
 # argv[0] basenames a sandbox run may start. Shells are refused as
 # everywhere; ``pip`` is absent on purpose (installs only via the lockfile).
@@ -40,10 +49,10 @@ SCAN_MAX_BYTES = 64 * 1024
 BASE_EXCLUDES = ('.env', '.env*')
 # Where the project lands inside the container.
 WORKDIR = '/work'
-# Build-time ARGs the generated Dockerfile declares so a provisioning build
-# can route pip/uv through the filtering proxy (S2). ARG, never ENV: the
-# proxy address is not baked into the image and the run phase has no
-# network anyway.
+# Build args a provisioning build passes so pip/uv route through the
+# filtering proxy (S2). Docker predefines these names: they reach every
+# RUN without an ARG line, are excluded from ``docker history`` and never
+# persist in the image (the run phase has no network anyway).
 PROXY_BUILD_ARGS = ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
                     'NO_PROXY', 'no_proxy')
 VENV = '/opt/venv'
@@ -104,11 +113,11 @@ def dockerfile_for(project: Path, base_image: str) -> str:
     virtualenv is ``/opt/venv`` — outside ``/work``, which the working copy
     is bind-mounted over at run time — and goes first on ``PATH``. The
     final ``ENV`` makes uv offline and no-sync so nothing installs at run
-    time; the image runs as ``1000:1000`` in ``/work``. The
-    ``PROXY_BUILD_ARGS`` are declared (``ARG``) before the first ``RUN`` so
-    :func:`proxy_build_args` reach pip and uv during a provisioning build
-    without persisting in the image. Raises ``ValueError`` when the project
-    lacks ``pyproject.toml`` or ``uv.lock``.
+    time; the image runs as ``1000:1000`` in ``/work``. No ``ARG`` lines for
+    the proxy: :func:`proxy_build_args` uses Docker's predefined proxy build
+    args, which reach ``RUN`` undeclared and stay out of ``docker history``
+    (declaring them would put the values into the history). Raises
+    ``ValueError`` when the project lacks ``pyproject.toml`` or ``uv.lock``.
     """
     problem = check_base_image(base_image)
     if problem:
@@ -126,7 +135,6 @@ def dockerfile_for(project: Path, base_image: str) -> str:
         f'FROM {base_image}',
         'ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 '
         f'UV_PROJECT_ENVIRONMENT={VENV} UV_LINK_MODE=copy',
-        *(f'ARG {var}' for var in PROXY_BUILD_ARGS),
         f'RUN pip install --no-cache-dir uv=={UV_VERSION}',
         f'WORKDIR {WORKDIR}',
         'COPY pyproject.toml uv.lock ./',
@@ -158,13 +166,16 @@ def _is_text_head(path: Path) -> bool:
         return False
 
 
-def flagged_files(project: Path) -> dict[str, list[str]]:
+def flagged_files(project: Path, scanner: Optional[ContentScanner] = None
+                  ) -> dict[str, list[str]]:
     """``{relative path: [finding kinds]}`` for every text file of at most
-    ``SCAN_MAX_BYTES`` under ``project`` (noise dirs skipped) in which the
-    bound secret scanner (``policy.scan``) finds something. Empty without
-    a scanner. Never raises for an unreadable file."""
+    ``SCAN_MAX_BYTES`` under ``project`` (noise dirs skipped) in which
+    ``scanner`` (default the bound ``policy`` scanner) finds something.
+    Empty without any scanner. Never raises for an unreadable file or a
+    scanner that raises (logged, file kept)."""
     root = Path(project).resolve()
-    if policy.scanner() is None:
+    active = scanner if scanner is not None else policy.scanner()
+    if active is None:
         return {}
     out: dict[str, list[str]] = {}
     for path in files.walk_files(root):
@@ -176,18 +187,25 @@ def flagged_files(project: Path) -> dict[str, list[str]]:
             text = path.read_text(encoding='utf-8', errors='replace')
         except OSError:
             continue
-        findings = policy.scan(text)
+        try:
+            findings = active.scan(text)
+        except Exception:                        # noqa: BLE001
+            log.exc(f'sandbox: scanner failed on {path}')
+            findings = []
         if findings:
             kinds = sorted({f.kind for f in findings})
             out[path.relative_to(root).as_posix()] = kinds
     return out
 
 
-def copy_excludes(project: Path) -> list[str]:
+def copy_excludes(project: Path, scanner: Optional[ContentScanner] = None
+                  ) -> list[str]:
     """What never enters the working copy: every noise directory name,
     ``.env`` and ``.env*``, and the relative path of each file
-    :func:`flagged_files` reports (logged, so the exclusion is visible)."""
-    flagged = flagged_files(project)
+    :func:`flagged_files` reports with ``scanner`` (logged, so the exclusion
+    is visible). Names (no ``/``) match any path component by glob;
+    flagged paths match exactly."""
+    flagged = flagged_files(project, scanner)
     for rel, kinds in sorted(flagged.items()):
         log.warning('sandbox: excluding %s from the copy (secret scan: %s)',
                     rel, ', '.join(kinds))
@@ -217,18 +235,27 @@ def safe_name(name: str) -> str:
     return cleaned or 'project'
 
 
+def project_key(root: Path) -> str:
+    """The per-project state key ``<safe basename>-<sha256(resolved
+    path)[:8]>``: two checkouts with the same directory name never share
+    an image tag, record directory or working copies."""
+    resolved = Path(root).expanduser().resolve()
+    digest = hashlib.sha256(str(resolved).encode('utf-8')).hexdigest()[:8]
+    return f'{safe_name(resolved.name)}-{digest}'
+
+
 def spec_from(project: Path, settings: object) -> SandboxSpec:
     """A :class:`SandboxSpec` for ``project`` under ``settings`` (a
     ``SandboxSettings``: ``base_image``, ``cpus``, ``memory_mb``, ``pids``,
-    ``timeout_s``). The image tag is ``guru-sandbox/<name>:<lockfile
-    sha[:12]>`` so a new lockfile is a new tag. Raises ``ValueError`` when
-    the project has no ``uv.lock``."""
+    ``timeout_s``). ``name`` is :func:`project_key`; the image tag is
+    ``guru-sandbox/<name>:<lockfile sha[:12]>`` so a new lockfile is a new
+    tag. Raises ``ValueError`` when the project has no ``uv.lock``."""
     root = Path(project).expanduser().resolve()
     sha = lockfile_sha(root)
     if not sha:
         raise ValueError(f'{root} has no uv.lock; the sandbox needs a uv '
                          'lockfile')
-    name = safe_name(root.name)
+    name = project_key(root)
     return SandboxSpec(
         project=root, name=name,
         base_image=str(getattr(settings, 'base_image')),

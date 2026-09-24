@@ -203,7 +203,8 @@ def test_proxy_allows_only_listed_hosts_on_443(runtime_ok, allowed,
         subnet = proxy.network_subnet(net, cwd=allowed)
         assert '/' in subnet
         proxy.write_config(cfg_dir, proxy.allowlist_from_domains(
-            {'pypi.org', 'files.pythonhosted.org'}), client_cidr=subnet)
+            {'pypi.org', 'files.pythonhosted.org', 'test-host.example'}),
+            client_cidr=subnet)        # a hyphenated host must parse
         proxy.proxy_up(name, net, cfg_dir, SandboxSettings().proxy_image,
                        cwd=allowed)
         try:
@@ -222,8 +223,7 @@ def test_proxy_allows_only_listed_hosts_on_443(runtime_ok, allowed,
             denied = _client(net, env, 'import urllib.request as u; '
                              'u.urlopen("https://example.com/", timeout=30)')
             assert denied.returncode != 0, 'example.com should be refused'
-            assert 'Tunnel connection failed' in denied.stderr or \
-                'Forbidden' in denied.stderr or 'Error' in denied.stderr
+            assert '403' in denied.stderr, denied.stderr[-800:]
             plain = _client(net, env, 'import urllib.request as u; '
                             'u.urlopen("http://pypi.org/simple/", '
                             'timeout=30)')
@@ -291,6 +291,13 @@ def test_provision_and_uv_add_through_the_proxy(runtime_ok, project,
         assert hosts == {'pypi.org', 'files.pythonhosted.org'}
         assert all(r['phase'] == 'build' for r in net_rows)
         assert not any(r['host'] not in hosts for r in net_rows), net_rows
+        # Proxy build args are Docker-predefined: not in the image history.
+        history = subprocess.run(['docker', 'history', '--no-trunc',
+                                  '--format', '{{.CreatedBy}}', rec.tag],
+                                 capture_output=True, text=True)
+        assert history.returncode == 0, history.stderr
+        assert 'guru-proxy' not in history.stdout
+        assert 'HTTPS_PROXY=' not in history.stdout
         # The built image runs offline with uv installed.
         copy = colima.prepare_copy(project, images.work_root(spec) / 'c',
                                    sb.copy_excludes(project))
@@ -342,3 +349,63 @@ def test_provision_and_uv_add_through_the_proxy(runtime_ok, project,
             ['docker', kind, 'ls', '-q', '--filter', 'name=guru-pro'],
             capture_output=True, text=True)
         assert listing.stdout.strip() == '', f'stale {kind}'
+
+
+def test_sandbox_verbs_end_to_end(built, project, monkeypatch, ledger_repo
+                                  ) -> None:
+    """S3: the verbs against the real runtime — run, edit through
+    ``sandbox_python`` in the task's copy, diff, and a ``sandbox_submit``
+    that a fake reviewer finds intended in auto mode patches the real
+    fixture tree through ``apply_patch`` and removes the copy."""
+    from guru import session
+    from guru.domain import decisions, ledger
+    from guru.sandbox import verbs
+    from tests.test_sandbox_verbs import FakeReviewer
+    monkeypatch.setattr(config, 'PROJECT_GURU_DIR', project / '.guru')
+    monkeypatch.setattr(config, 'SANDBOX_POLICY_PATH',
+                        project / '.guru' / 'sandbox.toml')
+    monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH',
+                        project.parent / 'no-settings.toml')
+    monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', {str(project.parent)})
+    monkeypatch.setattr(config, 'MODE', config.MODE_AUTO)
+    monkeypatch.setattr(config, 'AUTO_GRANT', True)
+    monkeypatch.setattr(config, 'persist_write_dir', lambda d: None)
+    monkeypatch.setattr(files, '_show_change', lambda block: None)
+    monkeypatch.setattr(session, 'task_id', 'INTEG')
+    monkeypatch.setattr(session, 'task_text', 'make hello.py print more')
+    monkeypatch.setattr(session, 'messages', [
+        {'role': 'user', 'content': 'make hello.py print more'}])
+    monkeypatch.chdir(project)
+    reviewer = FakeReviewer()
+    decisions.set_judge('gate', reviewer)
+    try:
+        assert verbs.available() is True
+        out = verbs.sandbox_run(['python', '-c', 'print(1)'])
+        assert out.startswith('exit 0') and out.endswith('--- stdout ---\n1')
+        assert verbs.sandbox_run('bash -c id').startswith('Refused: ')
+        out = verbs.sandbox_python(
+            "import pathlib\np = pathlib.Path('hello.py')\n"
+            "p.write_text(p.read_text() + 'print(\"more\")\\n')\n"
+            "print('edited')\n")
+        assert 'edited' in out, out
+        (_key, copy), = verbs.copies().items()
+        assert _key[1] == 'INTEG'
+        assert (copy / 'hello.py').read_text().endswith('print("more")\n')
+        assert not list(copy.glob(f'{verbs.SCRIPT_PREFIX}*.py'))
+        assert (project / 'hello.py').read_text() == 'print("ok")\n'
+        assert 'hello.py | +1 -0' in verbs.sandbox_diff()
+        out = verbs.sandbox_submit('append a second print to hello.py')
+        assert out.startswith('Gate verdict: intended'), out
+        assert 'Applied patch:' in out
+        assert (project / 'hello.py').read_text() == \
+            'print("ok")\nprint("more")\n'
+        assert verbs.copies() == {} and not copy.exists()
+        [q] = reviewer.calls
+        assert '+print("more")' in q.state
+        assert 'Task given to the agent:\nmake hello.py print more' in q.state
+        ledger.flush()
+        kinds = [r['kind'] for r in ledger_repo.stream('sandbox_events')]
+        assert 'run' in kinds and 'submit' in kinds and 'apply' in kinds
+    finally:
+        decisions.clear_judges()
+        verbs.cleanup_all()

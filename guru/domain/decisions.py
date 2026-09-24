@@ -46,6 +46,10 @@ from guru import config, log, session
 from guru.domain import ledger, routing
 
 CHOICE, SCORE, NOUL = 'choice', 'score', 'noul'
+# A free-form review (the sandbox quality gate): the judge answers a fixed
+# question set with a JSON object carried in ``Answer.dist``; ``chosen`` is
+# the verdict state it implies. Options are unused.
+REVIEW = 'review'
 YES_NO = {'yes': 'Yes', 'no': 'No'}
 INPUT_HEAD_CHARS = 120
 DEFAULT_THRESHOLD = 0.5
@@ -62,8 +66,9 @@ _DROP_WARNING_INTERVAL_S = 60.0
 class Question:
     """One typed judgment about ``state``.
 
-    ``kind`` is ``NOUL`` (yes/no), ``CHOICE`` (pick one option key) or
-    ``SCORE`` (ordered levels; the answer is the level index). ``options``
+    ``kind`` is ``NOUL`` (yes/no), ``CHOICE`` (pick one option key),
+    ``SCORE`` (ordered levels; the answer is the level index) or ``REVIEW``
+    (a JSON answer set; see :func:`decide_review`). ``options``
     is ordered ``key -> description``; a noul's options must be exactly the
     keys ``'yes'`` and ``'no'`` (the default). ``hypothesis`` is the
     affirmative statement an entailment (encoder) judge tests, ignored by
@@ -164,6 +169,9 @@ class _Worker:
 
 _shadow_worker = _Worker('guru-judge-shadow')
 _active_worker = _Worker('guru-judge-active')
+# The gate reviewer gets its own worker: a 60 s review must never make a
+# 1.5 s active decision time out behind it.
+_gate_worker = _Worker('guru-judge-gate')
 
 
 def set_judge(point: str, judge: Optional[Judge]) -> None:
@@ -177,6 +185,11 @@ def set_judge(point: str, judge: Optional[Judge]) -> None:
 def clear_judges() -> None:
     """Remove every registered judge."""
     _judges.clear()
+
+
+def judge_for(point: str) -> Optional[Judge]:
+    """The judge registered for ``point``, or None."""
+    return _judges.get(point)
 
 
 def installed_judges() -> list:
@@ -251,9 +264,11 @@ def shadow(point: str, questions: list, heuristic: object = None, *,
         log.exc('decision worker unavailable')
 
 
-def _run_with_timeout(fn: Callable[[], object], timeout_s: float
+def _run_with_timeout(fn: Callable[[], object], timeout_s: float,
+                      worker: Optional[_Worker] = None
                       ) -> tuple[object, Optional[BaseException], bool]:
-    """Run ``fn()`` on the active worker and wait at most ``timeout_s``.
+    """Run ``fn()`` on ``worker`` (default the active worker) and wait at
+    most ``timeout_s``.
 
     Returns ``(value, error, timed_out)``: the return value, the exception
     ``fn`` raised (or None; ``queue.Full`` when the worker queue was full),
@@ -263,6 +278,7 @@ def _run_with_timeout(fn: Callable[[], object], timeout_s: float
     """
     done = threading.Event()
     box: dict = {}
+    target = worker if worker is not None else _active_worker
 
     def _call() -> None:
         try:
@@ -271,8 +287,8 @@ def _run_with_timeout(fn: Callable[[], object], timeout_s: float
             box['error'] = e
         finally:
             done.set()
-    if not _active_worker.put((_call, ())):
-        return None, queue.Full('active judge queue full'), False
+    if not target.put((_call, ())):
+        return None, queue.Full(f'{target.name} queue full'), False
     if not done.wait(timeout_s):
         return None, None, True
     return box.get('value'), box.get('error'), False
@@ -527,12 +543,79 @@ def decide_choice(point: str, question: Question, heuristic: object, *,
         return replace(base, fallback_reason=FALLBACK_ERROR)
 
 
+def decide_review(point: str, question: Question,
+                  judge: Optional[Judge] = None) -> Optional[dict]:
+    """Ask a ``REVIEW`` ``question`` synchronously and return the
+    reviewer's answers (the ``Answer.dist`` dict) or None. Never raises.
+
+    The sandbox quality gate (decision 6) runs in every access mode, so
+    unlike :func:`decide` this ignores ``DECISIONS_MODE`` and the active
+    list: ``judge`` (or the judge registered for ``point``) is consulted
+    on the gate worker within ``config.DECISIONS_GATE_TIMEOUT_MS``. One
+    ``decisions`` row (``mode='active'``) records ``used='judge'`` with
+    the answers as ``dist`` and the implied state as ``chosen``, or
+    ``used='heuristic'`` with ``fallback_reason`` ``no_judge`` |
+    ``timeout`` | ``error`` — the heuristic being the deterministic rules
+    alone, which yield ``unclear``.
+    """
+    try:
+        judge = judge if judge is not None else _judges.get(point)
+        keys = _keys()
+        if judge is None:
+            ledger.submit('decisions', _row(
+                point, None, question, None, None, keys, '',
+                mode='active', used=USED_HEURISTIC,
+                fallback_reason=FALLBACK_NO_JUDGE))
+            return None
+        timeout_s = max(0.0, float(config.DECISIONS_GATE_TIMEOUT_MS)) / 1000
+        started: dict = {}
+        put_at = time.monotonic()
+
+        def _call() -> tuple:
+            started['at'] = time.monotonic()
+            return _ask(point, judge, [question])
+        value, exc, timed_out = _run_with_timeout(_call, timeout_s,
+                                                  _gate_worker)
+        queued_ms = int(1000 * ((started['at'] - put_at) if 'at' in started
+                                else timeout_s))
+        answer: Optional[Answer] = None
+        if timed_out:
+            error, reason = 'timeout', FALLBACK_TIMEOUT
+            log.info('gate reviewer %s timed out at %s after %d ms',
+                     getattr(judge, 'name', '?'), point,
+                     config.DECISIONS_GATE_TIMEOUT_MS)
+        elif exc is not None:
+            error, reason = repr(exc)[:200], FALLBACK_ERROR
+        else:
+            answers, error = cast(tuple, value)
+            answer = answers[0]
+            reason = ''
+            if answer is None or not isinstance(answer.dist, dict) \
+                    or not answer.dist:
+                reason = FALLBACK_ERROR
+                error = error or 'reviewer undecided'
+        used = USED_HEURISTIC if reason else USED_JUDGE
+        ledger.submit('decisions', _row(
+            point, judge, question, answer, None, keys, error,
+            mode='active', used=used, fallback_reason=reason,
+            chosen=(answer.chosen if used == USED_JUDGE
+                    and answer is not None else None),
+            queued_ms=queued_ms))
+        if used == USED_JUDGE and answer is not None:
+            return dict(answer.dist)
+        return None
+    except Exception:                            # noqa: BLE001
+        log.exc(f'decide_review failed at {point}')
+        return None
+
+
 def flush(timeout: Optional[float] = None) -> None:
-    """Block until queued judge work on both workers has run (tests, exit);
-    never raises. ``timeout`` (seconds) bounds each wait; None waits for
-    the queues to drain."""
+    """Block until queued judge work on every worker has run (tests,
+    exit); never raises. ``timeout`` (seconds) bounds each wait; None
+    waits for the queues to drain."""
     _shadow_worker.flush(timeout)
     _active_worker.flush(timeout)
+    _gate_worker.flush(timeout)
 
 
 def _ask(point: str, judge: Judge, questions: list) -> tuple:

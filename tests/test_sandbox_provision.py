@@ -4,6 +4,7 @@ fixed docker argv of ``guru.sandbox.proxy`` (fake ``procs.run``), build
 args on ``colima.build``, ``net_events`` recording, the pending-request
 store, and ``guru.sandbox.provision`` end to end with fakes."""
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -188,6 +189,9 @@ class TestRenderConfig:
         text = proxy.render_filter(['pypi.org', 'files.pythonhosted.org'])
         assert text.splitlines() == [r'^pypi\.org:443$',
                                      r'^files\.pythonhosted\.org:443$']
+        # '-' stays bare: '\-' outside brackets is undefined in POSIX ERE.
+        assert proxy.render_filter(['test-host.example']) == (
+            '^test-host\\.example:443$\n')
         assert 'example.com' not in text
         # Plain HTTP URLs never match: the patterns are anchored host:port.
         assert 'http' not in text
@@ -237,14 +241,36 @@ class TestNetwork:
         assert all(c['cwd'] == tmp_path for c in fake_run.calls)
         assert all(c['env']['DOCKER_CONFIG'] for c in fake_run.calls)
 
-    def test_up_tolerates_an_existing_network(self, fake_run, tmp_path,
-                                              monkeypatch) -> None:
-        def existing(argv, cwd, limits=None, env_extra=None):
-            return procs.ProcResult(list(argv), 1, '', 'Error response '
-                                    'from daemon: network with name x '
-                                    'already exists', 0.1)
-        monkeypatch.setattr(procs, 'run', existing)
+    @staticmethod
+    def _existing(internal: str):
+        calls: list = []
+
+        def run(argv, cwd, limits=None, env_extra=None):
+            calls.append(list(argv))
+            if argv[1:3] == ['network', 'create']:
+                return procs.ProcResult(list(argv), 1, '', 'Error response '
+                                        'from daemon: network with name x '
+                                        'already exists', 0.1)
+            if argv[1:3] == ['network', 'inspect']:
+                return procs.ProcResult(list(argv), 0, internal + '\n', '',
+                                        0.1)
+            return procs.ProcResult(list(argv), 0, '', '', 0.1)
+        return run, calls
+
+    def test_up_reuses_an_existing_internal_network(
+            self, monkeypatch, tmp_path) -> None:
+        run, calls = self._existing('true')
+        monkeypatch.setattr(procs, 'run', run)
         proxy.network_up('x', cwd=tmp_path)             # no raise
+        assert calls[1] == ['docker', 'network', 'inspect', '--format',
+                            '{{.Internal}}', 'x']
+
+    def test_up_refuses_an_existing_routable_network(
+            self, monkeypatch, tmp_path) -> None:
+        run, calls = self._existing('false')
+        monkeypatch.setattr(procs, 'run', run)
+        with pytest.raises(proxy.ProxyError, match='not internal'):
+            proxy.network_up('x', cwd=tmp_path)
 
     def test_up_failure_raises(self, fake_run, tmp_path) -> None:
         fake_run.answers['network'] = (1, '')
@@ -375,18 +401,13 @@ class TestBuildArgs:
                         'https_proxy': 'http://guru-proxy-x:8888',
                         'NO_PROXY': '', 'no_proxy': ''}
 
-    def test_dockerfile_declares_proxy_args_before_the_first_run(
-            self, tmp_path) -> None:
+    def test_dockerfile_declares_no_proxy_args(self, tmp_path) -> None:
+        # Docker predefines the proxy build args; declaring them with ARG
+        # would record their values in `docker history`.
         text = sb.dockerfile_for(_project(tmp_path), PINNED)
         lines = text.splitlines()
-        first_run = next(i for i, ln in enumerate(lines)
-                         if ln.startswith('RUN '))
-        for var in sb.PROXY_BUILD_ARGS:
-            assert f'ARG {var}' in lines
-            assert lines.index(f'ARG {var}') < first_run
-        # Never baked into the image: ARG, not ENV.
-        assert not any(ln.startswith('ENV') and 'PROXY' in ln.upper()
-                       for ln in lines)
+        assert not any(ln.startswith('ARG ') for ln in lines)
+        assert not any('PROXY' in ln.upper() for ln in lines)
 
     def test_build_argv_with_args_uses_the_legacy_builder(
             self, fake_run, sbhome, tmp_path) -> None:
@@ -526,6 +547,35 @@ def domain_yes(monkeypatch):
 def _settings() -> SandboxSettings:
     return SandboxSettings(enabled=True, base_image=PINNED, cpus=1.0,
                            memory_mb=512, pids=64, timeout_s=60)
+
+
+class TestNames:
+    def test_network_and_proxy_names_are_per_project_and_session(
+            self, tmp_path) -> None:
+        spec = sb.spec_from(_project(tmp_path), _settings())
+        assert re.fullmatch(r'guru-provision-proj-[0-9a-f]{8}-[0-9a-f]{8}',
+                            provision.network_name(spec))
+        assert provision.proxy_name(spec) == (
+            f'guru-proxy-{spec.name}-{provision.SESSION}')
+        assert provision.proxy_url(spec) == (
+            f'http://{provision.proxy_name(spec)}:8888')
+
+
+class TestDiscard:
+    def test_missing_marker_is_left_in_place(self, tmp_path) -> None:
+        keep = tmp_path / 'real'
+        keep.mkdir()
+        (keep / 'f').write_text('x')
+        provision._discard(keep)
+        assert (keep / 'f').exists()
+        provision._discard(None)
+
+    def test_marked_copy_is_removed(self, tmp_path) -> None:
+        copy = tmp_path / 'copy'
+        copy.mkdir()
+        (copy / colima.COPY_MARKER).write_text('x')
+        provision._discard(copy)
+        assert not copy.exists()
 
 
 class TestProvision:
@@ -714,6 +764,7 @@ class TestApplyDependency:
         assert call['env']['UV_CACHE_DIR'].startswith('/tmp')
         assert call['copy'].parent == images.work_root(spec)
         assert not call['copy'].exists()                 # removed afterwards
+        assert call['network'].endswith(provision.SESSION)
         # The real tree changed through apply_patch, the lockfile diff is
         # in the digest and the image was rebuilt.
         assert (root / 'uv.lock').read_text() == NEW_LOCK

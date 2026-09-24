@@ -12,7 +12,7 @@ import ollama
 
 from guru import config, log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import Adapter, ModelInfo
+from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo
 from guru.domain import ledger, pricing, tools
 
 # Re-exported for callers/tests that reference it here; the shared turn loop
@@ -25,6 +25,8 @@ _CTX_FLOOR = 2048
 # Sidecar reservation: judge model weights x this factor (KV cache and
 # compute buffers for a small model at a short context).
 _SIDECAR_FACTOR = 1.2
+# Largest context ``complete`` asks for when sizing to its prompt.
+COMPLETE_MAX_CTX = 32768
 
 
 class OllamaAdapter(Adapter):
@@ -511,14 +513,15 @@ class OllamaAdapter(Adapter):
 
     def _record_call(self, phase: str, seconds: float, prompt_ct: int,
                      eval_ct: int, load_ns: int = 0, prompt_ns: int = 0,
-                     eval_ns: int = 0) -> None:
-        """Write one local CallRecord; durations are Ollama nanoseconds.
+                     eval_ns: int = 0, model: str = '') -> None:
+        """Write one local CallRecord; durations are Ollama nanoseconds;
+        ``model`` names the model when it is not the session's.
 
         Never raises into the turn.
         """
         try:
             ledger.record_call(
-                adapter=self.name, model=session.model,
+                adapter=self.name, model=model or session.model,
                 usage=pricing.Usage(input_tokens=prompt_ct,
                                     output_tokens=eval_ct),
                 seconds=seconds, phase=phase, local=True,
@@ -665,6 +668,31 @@ class OllamaAdapter(Adapter):
             getattr(resp, 'prompt_eval_duration', 0) or 0,
             getattr(resp, 'eval_duration', 0) or 0)
         return (resp.message.content or '').strip() or '(summary unavailable)'
+
+    def complete(self, prompt: str, max_tokens: int = 1024,
+                 model: str = '') -> str:
+        # The context must hold the whole prompt (a gate review carries a
+        # diff): at least the session's window, else a rough chars/3
+        # estimate plus the answer, capped at COMPLETE_MAX_CTX.
+        num_ctx = max(int(session.num_ctx or 0),
+                      min(COMPLETE_MAX_CTX,
+                          len(prompt) // 3 + int(max_tokens) + 1024))
+        t0 = time.perf_counter()
+        resp = ollama.chat(
+            model=model or session.model,
+            messages=[{'role': 'system', 'content': JSON_ONLY},
+                      {'role': 'user', 'content': prompt}],
+            think=False, format='json',
+            options={'num_ctx': num_ctx, 'num_predict': int(max_tokens),
+                     'temperature': 0})
+        self._record_call(
+            'complete', time.perf_counter() - t0,
+            getattr(resp, 'prompt_eval_count', 0) or 0,
+            getattr(resp, 'eval_count', 0) or 0,
+            getattr(resp, 'load_duration', 0) or 0,
+            getattr(resp, 'prompt_eval_duration', 0) or 0,
+            getattr(resp, 'eval_duration', 0) or 0, model=model)
+        return (resp.message.content or '').strip()
 
 
 def _note_error(e: Exception) -> None:

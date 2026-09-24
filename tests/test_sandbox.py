@@ -3,6 +3,7 @@ the image records repository, the Colima runtime's fixed docker argv (with
 a fake ``procs.run``) and the ``/sandbox status`` command."""
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -167,18 +168,29 @@ class TestSpecFrom:
                                    memory_mb=512, pids=64, timeout_s=30)
         spec = sb.spec_from(root, settings)
         assert spec.project == root.resolve()
-        assert spec.name == 'my_proj'
+        assert spec.name == sb.project_key(root)
+        assert re.fullmatch(r'my_proj-[0-9a-f]{8}', spec.name)
         assert spec.base_image == PINNED
         assert spec.lockfile_sha == sb.lockfile_sha(root)
         assert spec.image_tag == (
-            f'guru-sandbox/my_proj:{spec.lockfile_sha[:12]}')
+            f'guru-sandbox/{spec.name}:{spec.lockfile_sha[:12]}')
         assert (spec.cpus, spec.memory_mb, spec.pids, spec.timeout_s) == (
             1.5, 512, 64, 30)
 
     def test_name_is_a_safe_docker_repository_component(self, tmp_path):
         root = _project(tmp_path, 'Weird Name!!')
         spec = sb.spec_from(root, SandboxSettings(base_image=PINNED))
-        assert spec.name == 'weird-name'
+        assert re.fullmatch(r'weird-name-[0-9a-f]{8}', spec.name)
+
+    def test_same_basename_different_path_is_a_different_key(
+            self, tmp_path) -> None:
+        a = _project(tmp_path / 'one', 'proj')
+        b = _project(tmp_path / 'two', 'proj')
+        assert sb.project_key(a) != sb.project_key(b)
+        assert sb.project_key(a) == sb.project_key(
+            tmp_path / 'one' / '.' / 'proj')          # resolved path
+        assert sb.spec_from(a, SandboxSettings(base_image=PINNED)).image_tag \
+            != sb.spec_from(b, SandboxSettings(base_image=PINNED)).image_tag
 
     def test_requires_a_lockfile(self, tmp_path) -> None:
         root = _project(tmp_path)
@@ -424,12 +436,10 @@ class TestRun:
     def test_exact_docker_argv_in_order(self, fake_run, sbhome, tmp_path):
         spec = _spec(tmp_path)
         copy = tmp_path / 'copy'
-        monkeypatch_name = 'guru-sb-0123456789ab'
         res = colima.run(spec, ['pytest', '-q', 'tests'], copy)
         assert res.returncode == 0 and res.denied == ''
         assert res.argv == ['pytest', '-q', 'tests']
-        assert res.name.startswith('guru-sb-') and len(res.name) == len(
-            monkeypatch_name)
+        assert re.fullmatch(r'guru-sb-[0-9a-f]{12}', res.name)
         call, = fake_run.calls
         assert call['argv'] == [
             'docker', 'run', '--rm', '--name', res.name,
@@ -520,8 +530,6 @@ class TestPrepareCopyAndDiff:
         (root / '.venv' / 'lib' / 'x.py').write_text('x', encoding='utf-8')
         (root / 'pkg' / '__pycache__').mkdir()
         (root / 'pkg' / '__pycache__' / 'a.pyc').write_bytes(b'\x00')
-        (root / '.git').mkdir()
-        (root / '.git' / 'HEAD').write_text('ref: x\n', encoding='utf-8')
         (root / 'pkg' / 'secret.py').write_text('K = "MARKER_SECRET"\n',
                                                 encoding='utf-8')
         (root / 'README.md').write_text('# pkg\n', encoding='utf-8')
@@ -541,9 +549,84 @@ class TestPrepareCopyAndDiff:
                      'pkg/secret.py'):
             assert not (dest / gone).exists(), gone
         assert (dest / '.git' / 'HEAD').is_file()      # fresh init
-        assert 'ref: x' not in (dest / '.git' / 'HEAD').read_text()
         assert (dest / colima.COPY_MARKER).is_file()
         assert colima.diff(dest, project=root) == ''  # clean baseline
+
+    def _git(self, root: Path, *args: str) -> None:
+        res = colima._git(list(args), root, root)
+        assert res.returncode == 0, res.stderr
+
+    def test_git_repo_copies_the_positive_list_only(self, allowed) -> None:
+        root = _project(allowed)
+        (root / '.gitignore').write_text('secrets.yaml\n*.log\nbuild/\n',
+                                         encoding='utf-8')
+        (root / 'secrets.yaml').write_text('token: abc\n', encoding='utf-8')
+        (root / 'debug.log').write_text('x\n', encoding='utf-8')
+        (root / 'build').mkdir()
+        (root / 'build' / 'out.bin').write_bytes(b'\x00')
+        (root / 'notes.md').write_text('untracked, kept\n', encoding='utf-8')
+        self._git(root, 'init', '-q')
+        self._git(root, 'add', 'pyproject.toml', 'uv.lock', 'pkg',
+                  '.gitignore')
+        self._git(root, 'commit', '-q', '-m', 'base')
+        (root / 'pkg' / 'gone.py').write_text('x', encoding='utf-8')
+        self._git(root, 'add', 'pkg/gone.py')
+        (root / 'pkg' / 'gone.py').unlink()          # tracked but deleted
+        (root / 'link').symlink_to('pkg/__init__.py')
+        dest = colima.prepare_copy(root, allowed / 'copy',
+                                   colima.copy_excludes_for(root))
+        assert (dest / 'pkg' / '__init__.py').is_file()
+        assert (dest / 'notes.md').is_file()          # untracked, not ignored
+        assert (dest / '.gitignore').is_file()
+        assert (dest / 'link').is_symlink()
+        for gone in ('secrets.yaml', 'debug.log', 'build', 'pkg/gone.py'):
+            assert not (dest / gone).exists(), gone
+        assert 'base' not in colima._git(['log', '--oneline'], dest,
+                                         root).stdout   # fresh history
+        assert colima.diff(dest, project=root) == ''
+
+    def test_broken_git_dir_fails_closed(self, allowed) -> None:
+        root = _project(allowed)
+        (root / '.git').mkdir()
+        (root / '.git' / 'HEAD').write_text('ref: x\n', encoding='utf-8')
+        with pytest.raises(RuntimeError, match='ls-files'):
+            colima.prepare_copy(root, allowed / 'copy', [])
+        assert not (allowed / 'copy').exists()
+
+    def test_flagged_paths_match_exactly_names_by_glob(self, allowed):
+        root = _project(allowed)
+        (root / 'pkg' / 'secrets[1].py').write_text('K = 1\n')
+        (root / 'pkg' / 'secrets1.py').write_text('K = 2\n')
+        (root / 'pkg' / 'other.pyc').write_text('x')
+        excludes = ['pkg/secrets[1].py', '*.pyc']
+        dest = colima.prepare_copy(root, allowed / 'copy', excludes)
+        assert not (dest / 'pkg' / 'secrets[1].py').exists()
+        assert (dest / 'pkg' / 'secrets1.py').is_file()
+        assert not (dest / 'pkg' / 'other.pyc').exists()
+        # Same rule on the git positive-list path.
+        self._git(root, 'init', '-q')
+        self._git(root, 'add', '-A')
+        self._git(root, 'commit', '-q', '-m', 'base')
+        dest2 = colima.prepare_copy(root, allowed / 'copy2', excludes)
+        assert not (dest2 / 'pkg' / 'secrets[1].py').exists()
+        assert (dest2 / 'pkg' / 'secrets1.py').is_file()
+
+    def test_unbound_scanner_still_excludes_secrets(self, allowed,
+                                                    monkeypatch) -> None:
+        policy.set_scanner(None)
+        monkeypatch.setattr(config, 'SENSITIVE_MARKERS_PATH',
+                            allowed / 'none' / 'markers.txt')
+        monkeypatch.setattr(config, 'SCAN_ALLOW_PATH',
+                            allowed / 'none' / 'allow.txt')
+        root = _project(allowed)
+        (root / 'pkg' / 'creds.py').write_text(
+            'AWS_KEY = "AKIA' + 'A1B2C3D4E5F6G7H8' + '"\n', encoding='utf-8')
+        assert sb.flagged_files(root) == {}         # domain: no scanner
+        excludes = colima.copy_excludes_for(root)   # endpoint binds one
+        assert 'pkg/creds.py' in excludes
+        dest = colima.prepare_copy(root, allowed / 'copy', excludes)
+        assert not (dest / 'pkg' / 'creds.py').exists()
+        assert (dest / 'pkg' / '__init__.py').is_file()
 
     def test_refuses_an_existing_dest(self, allowed) -> None:
         root = _project(allowed)
@@ -599,7 +682,7 @@ class TestSandboxStatusCommand:
         out = capsys.readouterr().out
         assert 'docker available' in out
         assert 'present' in out and 'enabled: yes' in out
-        assert 'guru-sandbox/proj:' in out
+        assert 'guru-sandbox/proj-' in out
         assert 'not built' in out and 'needs build: yes' in out
 
     def test_recorded_image(self, project, monkeypatch, capsys) -> None:

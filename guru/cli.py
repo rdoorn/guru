@@ -292,6 +292,7 @@ def _adapters_command() -> None:
 
     ADAPTERS = _build_adapters()
     REGISTRY = build_registry(ADAPTERS)
+    judges.set_registry(REGISTRY)
     for adapter in ADAPTERS:
         if not adapter.enabled:
             continue
@@ -521,10 +522,73 @@ def _sandbox_status(project: Optional[Path] = None) -> str:
                      f'built {rec.built_at}')
     lines.append('needs build: '
                  + ('yes' if images.needs_build(spec, dockerfile) else 'no'))
+    pending = images.pending_requests(spec)
+    lines.append('pending dependency requests: '
+                 + (', '.join(r.spec for r in pending) if pending
+                    else 'none'))
+    lines.extend(_sandbox_copies(spec))
     return '\n'.join(lines)
 
 
-_SANDBOX_USAGE = ('usage: /sandbox status | provision [--force] | deps '
+def _sandbox_copies(spec) -> list:
+    """``task copies`` lines: the live per-task working copies of this
+    process, then any other copy directory left under the work root."""
+    from guru.repositories import sandbox_images as images
+    from guru.sandbox import colima, verbs
+    live = {path.resolve(): key for key, path in verbs.copies().items()
+            if key[0] == str(spec.project)}
+    rows = [f'  {path} (task {key[1]})' for path, key in live.items()]
+    root = images.work_root(spec)
+    if root.is_dir():
+        for child in sorted(root.iterdir()):
+            if (child.resolve() not in live
+                    and (child / colima.COPY_MARKER).is_file()):
+                rows.append(f'  {child} (stale; safe to delete)')
+    return ['task copies: ' + ('none' if not rows else '')] + rows
+
+
+_GATE_ROWS = 10
+
+
+def _sandbox_gate() -> str:
+    """Plain-text ``/sandbox gate``: this run's last submit verdicts
+    (``sandbox_events`` kind ``submit``) and the reviewer's ``decisions``
+    rows for the ``gate`` point."""
+    repo = ledger.repository()
+    rows_fn = getattr(repo, 'rows', None)
+    if repo is None or not callable(rows_fn) or not config.LEDGER_ENABLED:
+        return 'sandbox gate: no readable ledger repository'
+    ledger.flush()
+    submits = [r for r in rows_fn('sandbox_events', run_id=ledger.RUN_ID)
+               if r.get('kind') == 'submit'][-_GATE_ROWS:]
+    reviews = [r for r in rows_fn('decisions', run_id=ledger.RUN_ID)
+               if r.get('point') == 'gate'][-_GATE_ROWS:]
+    lines = ['gate verdicts (last submits):']
+    if not submits:
+        lines.append('  none this run')
+    for r in submits:
+        argv = r.get('argv') or []
+        intent = argv[1] if len(argv) > 1 else ''
+        lines.append(f"  {r.get('ts', '?')} agent {r.get('agent', '?')}: "
+                     f"{r.get('detail', '')}  [intent: {intent}]")
+    lines.append('reviewer rows (decisions/gate):')
+    if not reviews:
+        lines.append('  none this run')
+    for r in reviews:
+        dist = r.get('dist') or {}
+        answers = ', '.join(f'{k}={v}' for k, v in dist.items()
+                            if k != 'notes')
+        lines.append(f"  {r.get('ts', '?')} {r.get('judge', '?')}: "
+                     f"used={r.get('used')} chosen={r.get('chosen')}"
+                     + (f" fallback={r['fallback_reason']}"
+                        if r.get('fallback_reason') else '')
+                     + (f' ms={r["ms"]}' if r.get('ms') is not None else '')
+                     + (f'  {answers}' if answers else '')
+                     + (f"  error={r['error']}" if r.get('error') else ''))
+    return '\n'.join(lines)
+
+
+_SANDBOX_USAGE = ('usage: /sandbox status | provision [--force] | gate | deps '
                   '| deps request <name>[<constraint>] | deps apply <name>')
 
 
@@ -590,12 +654,14 @@ def _sandbox_deps(args: str) -> str:
 
 
 def _sandbox_command(args: str = '') -> None:
-    """``/sandbox status | provision [--force] | deps …``."""
+    """``/sandbox status | provision [--force] | gate | deps …``."""
     words = (args or '').split()
     sub = words[0] if words else 'status'
     rest = ' '.join(words[1:])
     if sub == 'status' and not rest:
         text = _sandbox_status()
+    elif sub == 'gate' and not rest:
+        text = _sandbox_gate()
     elif sub == 'provision' and rest in ('', '--force'):
         text = _sandbox_provision(force=rest == '--force')
     elif sub == 'deps':
@@ -673,6 +739,7 @@ def main() -> None:
     ADAPTERS = _build_adapters()
     REGISTRY = build_registry(ADAPTERS)
     routing = load_routing()
+    judges.set_registry(REGISTRY, routing)     # llm: judges, gate reviewer
     installed = judges.install()
     if installed:
         log.info('shadow judges: %s', installed)

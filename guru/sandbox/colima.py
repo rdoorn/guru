@@ -15,8 +15,15 @@ docker CLI's process group does not stop the container the daemon owns.
 Working copies (:func:`prepare_copy`) are ``git init``\\ ed and committed so
 :func:`diff` can return the sandbox's changes as a unified diff; they live
 under ``~/.guru/sandbox/<name>/work/``, a path Colima mounts into its VM.
-The copy is made with :func:`guru.domain.sandbox.copy_excludes` (noise
-dirs, ``.env*``, secret-scan hits).
+When the project is a git repository the copy is the *positive* list
+``git ls-files --cached --others --exclude-standard`` — tracked and
+untracked-but-not-ignored files only, so a gitignored ``secrets.yaml`` or
+``.env`` never enters the copy or the image; only a non-repository falls
+back to a filtered ``copytree``. On top of that :func:`copy_excludes_for`
+applies :func:`guru.domain.sandbox.copy_excludes` with the project secret
+scanner bound (``policy`` scanner if routing bound one, else
+``guru.scanners.secrets.load_project_scanner``), so copy hygiene never
+depends on routing.
 """
 from __future__ import annotations
 
@@ -31,10 +38,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from guru import log
-from guru.domain import procs
+from guru.domain import policy, procs
+from guru.domain.policy import ContentScanner
 from guru.domain.procs import ProcResult
-from guru.domain.sandbox import WORKDIR, SandboxSpec, check_argv
+from guru.domain.sandbox import (WORKDIR, SandboxSpec, check_argv,
+                                 copy_excludes)
 from guru.repositories import sandbox_images as images
+from guru.scanners.secrets import load_project_scanner
 
 DOCKER = 'docker'
 INFO_TIMEOUT_S = 10            # docker info
@@ -115,7 +125,7 @@ def docker_env() -> dict[str, str]:
     return env
 
 
-def _limits(timeout_s: int, out_kb: int) -> procs.Limits:
+def cli_limits(timeout_s: int, out_kb: int) -> procs.Limits:
     """Limits for the docker CLI itself (a Go binary: generous address
     space, CPU at least the wall clock)."""
     return procs.Limits(timeout_s=int(timeout_s),
@@ -126,7 +136,7 @@ def _limits(timeout_s: int, out_kb: int) -> procs.Limits:
 def _docker(args: list[str], cwd: Path, timeout_s: int,
             out_kb: int = RUN_OUT_KB,
             env: Optional[dict[str, str]] = None) -> ProcResult:
-    return procs.run([DOCKER, *args], cwd, _limits(timeout_s, out_kb),
+    return procs.run([DOCKER, *args], cwd, cli_limits(timeout_s, out_kb),
                      env_extra={**docker_env(), **(env or {})})
 
 
@@ -255,7 +265,7 @@ def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path,
     full = docker_run_argv(spec, argv, Path(workdir_copy), name,
                            network=network, env=env)
     res = procs.run(full, spec.project,
-                    _limits(spec.timeout_s, RUN_OUT_KB),
+                    cli_limits(spec.timeout_s, RUN_OUT_KB),
                     env_extra=docker_env())
     killed = False
     if res.timed_out:
@@ -277,24 +287,89 @@ def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path,
 
 # --- working copies ----------------------------------------------------------
 
-def _ignorer(root: Path, excludes: list[str]) -> Callable:
-    """A ``shutil.copytree`` ``ignore`` callable: an exclude without ``/``
-    matches any path component by glob (``.venv``, ``.env*``); one with
-    ``/`` matches the path relative to ``root``."""
+def project_scanner() -> ContentScanner:
+    """The scanner copy hygiene uses: the bound ``policy`` scanner when
+    routing installed one, else the project secret scanner
+    (``.guru/sensitive_markers.txt`` + ``scan_allow.txt``)."""
+    return policy.scanner() or load_project_scanner()
+
+
+def copy_excludes_for(project: Path) -> list[str]:
+    """:func:`guru.domain.sandbox.copy_excludes` with :func:`project_scanner`
+    bound — the excludes every working copy is made with."""
+    return copy_excludes(project, scanner=project_scanner())
+
+
+def _split_excludes(excludes: list[str]) -> tuple[list[str], set[str]]:
+    """``(names, paths)``: an exclude without ``/`` is a glob matched
+    against any path component; one with ``/`` is an exact relative path
+    (a flagged file — never a pattern, so ``secrets[1].py`` excludes that
+    file and no other)."""
     names = [e for e in excludes if '/' not in e]
-    paths = [e for e in excludes if '/' in e]
+    paths = {e for e in excludes if '/' in e}
+    return names, paths
+
+
+def _excluded(rel: Path, names: list[str], paths: set[str]) -> bool:
+    """Whether the project-relative ``rel`` is excluded: any component
+    globs a name, or the whole path equals a flagged path."""
+    return rel.as_posix() in paths or any(
+        fnmatch.fnmatch(part, pat) for part in rel.parts for pat in names)
+
+
+def _ignorer(root: Path, excludes: list[str]
+             ) -> Callable[[str, list[str]], set[str]]:
+    """A ``shutil.copytree`` ``ignore`` callable over :func:`_excluded`."""
+    names, paths = _split_excludes(excludes)
 
     def ignore(directory: str, entries: list[str]) -> set[str]:
-        rel_dir = Path(directory).resolve().relative_to(root) \
-            if Path(directory).resolve() != root else Path()
-        skip: set[str] = set()
-        for entry in entries:
-            rel = (rel_dir / entry).as_posix()
-            if any(fnmatch.fnmatch(entry, pat) for pat in names) or any(
-                    fnmatch.fnmatch(rel, pat) for pat in paths):
-                skip.add(entry)
-        return skip
+        here = Path(directory).resolve()
+        rel_dir = here.relative_to(root) if here != root else Path()
+        return {entry for entry in entries
+                if _excluded(rel_dir / entry, names, paths)}
     return ignore
+
+
+def _git_files(src: Path) -> Optional[list[str]]:
+    """The repository's file list (tracked plus untracked-not-ignored,
+    from ``git ls-files -z``) when ``src`` has a ``.git``; None when it is
+    not a repository. ``RuntimeError`` when git fails or the list is
+    truncated — a repository is never copied wholesale."""
+    if not (src / '.git').exists():
+        return None
+    res = _git(['ls-files', '-z', '--cached', '--others',
+                '--exclude-standard'], src, src, out_kb=DIFF_OUT_KB)
+    if res.returncode != 0:
+        raise RuntimeError(f'git ls-files failed in {src}: '
+                           f'{res.denied or res.stderr.strip()}')
+    if res.truncated:
+        raise RuntimeError(f'git ls-files output for {src} exceeds '
+                           f'{DIFF_OUT_KB} KB; refusing to copy a partial '
+                           'tree')
+    return [name for name in res.stdout.split('\0') if name]
+
+
+def _copy_listed(src: Path, dst: Path, names: list[str],
+                 excludes: list[str]) -> int:
+    """Copy the listed relative paths from ``src`` to ``dst`` (symlinks as
+    links, directories/gitlinks and vanished files skipped) minus
+    ``excludes``; returns the number of files copied."""
+    globs, paths = _split_excludes(excludes)
+    copied = 0
+    for name in names:
+        rel = Path(name)
+        if rel.is_absolute() or '..' in rel.parts:
+            continue
+        if _excluded(rel, globs, paths):
+            continue
+        source = src / rel
+        if not source.is_symlink() and not source.is_file():
+            continue                         # deleted, or a submodule dir
+        target = dst / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target, follow_symlinks=False)
+        copied += 1
+    return copied
 
 
 def _git(args: list[str], repo: Path, cwd: Path,
@@ -302,22 +377,34 @@ def _git(args: list[str], repo: Path, cwd: Path,
     """``git -C <repo> <args>`` through the runner, from ``cwd`` (an
     allow-listed directory — the copy itself is not)."""
     return procs.run(['git', *_GIT_IDENTITY, '-C', str(repo), *args], cwd,
-                     _limits(GIT_TIMEOUT_S, out_kb))
+                     cli_limits(GIT_TIMEOUT_S, out_kb))
 
 
 def prepare_copy(project: Path, dest: Path, excludes: list[str]) -> Path:
-    """Copy ``project`` to ``dest`` (symlinks kept as links, ``excludes`` as
-    :func:`guru.domain.sandbox.copy_excludes` shapes them), mark it, and
-    ``git init`` + commit everything so :func:`diff` has a baseline.
-    ``dest`` must not exist. Raises ``OSError``/``RuntimeError`` when the
-    copy or git fails."""
+    """Copy ``project`` to ``dest``, mark it, and ``git init`` + commit
+    everything so :func:`diff` has a baseline.
+
+    A git repository is copied from its ``git ls-files`` positive list
+    (tracked + untracked-not-ignored; gitignored files never enter); a
+    plain directory is ``copytree``\\ d. Either way ``excludes`` (as
+    :func:`copy_excludes_for` shapes them) are applied and symlinks are
+    kept as links. ``dest`` must not exist. Raises
+    ``OSError``/``RuntimeError`` when the copy or git fails."""
     src = Path(project).expanduser().resolve()
     dst = Path(dest)
     if dst.exists():
         raise FileExistsError(f'{dst} already exists')
     dst.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    shutil.copytree(src, dst, symlinks=True, ignore=_ignorer(src, excludes))
+    listed = _git_files(src)
+    if listed is None:
+        shutil.copytree(src, dst, symlinks=True,
+                        ignore=_ignorer(src, excludes))
+        how = 'copytree'
+    else:
+        dst.mkdir()
+        n = _copy_listed(src, dst, listed, excludes)
+        how = f'git ls-files ({n} files)'
     (dst / COPY_MARKER).write_text('working copy made by guru; safe to '
                                    'delete\n', encoding='utf-8')
     for args in (['init', '-q'], ['add', '-A'],
@@ -333,7 +420,7 @@ def prepare_copy(project: Path, dest: Path, excludes: list[str]) -> Path:
                                f'{res.denied or res.stderr.strip()}')
     images.record_sandbox_event('copy', ['copy', str(src), str(dst)],
                                 time.monotonic() - started, True,
-                                f'{len(excludes)} excludes')
+                                f'{how}; {len(excludes)} excludes')
     return dst
 
 

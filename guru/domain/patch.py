@@ -332,3 +332,46 @@ def _rollback(written: list) -> None:
         except OSError:
             log.exc(f'apply_patch rollback failed for {target}')
         files.forget_sha(target)
+
+
+def render(patches: list) -> str:
+    """The unified diff text for ``patches`` (as :func:`parse` returns
+    them): plain ``---``/``+++`` paths (``/dev/null`` for a new file's old
+    side), hunk headers with counts recomputed from the bodies, and the
+    ``\\ No newline at end of file`` markers. ``parse(render(p))`` yields
+    ``p`` again."""
+    out: list = []
+    for fp in patches:
+        out.append(f'--- {_DEV_NULL if fp.new_file else fp.path}')
+        out.append(f'+++ {fp.path}')
+        for h in fp.hunks:
+            out.append(f'@@ -{h.old_start},{len(h.old_lines)} '
+                       f'+{h.new_start},{len(h.new_lines)} @@')
+            last_old = max((i for i, (tag, _t) in enumerate(h.lines)
+                            if tag in (' ', '-')), default=-1)
+            last_new = max((i for i, (tag, _t) in enumerate(h.lines)
+                            if tag in (' ', '+')), default=-1)
+            for i, (tag, text) in enumerate(h.lines):
+                out.append(tag + text)
+                if ((h.old_no_newline and i == last_old)
+                        or (h.new_no_newline and i == last_new)):
+                    out.append(_NO_NEWLINE)
+    return '\n'.join(out) + '\n'
+
+
+def rebase(diff: str, root: Path) -> str:
+    """``diff`` with every relative target path made absolute under
+    ``root`` (``a/``/``b/`` prefixes dropped), so ``apply_patch`` — which
+    resolves paths against the working directory — applies a diff taken
+    in another tree (a sandbox copy) to the project at ``root``. A diff
+    :func:`parse` rejects is returned unchanged (``apply_patch`` will
+    refuse it with the reason)."""
+    try:
+        patches = parse(diff or '')
+    except PatchError:
+        return diff
+    base = Path(root)
+    for fp in patches:
+        if not Path(fp.path).is_absolute():
+            fp.path = str(base / fp.path)
+    return render(patches)

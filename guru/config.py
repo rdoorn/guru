@@ -152,6 +152,9 @@ DECISIONS_POINTS: dict = {}
 DECISIONS_ACTIVE: dict = {}
 DECISIONS_THRESHOLDS: dict = {}
 DECISIONS_TIMEOUT_MS = 1500
+# The sandbox quality gate's reviewer (guru.domain.gate) reads a whole
+# diff and answers six questions; it gets its own, generous budget.
+DECISIONS_GATE_TIMEOUT_MS = 60000
 DECISIONS_BREAKER_TIMEOUTS = 5
 DECISIONS_BREAKER_COOLDOWN_S = 60.0
 DECISIONS_LABELS_MARGIN = 0.15
@@ -556,7 +559,8 @@ def _apply_settings() -> None:
     global PROC_TIMEOUT_S, PROC_CPU_S, PROC_MEM_MB, PROC_FSIZE_MB, PROC_OUT_KB
     global DECISIONS_MODE, DECISIONS_SIDECAR_MODEL, DECISIONS_SIDECAR_URL
     global DECISIONS_POINTS, DECISIONS_ACTIVE, DECISIONS_THRESHOLDS
-    global DECISIONS_TIMEOUT_MS, DECISIONS_BREAKER_TIMEOUTS
+    global DECISIONS_TIMEOUT_MS, DECISIONS_GATE_TIMEOUT_MS
+    global DECISIONS_BREAKER_TIMEOUTS
     global DECISIONS_BREAKER_COOLDOWN_S, DECISIONS_LABELS_MARGIN
     global LEDGER_ENABLED, PRICING_OVERRIDES
     ctx = load_context_settings()
@@ -615,6 +619,11 @@ def _apply_settings() -> None:
         if isinstance(thresholds, dict) else {})
     try:
         DECISIONS_TIMEOUT_MS = int(dec.get('timeout_ms', DECISIONS_TIMEOUT_MS))
+    except (TypeError, ValueError):
+        pass
+    try:
+        DECISIONS_GATE_TIMEOUT_MS = int(
+            dec.get('gate_timeout_ms', DECISIONS_GATE_TIMEOUT_MS))
     except (TypeError, ValueError):
         pass
     try:

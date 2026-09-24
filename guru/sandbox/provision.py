@@ -43,6 +43,9 @@ REQUIRED_DOMAINS = ('pypi.org', 'files.pythonhosted.org')
 PROXY_DIR = 'proxy'                    # config under ~/.guru/sandbox/<name>/
 UV_CACHE = '/tmp/uv-cache'             # inside the container's tmpfs
 LOCK_FILES = ('pyproject.toml', 'uv.lock')
+# Per-process suffix on network and proxy names: two guru sessions on the
+# same project never share (or remove) each other's network or proxy.
+SESSION = uuid.uuid4().hex[:8]
 
 _asker: Optional[Callable[[str], bool]] = None
 
@@ -69,33 +72,43 @@ def _ask_console(question: str) -> bool:
     return answer in ('y', 'yes')
 
 
-def approve(question: str) -> bool:
-    """Mode-aware approval: read-only never; auto (with
-    ``config.AUTO_GRANT``) without asking; otherwise the installed asker
-    (an asker that raises is a decline)."""
+def ask(question: str) -> bool:
+    """Put ``question`` to the installed asker whatever the access mode
+    (read-only still never approves); an asker that raises is a decline.
+    The gate uses this for an ``unclear`` verdict, which auto mode must
+    not wave through."""
     if config.MODE == config.MODE_READ_ONLY:
         return False
-    if config.MODE == config.MODE_AUTO and config.AUTO_GRANT:
-        return True
     asker = _asker or _ask_console
     try:
         return bool(asker(question))
     except Exception:                            # noqa: BLE001
-        log.exc('dependency approval asker failed; treating as a decline')
+        log.exc('sandbox approval asker failed; treating as a decline')
         return False
+
+
+def approve(question: str) -> bool:
+    """Mode-aware approval: read-only never; auto (with
+    ``config.AUTO_GRANT``) without asking; otherwise :func:`ask`."""
+    if config.MODE == config.MODE_READ_ONLY:
+        return False
+    if config.MODE == config.MODE_AUTO and config.AUTO_GRANT:
+        return True
+    return ask(question)
 
 
 # --- naming ------------------------------------------------------------------
 
 def network_name(spec: sb.SandboxSpec) -> str:
-    """The internal network for ``spec``'s provisioning."""
-    return f'guru-provision-{spec.name}'
+    """The internal network for ``spec``'s provisioning in this session."""
+    return f'guru-provision-{spec.name}-{SESSION}'
 
 
 def proxy_name(spec: sb.SandboxSpec) -> str:
-    """The proxy container for ``spec`` (stable, so the build cache holds
-    across provisions)."""
-    return f'guru-proxy-{spec.name}'
+    """The proxy container for ``spec`` in this session. (The name is the
+    proxy URL in the build args; a new session may therefore miss the
+    classic builder's layer cache — correctness over cache.)"""
+    return f'guru-proxy-{spec.name}-{SESSION}'
 
 
 def proxy_url(spec: sb.SandboxSpec) -> str:
@@ -143,16 +156,21 @@ def _proxied(spec: sb.SandboxSpec, settings: SandboxSettings, phase: str
 def _fresh_copy(spec: sb.SandboxSpec, prefix: str) -> Path:
     dest = images.work_root(spec) / f'{prefix}-{uuid.uuid4().hex[:8]}'
     return colima.prepare_copy(spec.project, dest,
-                               sb.copy_excludes(spec.project))
+                               colima.copy_excludes_for(spec.project))
 
 
 def _discard(copy: Optional[Path]) -> None:
+    """Remove a working copy. A missing marker (``ValueError``) is logged
+    and left alone — never force-deleted; only an ``OSError`` from the
+    marked removal falls back to ``rmtree``."""
     if copy is None:
         return
     try:
         colima.remove_copy(copy)
-    except (ValueError, OSError):
-        log.exc(f'sandbox: could not remove working copy {copy}')
+    except ValueError:
+        log.exc(f'sandbox: not a guru working copy, left in place: {copy}')
+    except OSError:
+        log.exc(f'sandbox: could not remove working copy {copy}; retrying')
         shutil.rmtree(copy, ignore_errors=True)
 
 
@@ -272,6 +290,11 @@ def apply_dependency(project: Path, request: DependencyRequest,
     copy: Optional[Path] = None
     try:
         copy = _fresh_copy(spec, 'deps')
+        # UV_CACHE_DIR sits on the container's /tmp tmpfs, which docker
+        # mounts noexec: fine for resolving and for pure-Python sdist
+        # builds (the interpreter reads the files), but a package whose
+        # build runs a native binary out of the cache would fail here;
+        # such a request needs a wheel or a manual lock.
         env = {**{k: proxy_url(spec) for k in
                   ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')},
                'NO_PROXY': '', 'UV_OFFLINE': '0', 'UV_CACHE_DIR': UV_CACHE}
