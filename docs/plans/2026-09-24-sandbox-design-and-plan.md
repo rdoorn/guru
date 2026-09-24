@@ -60,3 +60,12 @@ tool_events, tools policy, apply_patch).
 **S4 Evals + docs.** Cases: `sandbox-fix-and-submit` (cli-tool: fix the failing test inside the sandbox, submit with intent, gate intended, fixture tests pass on the real copy), `sandbox-unrelated-change` (a planted worker that also edits an unrelated file → gate unclear/suspicious, nothing applied), `sandbox-dependency-request` (asks for a package → request recorded, no install, image unchanged). README "Sandbox" section; state-ownership; the eval report gains gate verdict counts.
 
 Order: S1 → S2 → S3 → S4, each committed after green gates, security review after S1+S2 and after S3.
+
+## 5. Notes from S2 (2026-09-24)
+
+- **Proxy image**: `docker.io/kalaksi/tinyproxy` (tinyproxy 1.11.3 on Alpine, 6.9 MB, unprivileged), pinned by its multi-arch index digest in `settings.DEFAULT_PROXY_IMAGE`. `ubuntu/squid` was rejected for size; the tinyproxy project publishes no official image (`ghcr.io/tinyproxy/tinyproxy` denies).
+- **"CONNECT 443 only, no plain HTTP"** is expressed with `FilterURLs On` + `FilterType ere` + `FilterDefaultDeny Yes` and a filter file of anchored `^host:443$` patterns: the request-URI of a `CONNECT` is exactly `host:port`, so a `http://host/...` URL or another port never matches. `ConnectPort 443` is belt and braces. `Allow <internal subnet>` keeps other bridge containers from using the proxy. Verified live: allowed CONNECT 200, other host refused, plain HTTP 403, other port refused, no route without the proxy.
+- **BuildKit cannot attach a build to a user-defined network** (`network mode "x" not supported by buildkit`). `colima.build` therefore runs the classic builder (`DOCKER_BUILDKIT=0`) whenever the network is not `none`/`default`/`host`. The classic builder is deprecated in Docker 28 but present; the fallback if it is removed is `docker run` on the internal network + `docker commit`, behind the same `build()` signature.
+- The generated Dockerfile declares `ARG HTTP_PROXY/HTTPS_PROXY/http_proxy/https_proxy/NO_PROXY/no_proxy` before the first `RUN`; values are passed as `--build-arg` and never persist in the image.
+- `net_events` rows are aggregated per (host, port, method, allowed, reason) with a `count` and a `phase` (`build`, `uv add`); tinyproxy logs no byte counts.
+- `uv add` runs in the sandbox image on the internal network with `UV_OFFLINE=0` overriding the image's `UV_OFFLINE=1`, `--no-sync`, and `UV_CACHE_DIR` on the tmpfs; only `pyproject.toml`/`uv.lock` of the copy are read back, and they reach the real tree through `apply_patch`.

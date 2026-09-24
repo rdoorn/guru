@@ -1,12 +1,17 @@
-"""Container integration test for the Colima sandbox runtime (chunk S1).
+"""Container integration tests for the Colima sandbox runtime (S1) and the
+provisioning proxy (S2).
 
 Marked ``sandbox`` — excluded by ``make test``, run with
-``make test-sandbox`` — and skipped unless ``docker info`` succeeds. Builds
-a tiny image from a temp uv project (network on for the build: that is the
-provisioning phase; S2 puts the proxy in front of it), then checks the run
-phase: ``python -c`` works, ``--network none`` blocks egress, ``/tmp`` is a
-tmpfs that does not persist, and the working copy's diff shows an edit.
-The image and the copy are removed afterwards.
+``make test-sandbox`` — and skipped unless ``docker info`` succeeds. S1:
+builds a tiny image from a temp uv project (on the default network), then
+checks the run phase: ``python -c`` works, ``--network none`` blocks
+egress, ``/tmp`` is a tmpfs that does not persist, and the working copy's
+diff shows an edit. S2: an internal network plus the pinned tinyproxy lets
+a client reach ``pypi.org``/``files.pythonhosted.org`` on 443 only (other
+hosts, plain HTTP and the no-proxy route all fail); ``provision`` builds
+the fixture image through that proxy and ``apply_dependency`` runs a real
+``uv add`` through it, patches the lockfile back and rebuilds. Images,
+copies, networks and containers are removed afterwards.
 
 The copy lives under ``~/.guru/sandbox/`` because Colima mounts ``$HOME``
 into its VM; a macOS temp dir would not be visible to the daemon.
@@ -154,3 +159,186 @@ def test_timeout_kills_the_container(built) -> None:
                               f'name={res.name}'], capture_output=True,
                              text=True)
     assert listing.stdout.strip() == '', 'container survived the timeout'
+
+
+# --- S2: proxy, provisioning, dependency requests ----------------------------
+
+_CLIENT_IMAGE = DEFAULT_BASE_IMAGE
+
+
+def _client(network: str, env: dict, code: str, timeout: int = 90
+            ) -> subprocess.CompletedProcess:
+    """Run ``python -c code`` in a throwaway container on ``network``
+    (test plumbing, not guru's argv)."""
+    argv = ['docker', 'run', '--rm', '--network', network]
+    for key, value in env.items():
+        argv += ['-e', f'{key}={value}']
+    argv += [_CLIENT_IMAGE, 'python', '-c', code]
+    return subprocess.run(argv, capture_output=True, text=True,
+                          timeout=timeout)
+
+
+@pytest.fixture
+def ledger_repo(monkeypatch):
+    from guru.domain import ledger
+    from tests.conftest import FakeRepo
+    repo = FakeRepo()
+    ledger.set_repository(repo)
+    monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+    try:
+        yield repo
+    finally:
+        ledger.flush()
+        ledger.set_repository(None)
+
+
+def test_proxy_allows_only_listed_hosts_on_443(runtime_ok, allowed,
+                                               ledger_repo) -> None:
+    from guru.domain import ledger
+    from guru.sandbox import proxy
+    net, name = 'guru-provision-itest', 'guru-proxy-itest'
+    cfg_dir = Path(config.SANDBOX_HOME) / '_integration' / 'proxy-itest'
+    proxy.network_up(net, cwd=allowed)
+    try:
+        subnet = proxy.network_subnet(net, cwd=allowed)
+        assert '/' in subnet
+        proxy.write_config(cfg_dir, proxy.allowlist_from_domains(
+            {'pypi.org', 'files.pythonhosted.org'}), client_cidr=subnet)
+        proxy.proxy_up(name, net, cfg_dir, SandboxSettings().proxy_image,
+                       cwd=allowed)
+        try:
+            url = f'http://{name}:{proxy.PROXY_PORT}'
+            env = {'HTTPS_PROXY': url, 'HTTP_PROXY': url}
+            ok = _client(net, env, 'import urllib.request as u; r = u.urlopen'
+                         '("https://pypi.org/simple/six/", timeout=30); '
+                         'print(r.status)')
+            assert ok.returncode == 0 and ok.stdout.strip() == '200', (
+                ok.stderr[-1500:])
+            wheel = _client(net, env, 'import subprocess, sys; sys.exit('
+                            'subprocess.call([sys.executable, "-m", "pip", '
+                            '"download", "--no-deps", "-q", "-d", "/tmp/w", '
+                            '"six==1.16.0"]))', timeout=180)
+            assert wheel.returncode == 0, wheel.stderr[-1500:]
+            denied = _client(net, env, 'import urllib.request as u; '
+                             'u.urlopen("https://example.com/", timeout=30)')
+            assert denied.returncode != 0, 'example.com should be refused'
+            assert 'Tunnel connection failed' in denied.stderr or \
+                'Forbidden' in denied.stderr or 'Error' in denied.stderr
+            plain = _client(net, env, 'import urllib.request as u; '
+                            'u.urlopen("http://pypi.org/simple/", '
+                            'timeout=30)')
+            assert plain.returncode != 0, 'plain HTTP should be refused'
+            assert '403' in plain.stderr
+            direct = _client(net, {}, 'import urllib.request as u; '
+                             'u.urlopen("https://pypi.org/", timeout=10)')
+            assert direct.returncode != 0, 'no route without the proxy'
+            rows = proxy.tail_access_log(name, cwd=allowed)
+        finally:
+            proxy.proxy_down(name, cwd=allowed)
+    finally:
+        proxy.network_down(net, cwd=allowed)
+        shutil.rmtree(cfg_dir, ignore_errors=True)
+    outcomes = {(r['host'], r['port'], r['allowed']) for r in rows}
+    assert ('pypi.org', 443, True) in outcomes
+    assert ('files.pythonhosted.org', 443, True) in outcomes
+    assert ('example.com', 443, False) in outcomes
+    assert ('pypi.org', 80, False) in outcomes
+    assert not any(r['allowed'] for r in rows
+                   if r['host'] not in ('pypi.org', 'files.pythonhosted.org'))
+    from guru.repositories import sandbox_images as images_repo
+    images_repo.record_net_events(rows, 'itest')
+    ledger.flush()
+    written = ledger_repo.stream('net_events')
+    assert {r['host'] for r in written} >= {'pypi.org', 'example.com'}
+    listing = subprocess.run(['docker', 'network', 'ls', '-q', '--filter',
+                              f'name={net}'], capture_output=True, text=True)
+    assert listing.stdout.strip() == ''
+
+
+def test_provision_and_uv_add_through_the_proxy(runtime_ok, project,
+                                                monkeypatch, ledger_repo
+                                                ) -> None:
+    from guru.domain import deps, ledger, tools
+    from guru.sandbox import provision
+    home = Path(config.SANDBOX_HOME) / '_integration'
+    home.mkdir(parents=True, exist_ok=True)
+    sbhome = Path(tempfile.mkdtemp(prefix='p-', dir=home))
+    monkeypatch.setattr(config, 'SANDBOX_HOME', sbhome)
+    monkeypatch.setattr(config, 'ALLOWED_DOMAINS', set())
+    monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', {str(project.parent)})
+    monkeypatch.setattr(config, 'persist_domain', lambda d: None)
+    monkeypatch.setattr(config, 'persist_write_dir', lambda d: None)
+    monkeypatch.setattr(files, '_show_change', lambda block: None)
+    monkeypatch.chdir(project)
+    asked: list = []
+    tools.set_domain_asker(lambda q: asked.append(q) or True)
+    provision.set_approve_asker(lambda q: True)
+    settings = SandboxSettings(base_image=DEFAULT_BASE_IMAGE, cpus=1.0,
+                               memory_mb=1024, pids=128, timeout_s=300)
+    tags: list = []
+    try:
+        rec = provision.provision(project, settings)
+        tags.append(rec.tag)
+        assert rec.digest.startswith('sha256:')
+        assert len(asked) == 2
+        spec = sb.spec_from(project, settings)
+        assert images.needs_build(
+            spec, sb.dockerfile_for(project, DEFAULT_BASE_IMAGE)) is False
+        assert provision.provision(project, settings) == rec   # current
+        ledger.flush()
+        net_rows = ledger_repo.stream('net_events')
+        hosts = {r['host'] for r in net_rows if r['allowed']}
+        assert hosts == {'pypi.org', 'files.pythonhosted.org'}
+        assert all(r['phase'] == 'build' for r in net_rows)
+        assert not any(r['host'] not in hosts for r in net_rows), net_rows
+        # The built image runs offline with uv installed.
+        copy = colima.prepare_copy(project, images.work_root(spec) / 'c',
+                                   sb.copy_excludes(project))
+        res = colima.run(spec, ['uv', '--version'], copy)
+        assert res.returncode == 0 and res.stdout.startswith('uv '), (
+            res.stderr)
+        colima.remove_copy(copy)
+        # A dependency request installs nothing ...
+        out = provision.request_dependency('six', '==1.16.0',
+                                           project=project,
+                                           settings=settings)
+        assert 'nothing was installed' in out
+        req, = images.pending_requests(spec)
+        assert req.spec == 'six==1.16.0'
+        assert images.load_record(spec) == rec
+        # ... and applying it locks through the proxy, patches the real
+        # tree via apply_patch and rebuilds under the new lockfile tag.
+        out = provision.apply_dependency(project, req, settings)
+        assert out.startswith('Added six==1.16.0'), out
+        assert 'added six==1.16.0' in out
+        assert 'six==1.16.0' in (project / 'pyproject.toml').read_text()
+        assert deps.lock_packages((project / 'uv.lock').read_text()).get(
+            'six') == '1.16.0'
+        new_spec = sb.spec_from(project, settings)
+        tags.append(new_spec.image_tag)
+        assert new_spec.image_tag != spec.image_tag
+        new_rec = images.load_record(new_spec)
+        assert new_rec is not None and new_rec.digest != rec.digest
+        assert images.pending_requests(new_spec) == []
+        copy = colima.prepare_copy(project, images.work_root(new_spec) / 'd',
+                                   sb.copy_excludes(project))
+        res = colima.run(new_spec, ['python', '-c',
+                                    'import six; print(six.__version__)'],
+                         copy)
+        assert res.returncode == 0 and res.stdout.strip() == '1.16.0', (
+            res.stderr)
+        colima.remove_copy(copy)
+        ledger.flush()
+        phases = {r['phase'] for r in ledger_repo.stream('net_events')}
+        assert phases == {'build', 'uv add'}
+    finally:
+        tools.set_domain_asker(None)
+        provision.set_approve_asker(None)
+        for tag in tags:
+            subprocess.run(['docker', 'rmi', '-f', tag], capture_output=True)
+        shutil.rmtree(sbhome, ignore_errors=True)
+    for kind in ('network', 'container'):
+        listing = subprocess.run(
+            ['docker', kind, 'ls', '-q', '--filter', 'name=guru-pro'],
+            capture_output=True, text=True)
+        assert listing.stdout.strip() == '', f'stale {kind}'

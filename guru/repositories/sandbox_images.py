@@ -6,7 +6,10 @@ the sha of the generated Dockerfile, ``built_at`` — next to the Dockerfile
 itself, so :func:`needs_build` can say whether the recorded image still
 matches the project (a new lockfile or a changed Dockerfile means a
 rebuild). :func:`record_sandbox_event` appends to the ``sandbox_events``
-ledger stream.
+ledger stream; :func:`record_net_events` aggregates the provisioning
+proxy's access log into the ``net_events`` stream (one row per host, port,
+method and outcome with a count). ``deps.json`` in the same directory holds
+the pending :class:`~guru.domain.deps.DependencyRequest` records (S2).
 """
 from __future__ import annotations
 
@@ -18,10 +21,12 @@ from typing import Optional
 
 from guru import config, log, session
 from guru.domain import ledger
+from guru.domain.deps import DependencyRequest, normalise
 from guru.domain.sandbox import SandboxSpec, sha_text
 
 RECORD_FILE = 'image.json'
 DOCKERFILE = 'Dockerfile'
+DEPS_FILE = 'deps.json'                # pending dependency requests
 WORK_DIR = 'work'                      # working copies live under here
 _RECORD_KEYS = ('tag', 'digest', 'lockfile_sha', 'built_at',
                 'dockerfile_sha')
@@ -134,3 +139,102 @@ def record_sandbox_event(kind: str, argv_head: object, seconds: float,
             'detail': str(detail or '')[:ledger.ARGS_HEAD]})
     except Exception:                            # noqa: BLE001
         log.exc('ledger record_sandbox_event failed')
+
+
+def _session_keys() -> dict:
+    return {**ledger.base_row(), 'agent': session.agent_id,
+            'task_id': session.task_id, 'turn_id': session.turn_id}
+
+
+def record_net_events(events: list[dict], phase: str) -> int:
+    """Aggregate the proxy access-log ``events`` (dicts with ``host``,
+    ``port``, ``method``, ``allowed``, ``reason`` as
+    ``guru.sandbox.proxy.parse_log`` yields them) into ``net_events`` rows:
+    one per distinct (host, port, method, allowed, reason) with ``count``
+    and the provisioning ``phase`` (``build``, ``uv add``). Returns the
+    number of rows written (0 when nothing to record). Never raises."""
+    try:
+        counts: dict[tuple, int] = {}
+        for ev in events or []:
+            if not isinstance(ev, dict):
+                continue
+            key = (str(ev.get('host', ''))[:ledger.ARGS_HEAD],
+                   int(ev.get('port') or 0),
+                   str(ev.get('method', ''))[:16],
+                   bool(ev.get('allowed')),
+                   str(ev.get('reason', ''))[:ledger.ARGS_HEAD])
+            counts[key] = counts.get(key, 0) + 1
+        for (host, port, method, allowed, reason), n in sorted(
+                counts.items()):
+            ledger.submit('net_events', {
+                **_session_keys(), 'phase': str(phase)[:32], 'host': host,
+                'port': port, 'method': method, 'allowed': allowed,
+                'reason': reason, 'count': n})
+        return len(counts)
+    except Exception:                            # noqa: BLE001
+        log.exc('ledger record_net_events failed')
+        return 0
+
+
+# --- pending dependency requests ---------------------------------------------
+
+def deps_path(spec: SandboxSpec) -> Path:
+    """Where ``spec``'s pending dependency requests live."""
+    return record_dir(spec) / DEPS_FILE
+
+
+def pending_requests(spec: SandboxSpec) -> list[DependencyRequest]:
+    """The recorded, not yet applied requests in request order; empty when
+    the file is absent, unreadable or malformed (logged)."""
+    path = deps_path(spec)
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        log.exc(f'sandbox: unreadable dependency requests {path}')
+        return []
+    items = data.get('requests') if isinstance(data, dict) else None
+    out: list[DependencyRequest] = []
+    for item in items or []:
+        if (isinstance(item, dict) and isinstance(item.get('name'), str)
+                and isinstance(item.get('constraint', ''), str)):
+            out.append(DependencyRequest(
+                name=item['name'], constraint=item.get('constraint', ''),
+                requested_at=str(item.get('requested_at', ''))))
+    return out
+
+
+def _save_requests(spec: SandboxSpec, requests: list[DependencyRequest]
+                   ) -> None:
+    path = deps_path(spec)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {'requests': [asdict(r) for r in requests]}, indent=1,
+        sort_keys=True) + '\n', encoding='utf-8')
+
+
+def add_request(spec: SandboxSpec, request: DependencyRequest
+                ) -> list[DependencyRequest]:
+    """Record ``request`` (stamped ``requested_at``), replacing an earlier
+    request for the same normalised name; returns the pending list."""
+    stamped = DependencyRequest(
+        name=request.name, constraint=request.constraint,
+        requested_at=datetime.now(timezone.utc).isoformat(
+            timespec='seconds'))
+    pending = [r for r in pending_requests(spec) if r.key != stamped.key]
+    pending.append(stamped)
+    _save_requests(spec, pending)
+    return pending
+
+
+def remove_request(spec: SandboxSpec, name: str) -> bool:
+    """Drop the request whose normalised name matches ``name``; True when
+    one was removed."""
+    key = normalise(name)
+    pending = pending_requests(spec)
+    kept = [r for r in pending if r.key != key]
+    if len(kept) == len(pending):
+        return False
+    _save_requests(spec, kept)
+    return True

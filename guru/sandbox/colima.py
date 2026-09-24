@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shutil
 import time
 import uuid
@@ -44,6 +45,9 @@ STOP_TIMEOUT_S = 5             # --stop-timeout: SIGKILL this long after stop
 BUILD_OUT_KB = 64
 RUN_OUT_KB = 256
 DIFF_OUT_KB = 2048
+# Network modes BuildKit accepts; any other name is a user-defined network,
+# which only the classic builder (DOCKER_BUILDKIT=0) can attach to.
+BUILDKIT_NETWORKS = frozenset(('none', 'default', 'host'))
 # Marker file prepare_copy writes; remove_copy refuses a tree without it.
 COPY_MARKER = '.guru-sandbox-copy'
 # Git identity for the copy's commits (the scrubbed HOME has no gitconfig).
@@ -58,6 +62,8 @@ _GIT_EXCLUDE = ('__pycache__/\n.pytest_cache/\n.mypy_cache/\n.ruff_cache/\n'
 # gives the child a temporary HOME, which would hide ~/.docker.
 _DOCKER_PASSTHROUGH = ('DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY',
                        'DOCKER_CERT_PATH')
+
+_ARG_NAME_RX = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
 _available: Optional[bool] = None
 
@@ -118,9 +124,10 @@ def _limits(timeout_s: int, out_kb: int) -> procs.Limits:
 
 
 def _docker(args: list[str], cwd: Path, timeout_s: int,
-            out_kb: int = RUN_OUT_KB) -> ProcResult:
+            out_kb: int = RUN_OUT_KB,
+            env: Optional[dict[str, str]] = None) -> ProcResult:
     return procs.run([DOCKER, *args], cwd, _limits(timeout_s, out_kb),
-                     env_extra=docker_env())
+                     env_extra={**docker_env(), **(env or {})})
 
 
 def available(cwd: Optional[Path] = None, refresh: bool = False) -> bool:
@@ -145,16 +152,40 @@ def _image_id(tag: str, cwd: Path) -> str:
     return res.stdout.strip() if res.returncode == 0 else ''
 
 
+def build_args_argv(build_args: Optional[dict[str, str]]) -> list[str]:
+    """``--build-arg K=V`` pairs (keys sorted) for ``build_args``; a key
+    that is not an identifier raises ``ValueError`` (the values are
+    guru's own proxy URL, but the argv stays a fixed shape)."""
+    out: list[str] = []
+    args = build_args or {}
+    for key in sorted(args):
+        if not isinstance(key, str) or not _ARG_NAME_RX.fullmatch(key):
+            raise ValueError(f'build arg name {key!r} is not an identifier')
+        value = str(args[key])
+        if any(ch in value for ch in '\r\n'):
+            raise ValueError(f'build arg {key} value contains a newline')
+        out += ['--build-arg', f'{key}={value}']
+    return out
+
+
 def build(spec: SandboxSpec, dockerfile: Path, context_dir: Path,
-          network: str = 'none') -> BuildResult:
-    """``docker build --network <network> -t <tag> -f <dockerfile>
-    <context_dir>``; on success the image id is looked up and the build is
-    recorded (image record + ``sandbox_events``). ``network`` is ``none``
-    unless the caller provides the provisioning network (S2). The CLI runs
-    in ``spec.project``."""
-    argv = ['build', '--network', str(network), '-t', spec.image_tag,
+          network: str = 'none',
+          build_args: Optional[dict[str, str]] = None) -> BuildResult:
+    """``docker build --network <network> [--build-arg K=V…] -t <tag> -f
+    <dockerfile> <context_dir>``; on success the image id is looked up and
+    the build is recorded (image record + ``sandbox_events``). ``network``
+    is ``none`` unless the caller provides the provisioning network (S2);
+    a user-defined network is only supported by the classic builder, so
+    the CLI then runs with ``DOCKER_BUILDKIT=0`` (BuildKit rejects it
+    outright). ``build_args`` are the proxy variables of
+    :func:`guru.domain.sandbox.proxy_build_args`. The CLI runs in
+    ``spec.project``."""
+    extra = build_args_argv(build_args)
+    argv = ['build', '--network', str(network), *extra, '-t', spec.image_tag,
             '-f', str(dockerfile), str(context_dir)]
-    res = _docker(argv, spec.project, BUILD_TIMEOUT_S, out_kb=BUILD_OUT_KB)
+    env = {} if network in BUILDKIT_NETWORKS else {'DOCKER_BUILDKIT': '0'}
+    res = _docker(argv, spec.project, BUILD_TIMEOUT_S, out_kb=BUILD_OUT_KB,
+                  env=env)
     ok = res.returncode == 0 and not res.denied
     digest = _image_id(spec.image_tag, spec.project) if ok else ''
     if ok:
@@ -176,29 +207,44 @@ def container_name() -> str:
 
 
 def docker_run_argv(spec: SandboxSpec, argv: list[str], copy: Path,
-                    name: str) -> list[str]:
-    """The exact ``docker run`` argv for a sandbox run (pure)."""
+                    name: str, network: str = 'none',
+                    env: Optional[dict[str, str]] = None) -> list[str]:
+    """The exact ``docker run`` argv for a sandbox run (pure). ``network``
+    is ``none`` for the execution phase; provisioning passes the internal
+    network and ``env`` (``-e K=V`` pairs: the proxy variables). Keys must
+    be identifiers (``ValueError``)."""
+    extra: list[str] = []
+    variables = env or {}
+    for key in variables:
+        if not isinstance(key, str) or not _ARG_NAME_RX.fullmatch(key):
+            raise ValueError(f'env name {key!r} is not an identifier')
+        extra += ['-e', f'{key}={variables[key]}']
     return [DOCKER, 'run', '--rm', '--name', name,
             '--stop-timeout', str(STOP_TIMEOUT_S),
-            '--network', 'none', '--user', '1000:1000',
+            '--network', str(network), '--user', '1000:1000',
             '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
             '--read-only', '--tmpfs', '/tmp',
             '--pids-limit', str(int(spec.pids)),
             '--memory', f'{int(spec.memory_mb)}m',
             '--cpus', str(spec.cpus),
-            '-v', f'{copy}:{WORKDIR}', '-w', WORKDIR,
+            '-v', f'{copy}:{WORKDIR}', '-w', WORKDIR, *extra,
             spec.image_tag, *argv]
 
 
-def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path) -> RunResult:
+def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path,
+        network: str = 'none',
+        env: Optional[dict[str, str]] = None) -> RunResult:
     """Run ``argv`` inside ``spec``'s image with ``workdir_copy`` mounted at
     ``/work`` (see the module docstring for the container flags).
 
     ``argv[0]`` must be a ``RUNNERS`` basename, else the run is denied
-    (``returncode -1``, ``denied`` set) and nothing starts. The wall clock
-    is ``spec.timeout_s``; on expiry the CLI's process group is killed and
-    the container is ``docker kill``\\ ed by name (``killed``). Every run
-    lands in ``sandbox_events``. Never raises for a failing container.
+    (``returncode -1``, ``denied`` set) and nothing starts. ``network`` and
+    ``env`` default to no network and no variables (the execution phase);
+    provisioning (``uv add``) passes the internal network and the proxy
+    variables. The wall clock is ``spec.timeout_s``; on expiry the CLI's
+    process group is killed and the container is ``docker kill``\\ ed by
+    name (``killed``). Every run lands in ``sandbox_events``. Never raises
+    for a failing container.
     """
     denial = check_argv(argv)
     if denial:
@@ -206,7 +252,8 @@ def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path) -> RunResult:
         return RunResult(list(argv) if isinstance(argv, list) else [],
                          -1, '', '', 0.0, denied=denial)
     name = container_name()
-    full = docker_run_argv(spec, argv, Path(workdir_copy), name)
+    full = docker_run_argv(spec, argv, Path(workdir_copy), name,
+                           network=network, env=env)
     res = procs.run(full, spec.project,
                     _limits(spec.timeout_s, RUN_OUT_KB),
                     env_extra=docker_env())

@@ -524,14 +524,85 @@ def _sandbox_status(project: Optional[Path] = None) -> str:
     return '\n'.join(lines)
 
 
+_SANDBOX_USAGE = ('usage: /sandbox status | provision [--force] | deps '
+                  '| deps request <name>[<constraint>] | deps apply <name>')
+
+
+def _sandbox_provision(force: bool = False) -> str:
+    """Plain-text ``/sandbox provision``: build the project's sandbox image
+    through the provisioning proxy (or confirm the recorded one)."""
+    from guru.repositories.settings import load_sandbox
+    from guru.sandbox import provision
+    root = config.PROJECT_GURU_DIR.parent
+    try:
+        settings = load_sandbox()
+        rec = provision.provision(root, settings, force=force)
+    except (ValueError, provision.ProvisionError) as e:
+        return f'sandbox provision failed: {e}'
+    return (f'sandbox image {rec.tag} digest {rec.digest} built '
+            f'{rec.built_at} (lockfile {rec.lockfile_sha[:12]})')
+
+
+def _split_requirement(text: str) -> tuple:
+    """``('six', '>=1.16')`` from ``six>=1.16``: the name ends at the first
+    version operator character."""
+    spec = text.strip().strip('"\'')
+    for i, ch in enumerate(spec):
+        if ch in '=<>!~':
+            return spec[:i], spec[i:]
+    return spec, ''
+
+
+def _sandbox_deps(args: str) -> str:
+    """Plain-text ``/sandbox deps [request <spec> | apply <name>]``."""
+    from guru.domain import sandbox as sb
+    from guru.repositories import sandbox_images as images
+    from guru.repositories.settings import load_sandbox
+    from guru.sandbox import provision
+    root = config.PROJECT_GURU_DIR.parent
+    words = args.split(None, 1)
+    verb = words[0] if words else ''
+    rest = words[1].strip() if len(words) > 1 else ''
+    try:
+        settings = load_sandbox()
+        spec = sb.spec_from(root, settings)
+    except ValueError as e:
+        return f'sandbox deps: {e}'
+    if verb == '':
+        pending = images.pending_requests(spec)
+        if not pending:
+            return 'sandbox deps: no pending dependency requests'
+        return 'pending dependency requests:\n' + '\n'.join(
+            f'  {r.spec}  (requested {r.requested_at}; apply with '
+            f'/sandbox deps apply {r.name})' for r in pending)
+    if verb == 'request' and rest:
+        name, constraint = _split_requirement(rest)
+        return provision.request_dependency(name, constraint, project=root,
+                                            settings=settings)
+    if verb == 'apply' and rest:
+        from guru.domain import deps
+        key = deps.normalise(rest)
+        match = [r for r in images.pending_requests(spec) if r.key == key]
+        if not match:
+            return f"sandbox deps: no pending request named '{rest}'"
+        return provision.apply_dependency(root, match[0], settings)
+    return _SANDBOX_USAGE
+
+
 def _sandbox_command(args: str = '') -> None:
-    """``/sandbox [status]``: print :func:`_sandbox_status`."""
-    sub = (args or '').strip()
-    if sub not in ('', 'status'):
-        ui.console.print(f"[yellow]Unknown /sandbox command '{sub}'; "
-                         'usage: /sandbox status[/yellow]')
-        return
-    ui.console.print(_sandbox_status(), markup=False, highlight=False)
+    """``/sandbox status | provision [--force] | deps …``."""
+    words = (args or '').split()
+    sub = words[0] if words else 'status'
+    rest = ' '.join(words[1:])
+    if sub == 'status' and not rest:
+        text = _sandbox_status()
+    elif sub == 'provision' and rest in ('', '--force'):
+        text = _sandbox_provision(force=rest == '--force')
+    elif sub == 'deps':
+        text = _sandbox_deps(rest)
+    else:
+        text = f"Unknown /sandbox command '{args.strip()}'; {_SANDBOX_USAGE}"
+    ui.console.print(text, markup=False, highlight=False)
 
 
 def _handle_slash_search(query: str) -> None:

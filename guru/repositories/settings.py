@@ -73,7 +73,7 @@ opt-in)::
     memory_mb = 2048
     pids = 256
     timeout_s = 600
-    proxy_image = "ghcr.io/…@sha256:…"   # S2: the provisioning proxy
+    proxy_image = "docker.io/kalaksi/tinyproxy:latest@sha256:…"
 """
 from __future__ import annotations
 
@@ -426,10 +426,17 @@ SANDBOX_RUNTIMES = ('docker',)
 # 2026-09-24 (``docker buildx imagetools inspect python:3.12-slim``).
 DEFAULT_BASE_IMAGE = ('python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a'
                       '686e2cb9a83de48e70534b94cd8ebbe06a9')
-# PLACEHOLDER: the provisioning proxy (chunk S2) pins a real digest; until
-# then this is a syntactically valid reference no registry serves.
-DEFAULT_PROXY_IMAGE = ('ghcr.io/tinyproxy/tinyproxy:latest@sha256:'
-                       + '0' * 64)
+# The provisioning proxy: docker.io/kalaksi/tinyproxy (tinyproxy 1.11.3 on
+# Alpine, 6.9 MB, runs unprivileged as 57981:57981). Chosen over
+# ubuntu/squid for size and because its URL filter expresses exactly
+# "CONNECT to <host>:443 only, deny everything else" (guru.sandbox.proxy);
+# the tinyproxy project publishes no official image. Multi-arch index
+# digest obtained on 2026-09-24 with ``docker pull kalaksi/tinyproxy:latest``
+# then ``docker image inspect --format '{{index .RepoDigests 0}}'``
+# (amd64 + arm64; ``docker manifest inspect`` of the digest shows an OCI
+# image index). Repin the same way when bumping.
+DEFAULT_PROXY_IMAGE = ('docker.io/kalaksi/tinyproxy:latest@sha256:fafafc7079c'
+                       'a29c6704564de1353f61d038f2166f09b01d4e460e8e499bf6b57')
 _SANDBOX_KEYS = frozenset(('enabled', 'runtime', 'base_image', 'cpus',
                            'memory_mb', 'pids', 'timeout_s', 'proxy_image'))
 _SANDBOX_INTS = ('memory_mb', 'pids', 'timeout_s')

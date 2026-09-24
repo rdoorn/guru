@@ -40,6 +40,12 @@ SCAN_MAX_BYTES = 64 * 1024
 BASE_EXCLUDES = ('.env', '.env*')
 # Where the project lands inside the container.
 WORKDIR = '/work'
+# Build-time ARGs the generated Dockerfile declares so a provisioning build
+# can route pip/uv through the filtering proxy (S2). ARG, never ENV: the
+# proxy address is not baked into the image and the run phase has no
+# network anyway.
+PROXY_BUILD_ARGS = ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+                    'NO_PROXY', 'no_proxy')
 VENV = '/opt/venv'
 _DIGEST_RX = re.compile(r'@sha256:[0-9a-f]{64}$')
 _NAME_RX = re.compile(r'[^a-z0-9._-]+')
@@ -98,8 +104,11 @@ def dockerfile_for(project: Path, base_image: str) -> str:
     virtualenv is ``/opt/venv`` — outside ``/work``, which the working copy
     is bind-mounted over at run time — and goes first on ``PATH``. The
     final ``ENV`` makes uv offline and no-sync so nothing installs at run
-    time; the image runs as ``1000:1000`` in ``/work``. Raises
-    ``ValueError`` when the project lacks ``pyproject.toml`` or ``uv.lock``.
+    time; the image runs as ``1000:1000`` in ``/work``. The
+    ``PROXY_BUILD_ARGS`` are declared (``ARG``) before the first ``RUN`` so
+    :func:`proxy_build_args` reach pip and uv during a provisioning build
+    without persisting in the image. Raises ``ValueError`` when the project
+    lacks ``pyproject.toml`` or ``uv.lock``.
     """
     problem = check_base_image(base_image)
     if problem:
@@ -117,6 +126,7 @@ def dockerfile_for(project: Path, base_image: str) -> str:
         f'FROM {base_image}',
         'ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 '
         f'UV_PROJECT_ENVIRONMENT={VENV} UV_LINK_MODE=copy',
+        *(f'ARG {var}' for var in PROXY_BUILD_ARGS),
         f'RUN pip install --no-cache-dir uv=={UV_VERSION}',
         f'WORKDIR {WORKDIR}',
         'COPY pyproject.toml uv.lock ./',
@@ -128,6 +138,16 @@ def dockerfile_for(project: Path, base_image: str) -> str:
         f'WORKDIR {WORKDIR}',
         '',
     ))
+
+
+def proxy_build_args(proxy_url: str) -> dict[str, str]:
+    """``--build-arg`` values pointing every proxy variable (upper and
+    lower case) at ``proxy_url`` and clearing ``NO_PROXY``/``no_proxy`` so
+    nothing bypasses it. Bypass is impossible anyway (the build network is
+    internal, without a route); the variables are what makes the build
+    work."""
+    return {var: ('' if var.lower() == 'no_proxy' else str(proxy_url))
+            for var in PROXY_BUILD_ARGS}
 
 
 def _is_text_head(path: Path) -> bool:
