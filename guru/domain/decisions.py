@@ -179,6 +179,11 @@ def clear_judges() -> None:
     _judges.clear()
 
 
+def installed_judges() -> list:
+    """The registered judges, in registration order."""
+    return list(_judges.values())
+
+
 def enabled(point: str) -> bool:
     """True when judges run (shadow or active mode) and ``point`` has one."""
     return config.DECISIONS_MODE in config.JUDGING_MODES and point in _judges

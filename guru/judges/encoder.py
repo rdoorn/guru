@@ -9,13 +9,17 @@ without generating text.
   (0.89; one false positive on raw code).
 
 Both need the optional ``judge`` extra (torch + transformers) and import it
-lazily; ``available()`` tells.
+lazily; ``available()`` tells. The pipeline is built on first use (1-2 s),
+which is longer than the active-decision timeout, so callers that care
+about the first answer call ``warm_up()`` ahead of time.
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Callable, Optional, Union
 
+from guru import log
 from guru.domain.decisions import CHOICE, NOUL, Answer, Question
 
 NLI_MODEL = 'MoritzLaurer/deberta-v3-base-zeroshot-v2.0'
@@ -56,16 +60,33 @@ def _factory(task: str, model: str, **kw: Any) -> Callable:
 
 
 class _LazyPipeline:
-    """Build the transformers pipeline on first use and keep it."""
+    """Build the transformers pipeline on first use and keep it.
+
+    The lock keeps a warm-up thread and the judge worker from both
+    building (and holding) a copy.
+    """
 
     def __init__(self, factory: Callable) -> None:
         self._factory = factory
         self._pipe: Any = None
+        self._lock = threading.Lock()
 
     def __call__(self) -> Any:
-        if self._pipe is None:
-            self._pipe = self._factory()
-        return self._pipe
+        with self._lock:
+            if self._pipe is None:
+                self._pipe = self._factory()
+            return self._pipe
+
+
+def _warm(name: str, run: Callable[[], object]) -> float:
+    """Run ``run`` (load + one tiny classification) and return the seconds
+    it took; failures are logged and swallowed."""
+    t0 = time.perf_counter()
+    try:
+        run()
+    except Exception:
+        log.exc(f'warm-up of {name} failed')
+    return round(time.perf_counter() - t0, 3)
 
 
 def _noul_answer(p: float, judge: str, ms: int) -> Answer:
@@ -82,6 +103,13 @@ class EncoderJudge:
         self.name = f'encoder:{model.rsplit("/", 1)[-1]}'
         self._pipeline = _LazyPipeline(pipeline_factory or _factory(
             'zero-shot-classification', model))
+
+    def warm_up(self) -> float:
+        """Load the pipeline and classify one token so the weights are
+        resident; never raises. Returns the seconds spent."""
+        return _warm(self.name, lambda: self._pipeline()(
+            'ok', candidate_labels=['ok'], hypothesis_template='{}',
+            multi_label=True))
 
     def ask(self, questions: list) -> list:
         """One classifier call per question."""
@@ -120,6 +148,11 @@ class InjectionJudge:
         self.name = f'injection:{model.rsplit("/", 1)[-1]}'
         self._pipeline = _LazyPipeline(pipeline_factory or _factory(
             'text-classification', model, truncation=True, max_length=512))
+
+    def warm_up(self) -> float:
+        """Load the pipeline and classify one token; never raises.
+        Returns the seconds spent."""
+        return _warm(self.name, lambda: self._pipeline()('ok'))
 
     def ask(self, questions: list) -> list:
         """Classify each question's state; INJECTION maps to yes."""

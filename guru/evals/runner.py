@@ -80,6 +80,7 @@ _GIT_IDENTITY = ['-c', 'user.name=evals', '-c', 'user.email=evals@local',
                  '-c', 'commit.gpgsign=false']
 FIXTURE_PYTEST_TIMEOUT_S = 300
 WORKER_DRAIN_S = 30.0          # how long to wait for leftover worker threads
+JUDGE_WARM_UP_S = 30.0         # model loading before the first case
 _WORKER_POLL_S = 0.2
 _PERSISTERS = ('persist_read_dir', 'persist_write_dir', 'persist_domain')
 DEFAULT_TRAJECTORY_DIR = cases.REPO_ROOT / 'evals'   # TRAJECTORY.md
@@ -629,7 +630,8 @@ def _judges_for(decisions: Optional[DecisionsSettings]
 
     Sets ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` and
     ``config.DECISIONS_LABELS_MARGIN`` from ``decisions``, calls
-    ``judges.install()`` and yields the installed
+    ``judges.install()``, warms the judges synchronously (so the first
+    active decision is not spent loading a model) and yields the installed
     judges as ``point=name``; afterwards the config values are restored
     and the judge registry is cleared. No-op (yields ``[]``, touches
     nothing) without a table.
@@ -646,7 +648,9 @@ def _judges_for(decisions: Optional[DecisionsSettings]
     config.DECISIONS_THRESHOLDS = dict(decisions.thresholds)
     config.DECISIONS_LABELS_MARGIN = decisions.labels_margin
     try:
-        installed = judges.install()
+        installed = judges.install(warm=False)
+        if installed:
+            judges.warm_up_all(timeout_s=JUDGE_WARM_UP_S)
         yield [f'{point}={name}' for point, name in installed.items()]
     finally:
         decision_seam.clear_judges()

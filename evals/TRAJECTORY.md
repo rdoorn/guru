@@ -18,3 +18,6 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-24T08:07:47+00:00 | 65a0ce16e651 | SBP Litellm\|aws/claude-5-5-opus@125k | 3/3 | 196.2 | $12.38 | config 0-opus real cases: plain opus 5.5 |
 | 2026-09-24T08:15:16+00:00 | 125934108305 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 166.7 | $2.78 | config 3+judges real cases: haiku controller |
 | 2026-09-24T08:18:00+00:00 | 974716735cf6 | SBP Litellm\|aws/claude-5-5-opus@125k+routed:claude-tiers-judges+controller | 2/3 | 131.5 | $3.77 | opus controller + tiers + judges, real cases |
+| 2026-09-24T08:55:47+00:00 | 660eb67121bb | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/3 | 96.9 | $1.95 | haiku controller v2 (examples+tie-break), repeat 1 |
+| 2026-09-24T09:01:25+00:00 | 4dd3f4cb1061 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 102.1 | $2.58 | haiku controller v2 (examples+tie-break), repeat 2 |
+| 2026-09-24T09:07:01+00:00 | 39a114b8a034 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 115.5 | $2.90 | haiku controller v2 (examples+tie-break), repeat 3 |

@@ -53,3 +53,38 @@ review itself was complete. The case regex is loosened to `record(_call|ed|ing)`
 3. Add `over_read` guard for non-controller mode (stop reading after N
    distinct files and delegate) — or make controller mode the default when a
    ladder is configured.
+
+## Haiku controller v2, three repeats (tier examples + labels tie-breaker)
+
+Runs 660eb67121bb, 4dd3f4cb1061, 39a114b8a034. Same three cases.
+
+| repeat | passed | mean s | cost | rubric | notes |
+|---|---|---|---|---|---|
+| 1 | 1/3 | 96.9 | $1.95 | 5 | version-flag test written as a `python -m guru.cli` subprocess → fixture suite red (quality miss, `unsafe_edit`-adjacent); review complete but wording missed the regex |
+| 2 | 3/3 | 102.1 | $2.59 | 6 | |
+| 3 | 3/3 | 115.5 | $2.90 | 6 | |
+| **mean** | | **105** | **$2.48** | 5.7 | vs plain Opus $12.38 (20%), plain Sonnet $8.20 (30%), v1 Haiku $2.78 |
+
+Variance: cost ±20% around the mean, time ±10%. Faster than v1 (167 s) because
+the controller labelled the review `hard` (via the judge) and Opus finished
+it in ~136 s instead of Sonnet's 320 s.
+
+Labels judge (active, margin 0.15): it overrode `standard → hard` on the
+adapter review in all three runs (margins 0.66/0.27, 0.53/0.37, 0.69/0.23) —
+correct every time. One `margin` fallback per run (kept the controller's
+label) and one `timeout` per run: the FIRST labels decision always timed out
+because the encoder loads lazily (1–2 s > 1.5 s timeout). Fix: warm the
+judges at install (in progress).
+
+Guru bug found by the Opus reviewer (repeat 1): the LiteLLM adapter reads
+`resp._hidden_params['response_cost']`, an attribute the OpenAI client never
+sets, so proxy-reported cost never arrives and the table price is always
+used. Follow-up: read the `x-litellm-response-cost` header via
+`with_raw_response`, or drop the dead branch.
+
+Conclusion: the Haiku controller with Claude-tier workers and the labels
+judge as tie-breaker is the configuration to adopt: same rubric quality as
+plain Opus in 2 of 3 runs (one worker slip), at one fifth of the cost and
+half the time. Remaining risk is worker quality on edit tasks (a bad test
+can slip through when no shell tool exists to run it); the eval suite catches
+it, a shell tool would prevent it.

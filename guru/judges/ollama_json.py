@@ -16,6 +16,7 @@ from typing import Optional, Union
 
 import ollama
 
+from guru import log
 from guru.domain.decisions import CHOICE, NOUL, SCORE, Answer, Question
 
 LETTERS = string.ascii_uppercase
@@ -84,6 +85,22 @@ class OllamaJsonJudge:
         self.client = client or ollama.Client(host=url,
                                               timeout=SIDECAR_TIMEOUT_S)
         self.name = f'ollama-json:{model}'
+
+    def warm_up(self) -> float:
+        """Load the model into the sidecar with a one-token generate (kept
+        alive for ``KEEP_ALIVE``); never raises. Returns the seconds spent.
+
+        Loads a model into GPU memory, so it is only called when asked for
+        (``judges.install(warm=True)`` / ``judges.warm_up_all``).
+        """
+        t0 = time.perf_counter()
+        try:
+            self.client.generate(model=self.model, prompt='ok', think=False,
+                                 options={'num_predict': 1},
+                                 keep_alive=KEEP_ALIVE)
+        except Exception:
+            log.exc(f'warm-up of {self.name} failed')
+        return round(time.perf_counter() - t0, 3)
 
     def ask(self, questions: list) -> list:
         """Answer each question with one constrained sidecar call."""

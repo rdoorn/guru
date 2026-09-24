@@ -1284,6 +1284,13 @@ def _decisions(**kw):
     return DecisionsSettings(**kw)
 
 
+def _fake_pipe(text, candidate_labels=None, **kw):
+    if candidate_labels is None:
+        return [{'label': 'SAFE', 'score': 0.9}]
+    return {'labels': candidate_labels,
+            'scores': [0.5] * len(candidate_labels)}
+
+
 class TestRunSuiteJudges:
     """``run_suite(decisions=...)`` installs the experiment's judges for the
     run and restores the process afterwards."""
@@ -1291,6 +1298,10 @@ class TestRunSuiteJudges:
     @pytest.fixture(autouse=True)
     def _off(self, monkeypatch):
         from guru.domain import decisions as seam
+        from guru.judges import encoder
+        # The run warms its judges up front; never let that load a model.
+        monkeypatch.setattr(encoder, '_import_pipeline',
+                            lambda: (lambda task, model, **kw: _fake_pipe))
         monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
         monkeypatch.setattr(config, 'DECISIONS_POINTS', {'stall': 'ollama'})
         monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {})
@@ -1370,6 +1381,46 @@ class TestRunSuiteJudges:
             self._run(tmp_path, _decisions(mode='shadow',
                                            points={'panel': 'encoder'}))
         assert config.DECISIONS_MODE == 'off' and seam._judges == {}
+
+    def test_judges_are_warm_before_the_first_case(
+            self, tmp_path: Path, monkeypatch) -> None:
+        from guru.domain import decisions as seam
+        import guru.judges as judges
+
+        class Warm:
+            name = 'warm'
+            warmed = 0
+
+            def ask(self, questions):
+                return []
+
+            def warm_up(self):
+                self.warmed += 1
+                return 0.5
+        judge = Warm()
+        seen: dict = {}
+
+        async def fake_run(self, prompt, timeout=None):
+            seen['warmed'] = judge.warmed
+            seen['judges'] = dict(seam._judges)
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', fake_run)
+        monkeypatch.setattr(judges, 'build', lambda spec: judge)
+        waited: list = []
+        real = judges.warm_up_all
+
+        def spy(timeout_s):
+            waited.append(timeout_s)
+            return real(timeout_s=timeout_s)
+        monkeypatch.setattr(judges, 'warm_up_all', spy)
+        run = self._run(tmp_path, _decisions(mode='active',
+                                             points={'labels': 'x'},
+                                             active={'labels': True}))
+        assert seen['judges'] == {'labels': judge}
+        assert seen['warmed'] == 1                 # warm before the case ran
+        assert waited == [30]                      # synchronous, bounded
+        assert judges.wait_warm_up(timeout_s=1) is None    # no bg thread
+        assert run.judges == ['labels=warm']
 
     def test_without_decisions_seam_untouched(self, tmp_path: Path,
                                               judged, monkeypatch) -> None:

@@ -1,6 +1,7 @@
 """Tests for the judge implementations (guru.judges)."""
 import json
 import math
+import threading
 from types import SimpleNamespace as NS
 
 import pytest
@@ -219,18 +220,193 @@ class TestBuildFromSettings:
         monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
         monkeypatch.setattr(config, 'DECISIONS_POINTS',
                             {'stall': 'ollama', 'panel': 'encoder'})
-        assert judges.install() == {
+        assert judges.install(warm=False) == {
             'stall': 'ollama-json:' + config.DECISIONS_SIDECAR_MODEL}
         assert decisions.enabled('stall') and not decisions.enabled('panel')
 
     def test_install_noop_when_off(self, monkeypatch) -> None:
         monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
         monkeypatch.setattr(config, 'DECISIONS_POINTS', {'stall': 'ollama'})
-        assert judges.install() == {} and not decisions.enabled('stall')
+        assert judges.install(warm=False) == {}
+        assert not decisions.enabled('stall')
 
     def test_install_registers_in_active_mode(self, monkeypatch) -> None:
         monkeypatch.setattr(config, 'DECISIONS_MODE', 'active')
         monkeypatch.setattr(config, 'DECISIONS_POINTS', {'stall': 'ollama'})
-        assert judges.install() == {
+        assert judges.install(warm=False) == {
             'stall': 'ollama-json:' + config.DECISIONS_SIDECAR_MODEL}
         assert decisions.enabled('stall')
+
+
+class TestWarmUp:
+    """``warm_up()`` loads a judge's model once, ahead of the first
+    ``ask()``, so the active timeout is not spent on model loading."""
+
+    def _encoder(self):
+        loads = []
+
+        def pipe(text, candidate_labels, hypothesis_template, multi_label):
+            return {'labels': candidate_labels,
+                    'scores': [0.5] * len(candidate_labels)}
+
+        def factory():
+            loads.append(1)
+            return pipe
+        return encoder.EncoderJudge(pipeline_factory=factory), loads
+
+    def test_encoder_warm_up_loads_once_and_ask_reuses(self) -> None:
+        j, loads = self._encoder()
+        secs = j.warm_up()
+        assert isinstance(secs, float) and secs >= 0
+        assert loads == [1]
+        q = decisions.Question(id='a', kind=decisions.NOUL, instructions='?',
+                               state='x', hypothesis='h')
+        j.ask([q])
+        j.warm_up()
+        assert loads == [1]
+
+    def test_injection_warm_up_loads_once(self) -> None:
+        loads = []
+
+        def factory():
+            loads.append(1)
+            return lambda t: [{'label': 'SAFE', 'score': 0.9}]
+        j = encoder.InjectionJudge(pipeline_factory=factory)
+        assert j.warm_up() >= 0
+        j.ask([decisions.injection_question('hi')])
+        assert loads == [1]
+
+    def test_encoder_warm_up_swallows_and_logs(self, caplog) -> None:
+        def factory():
+            raise RuntimeError('no torch')
+        j = encoder.EncoderJudge(pipeline_factory=factory)
+        with caplog.at_level('DEBUG', logger='guru'):
+            secs = j.warm_up()
+        assert isinstance(secs, float)
+        assert any('warm-up' in r.getMessage() for r in caplog.records)
+
+    def test_ollama_warm_up_is_one_tiny_generate(self) -> None:
+        client = FakeClient(NS(response='', logprobs=None))
+        j = ollama_json.OllamaJsonJudge('qwen3:4b', client=client)
+        assert j.warm_up() >= 0
+        [kw] = client.calls
+        assert kw['model'] == 'qwen3:4b'
+        assert kw['options']['num_predict'] == 1
+        assert kw['keep_alive'] == ollama_json.KEEP_ALIVE
+
+    def test_ollama_warm_up_swallows_and_logs(self, caplog) -> None:
+        class Boom:
+            def generate(self, **kw):
+                raise ConnectionError('down')
+        j = ollama_json.OllamaJsonJudge('qwen3:4b', client=Boom())
+        with caplog.at_level('DEBUG', logger='guru'):
+            assert isinstance(j.warm_up(), float)
+        assert any('warm-up' in r.getMessage() for r in caplog.records)
+
+
+class _WarmFake:
+    def __init__(self, name: str, block: threading.Event = None) -> None:
+        self.name, self.warmed, self._block = name, 0, block
+
+    def ask(self, questions: list) -> list:
+        return []
+
+    def warm_up(self) -> float:
+        if self._block is not None:
+            self._block.wait()
+        self.warmed += 1
+        return 0.25
+
+
+class _ColdFake:
+    name = 'cold'
+
+    def ask(self, questions: list) -> list:
+        return []
+
+
+class TestInstallWarmUp:
+    def setup_method(self) -> None:
+        decisions.clear_judges()
+
+    def teardown_method(self) -> None:
+        judges.wait_warm_up(timeout_s=5)
+        decisions.clear_judges()
+
+    def _points(self, monkeypatch, fakes: dict) -> None:
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
+        monkeypatch.setattr(config, 'DECISIONS_POINTS',
+                            {p: p for p in fakes})
+        monkeypatch.setattr(judges, 'build', lambda spec: fakes[spec])
+
+    def test_install_warms_on_a_background_thread(self, monkeypatch,
+                                                  caplog) -> None:
+        a, b = _WarmFake('a'), _WarmFake('b')
+        self._points(monkeypatch, {'stall': a, 'panel': b})
+        with caplog.at_level('INFO', logger='guru'):
+            installed = judges.install()
+            thread = judges.wait_warm_up(timeout_s=5)
+        assert installed == {'stall': 'a', 'panel': 'b'}
+        assert thread is not None and thread.daemon
+        assert not thread.is_alive()
+        assert a.warmed == 1 and b.warmed == 1
+        msgs = [r.getMessage() for r in caplog.records
+                if 'warm' in r.getMessage()]
+        assert len(msgs) == 1 and 'a=0.25s' in msgs[0] and 'b=0.25s' in msgs[0]
+
+    def test_install_warm_false_warms_nothing(self, monkeypatch) -> None:
+        a = _WarmFake('a')
+        self._points(monkeypatch, {'stall': a})
+        judges.install(warm=False)
+        assert judges.wait_warm_up(timeout_s=1) is None
+        assert a.warmed == 0
+
+    def test_install_skips_judges_without_warm_up(self, monkeypatch) -> None:
+        a, cold = _WarmFake('a'), _ColdFake()
+        self._points(monkeypatch, {'stall': a, 'panel': cold})
+        judges.install()
+        judges.wait_warm_up(timeout_s=5)
+        assert a.warmed == 1
+
+    def test_same_judge_at_two_points_warms_once(self, monkeypatch) -> None:
+        a = _WarmFake('a')
+        self._points(monkeypatch, {'stall': a, 'panel': a})
+        judges.install(warm=False)
+        assert judges.warm_up_all(timeout_s=5) == {'a': 0.25}
+        assert a.warmed == 1
+
+    def test_warm_up_all_waits_and_returns_seconds(self, monkeypatch) -> None:
+        a, cold = _WarmFake('a'), _ColdFake()
+        self._points(monkeypatch, {'stall': a, 'panel': cold})
+        judges.install(warm=False)
+        assert judges.warm_up_all(timeout_s=5) == {'a': 0.25}
+        assert a.warmed == 1
+
+    def test_warm_up_all_gives_up_after_timeout(self, monkeypatch,
+                                                caplog) -> None:
+        gate = threading.Event()
+        a, slow = _WarmFake('a'), _WarmFake('slow', block=gate)
+        self._points(monkeypatch, {'stall': a, 'panel': slow})
+        judges.install(warm=False)
+        with caplog.at_level('WARNING', logger='guru'):
+            out = judges.warm_up_all(timeout_s=0.05)
+        gate.set()
+        assert out == {'a': 0.25}
+        assert any('warm-up' in r.getMessage() and 'still' in r.getMessage()
+                   for r in caplog.records)
+
+    def test_warm_up_all_swallows_failures(self, monkeypatch, caplog) -> None:
+        class Bad(_WarmFake):
+            def warm_up(self) -> float:
+                raise RuntimeError('boom')
+        a, bad = _WarmFake('a'), Bad('bad')
+        self._points(monkeypatch, {'stall': bad, 'panel': a})
+        judges.install(warm=False)
+        with caplog.at_level('DEBUG', logger='guru'):
+            out = judges.warm_up_all(timeout_s=5)
+        assert out == {'a': 0.25}
+        assert any('warm-up' in r.getMessage() and 'bad' in r.getMessage()
+                   for r in caplog.records)
+
+    def test_warm_up_all_without_judges(self) -> None:
+        assert judges.warm_up_all(timeout_s=1) == {}
