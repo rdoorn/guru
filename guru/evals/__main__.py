@@ -55,7 +55,8 @@ def _row(res: CaseResult, routed: bool = False) -> list:
     A timed-out case fails every check by design; its row shows the
     observed tools, sub-agents and changed files instead of the check list.
     For a routed run the detail also lists where the sub-agent tasks went
-    (``routes: Adapter|model, ...``; ``-`` when nothing was spawned).
+    (``routes: Adapter|model, ...``; ``-`` when nothing was spawned); a
+    sandbox case lists its gate verdicts (``gate: intended``).
     """
     parts: list = []
     if res.observed.get('timed_out'):
@@ -68,8 +69,22 @@ def _row(res: CaseResult, routed: bool = False) -> list:
         parts.append('rubric: grade by hand')
     if routed or res.routes:
         parts.append('routes: ' + (', '.join(res.routes) or '-'))
+    verdicts = res.observed.get('gate_verdicts') or []
+    if verdicts:
+        parts.append('gate: ' + ', '.join(verdicts))
     return [res.case, 'PASS' if res.passed else 'FAIL',
             f'{res.seconds:.1f}', _fmt_cost(res.cost_usd), '; '.join(parts)]
+
+
+def _gate_counts(run: Run) -> list:
+    """``[(verdict, count)]`` over every case's gate verdicts (sandbox
+    cases), in verdict order; empty when no case submitted anything."""
+    counts: dict = {}
+    for c in run.cases:
+        for v in c.observed.get('gate_verdicts') or []:
+            counts[v] = counts.get(v, 0) + 1
+    return [(v, counts[v]) for v in ('intended', 'unclear', 'suspicious')
+            if v in counts]
 
 
 def _print_run(run: Run, out_root: Path) -> None:
@@ -87,6 +102,9 @@ def _print_run(run: Run, out_root: Path) -> None:
             summary += ' (controller)'
     if run.judges:
         summary += ' · judges ' + ', '.join(run.judges)
+    counts = _gate_counts(run)
+    if counts:
+        summary += ' · gate ' + ' '.join(f'{k}={v}' for k, v in counts)
     print(summary)
     trajectory = runner.DEFAULT_TRAJECTORY_DIR / runs.TRAJECTORY_FILE
     print(f'run {run.run_id} saved under {out_root} '
@@ -138,6 +156,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     def progress(res: CaseResult) -> None:
         flags = ', timed out' if res.observed.get('timed_out') else ''
+        if res.observed.get('skipped'):
+            flags += f', skipped: {res.observed.get("error", "")}'
         print(f'[evals] {res.case}: {"PASS" if res.passed else "FAIL"}'
               f' ({res.seconds:.1f}s{flags})', flush=True)
 
@@ -226,7 +246,9 @@ def _parser() -> argparse.ArgumentParser:
                             'evals/routing/README.md')
     run_p.add_argument('--allow-spend', action='store_true',
                        help='grant the remote-spend question for the run '
-                            '(default: deny, so remote rungs are skipped)')
+                            '(default: deny, so remote rungs are skipped) '
+                            'and let sandbox cases apply an "intended" '
+                            'submit (default: deny, nothing is applied)')
     run_p.add_argument('--cases-dir', default=str(cases.CASES_DIR),
                        help=argparse.SUPPRESS)
     run_p.set_defaults(func=_cmd_run)

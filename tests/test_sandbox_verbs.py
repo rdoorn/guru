@@ -407,16 +407,94 @@ class TestSubmit:
         assert out.startswith('Refused: ') and 'weakens tests' in out
         assert (root / 'pkg' / 'mod.py').read_text() == MOD
 
-    def test_read_only_refuses_after_the_verdict(self, sandboxed,
-                                                 monkeypatch) -> None:
+    def test_read_only_reports_without_consulting_the_reviewer(
+            self, sandboxed, monkeypatch, fake_repo) -> None:
         root, fake = sandboxed
         fake.diff_text = MOD_DIFF
         monkeypatch.setattr(config, 'MODE', config.MODE_READ_ONLY)
-        decisions.set_judge('gate', FakeReviewer())
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
         out = verbs.sandbox_submit('intent')
-        assert out.startswith('Refused: read-only mode')
-        assert 'Gate verdict: intended' in out
+        assert out.startswith('read-only: not applied')
+        assert 'pkg/mod.py | +1 -1' in out
+        assert reviewer.calls == []            # the diff never left
         assert (root / 'pkg' / 'mod.py').read_text() == MOD
+        [ev] = _events(fake_repo, 'submit')
+        assert ev['ok'] is False and ev['detail'] == 'read-only: not applied'
+        ledger.flush()
+        assert [r for r in fake_repo.stream('decisions')
+                if r['point'] == 'gate'] == []
+
+    def test_vanished_copy_is_a_clean_refusal(self, sandboxed) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = MOD_DIFF
+        verbs.sandbox_run(['pytest'])
+        (_key, copy), = verbs.copies().items()
+        shutil.rmtree(copy)
+        assert verbs.sandbox_submit('intent') == verbs.COPY_GONE
+        assert verbs.copies() == {}
+        # A later verb makes a fresh copy and submit works again.
+        fake.diff_text = ''
+        assert verbs.sandbox_submit('intent') == \
+            'Nothing to submit: the sandbox copy is unchanged.'
+
+    def test_diff_failure_on_a_vanished_copy(self, sandboxed, monkeypatch):
+        _root, fake = sandboxed
+        verbs.sandbox_run(['pytest'])
+        (_key, copy), = verbs.copies().items()
+
+        def gone(copy_path, project=None):
+            shutil.rmtree(copy_path)
+            raise RuntimeError('git diff failed')
+        monkeypatch.setattr(colima, 'diff', gone)
+        assert verbs.sandbox_submit('intent') == verbs.COPY_GONE
+
+    def test_copy_lock_holds_from_review_to_apply(self, sandboxed,
+                                                  monkeypatch) -> None:
+        import threading
+        root, fake = sandboxed
+        fake.diff_text = MOD_DIFF
+        monkeypatch.setattr(session, 'task_id', 'T1')
+        entered, release = threading.Event(), threading.Event()
+
+        class Slow(FakeReviewer):
+            def ask(self, questions):
+                entered.set()
+                release.wait(5)
+                return super().ask(questions)
+        decisions.set_judge('gate', Slow())
+        verbs.sandbox_run(['pytest'])
+        (_key, copy), = verbs.copies().items()
+        result: dict = {}
+        submitter = threading.Thread(
+            target=lambda: result.setdefault(
+                'out', verbs.sandbox_submit('intent')))
+        submitter.start()
+        assert entered.wait(5)
+        cleaner = threading.Thread(target=verbs.cleanup_task, args=('T1',))
+        cleaner.start()
+        cleaner.join(0.3)
+        assert cleaner.is_alive()             # blocked on the copy lock
+        assert copy.is_dir()
+        release.set()
+        submitter.join(5)
+        cleaner.join(5)
+        assert not cleaner.is_alive() and not submitter.is_alive()
+        assert 'Applied patch:' in result['out']
+        assert (root / 'pkg' / 'mod.py').read_text().endswith('return 2\n')
+        assert not copy.exists() and verbs.copies() == {}
+
+    def test_question_verdict(self) -> None:
+        q = verbs.SUBMIT_QUESTION.format(state='intended') + '\nIntent: x'
+        assert verbs.question_verdict(q) == 'intended'
+        q = verbs.SUBMIT_QUESTION.format(state='unclear')
+        assert verbs.question_verdict(q) == 'unclear'
+        assert verbs.question_verdict('Add dependency six?') == ''
+        assert verbs.question_verdict('') == ''
+
+    def test_script_prefix_is_git_excluded(self) -> None:
+        assert verbs.SCRIPT_PREFIX == colima.SCRIPT_PREFIX
+        assert f'{colima.SCRIPT_PREFIX}*' in colima._GIT_EXCLUDE.split('\n')
 
     def test_patch_that_does_not_apply_keeps_the_copy(self, sandboxed):
         root, fake = sandboxed
@@ -518,6 +596,59 @@ class TestToolWiring:
         assert not {s['name'] for s in specs} & set(tools.SANDBOX_TOOLS)
         assert 'sandbox_run' not in tools.search_tools('run in sandbox')
 
+    def test_write_tools_present_without_an_image(self, monkeypatch):
+        monkeypatch.setattr(verbs, 'available', lambda project=None: False)
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS',
+                            ['read_file', 'edit_file', 'apply_patch'])
+        assert tools.DIRECT_WRITE_TOOLS <= set(tools._advertised())
+        _base, names = tools.initial_tools(can_spawn=False)
+        assert names == {'read_file', 'edit_file', 'apply_patch'}
+        specs = {s['name'] for s in tools.specs_for(
+            tools.DIRECT_WRITE_TOOLS, can_spawn=False)}
+        assert specs >= tools.DIRECT_WRITE_TOOLS
+        assert 'edit_file' in tools.search_tools('edit a file')
+
+    def test_write_tools_hidden_with_an_image(self, monkeypatch) -> None:
+        monkeypatch.setattr(verbs, 'available', lambda project=None: True)
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS',
+                            ['read_file', 'edit_file', 'apply_patch'])
+        assert not tools.DIRECT_WRITE_TOOLS & set(tools._advertised())
+        _base, names = tools.initial_tools(can_spawn=False)
+        assert names == {'read_file', *tools.SANDBOX_TOOLS}
+        specs = {s['name'] for s in tools.specs_for(
+            set(tools.DIRECT_WRITE_TOOLS), can_spawn=False)}
+        assert not specs & tools.DIRECT_WRITE_TOOLS
+        listing = tools.search_tools('edit write patch delete file')
+        assert not any(name in listing for name in tools.DIRECT_WRITE_TOOLS)
+        monkeypatch.setattr(config, 'FLAT_TOOLS', True)
+        _base, names = tools.initial_tools(can_spawn=False)
+        assert names == set(tools.TOOL_REGISTRY) - tools.DIRECT_WRITE_TOOLS
+
+    @pytest.mark.parametrize('name,args', [
+        ('write_file', {'path': 'x.py', 'content': '1'}),
+        ('edit_file', {'path': 'x.py', 'old': 'a', 'new': 'b', 'sha': 's'}),
+        ('apply_patch', {'diff': MOD_DIFF}),
+        ('delete_file', {'path': 'x.py'})])
+    def test_execute_tool_refuses_direct_writes_with_an_image(
+            self, sandboxed, monkeypatch, fake_repo, name, args) -> None:
+        from guru import ui
+        root, _fake = sandboxed
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', False)
+        called: list = []
+        monkeypatch.setitem(tools.TOOL_REGISTRY[name], 'fn',
+                            lambda **kw: called.append(kw) or 'ran')
+        assert tools.execute_tool(name, args) == tools.SANDBOX_WRITE_REFUSAL
+        assert called == []
+        ledger.flush()
+        [row] = [r for r in fake_repo.stream('tool_events')
+                 if r['tool'] == name]
+        assert row['denied'] == 'policy' and row['ok'] is False
+        # ... and the same call runs once the image is gone.
+        (images.record_dir(verbs.spec_for()) / images.RECORD_FILE).unlink()
+        assert tools.execute_tool(name, args) == 'ran'
+
     def test_preactivated_with_an_image(self, monkeypatch) -> None:
         monkeypatch.setattr(verbs, 'available', lambda project=None: True)
         base, names = tools.initial_tools(can_spawn=False)
@@ -533,6 +664,7 @@ class TestToolWiring:
         monkeypatch.setattr(verbs, 'available', lambda project=None: False)
         _base, names = tools.initial_tools(can_spawn=False)
         assert names == set(tools.TOOL_REGISTRY) - set(tools.SANDBOX_TOOLS)
+        assert tools.DIRECT_WRITE_TOOLS <= names
 
     def test_controller_never_gets_the_verbs(self, monkeypatch) -> None:
         from guru import ui

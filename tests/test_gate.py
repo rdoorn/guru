@@ -69,12 +69,64 @@ class TestRules:
         ('import socket', 'import socket'),
         ('from ctypes import CDLL', 'import ctypes'),
         ('m = __import__("os")', '__import__'),
-        ('blob = "' + 'QUJD' * 60 + '"', 'base64 blob (>200 chars)'),
+        ('from os import system', 'from os import system/popen/exec/'
+                                  'posix_spawn'),
+        ('from os import path, popen', 'from os import system/popen/exec/'
+                                       'posix_spawn'),
+        ('from os import execvp', 'from os import system/popen/exec/'
+                                  'posix_spawn'),
+        ('from os import posix_spawnp', 'from os import system/popen/exec/'
+                                        'posix_spawn'),
+        ('os.execv("/bin/sh", [])', 'os.exec*('),
+        ('pid = os.posix_spawn(p, a, e)', 'os.posix_spawn'),
+        ('code = compile(src, "<s>", "exec")', 'compile('),
+        ('import pty', 'import pty'),
+        ('from multiprocessing import Process', 'import multiprocessing'),
+        ('mod = importlib.import_module(name)', 'importlib.import_module('),
+        ('fn = getattr(os, "sys" + "tem")', 'getattr(os'),
+        ('sys.modules["os"].system("x")', 'sys.modules['),
     ])
     def test_exec_class_patterns(self, tmp_path, line, label) -> None:
         [flag] = gate.rules(_diff('pkg/m.py', [], [line]), tmp_path)
         assert flag.kind == 'exec' and flag.detail == label
         assert flag.path == 'pkg/m.py'
+
+    def test_os_alias_is_its_own_kind(self, tmp_path) -> None:
+        [flag] = gate.rules(_diff('pkg/m.py', [], ['import os as o']),
+                            tmp_path)
+        assert flag.kind == 'exec-alias'
+        assert flag.kind in gate.SUSPICIOUS_KINDS
+        assert gate.rules(_diff('pkg/m.py', [], ['import os']),
+                          tmp_path) == []
+
+    @pytest.mark.parametrize('line,label', [
+        ('import urllib.request', 'import urllib'),
+        ('from urllib import request', 'import urllib'),
+        ('import http.client', 'import http.client'),
+        ('from http.client import HTTPSConnection', 'import http.client'),
+        ('import requests', 'import requests'),
+        ('import httpx', 'import httpx'),
+        ('import ftplib', 'import ftplib/smtplib/telnetlib'),
+        ('import smtplib', 'import ftplib/smtplib/telnetlib'),
+        ('from telnetlib import Telnet', 'import ftplib/smtplib/telnetlib'),
+    ])
+    def test_network_class_patterns(self, tmp_path, line, label) -> None:
+        [flag] = gate.rules(_diff('pkg/m.py', [], [line]), tmp_path)
+        assert flag.kind == 'network' and flag.detail == label
+        assert 'network' in gate.SUSPICIOUS_KINDS
+
+    def test_base64_blob_single_line(self, tmp_path) -> None:
+        line = 'b = "' + 'QUJD' * 30 + '"'
+        [flag] = gate.rules(_diff('pkg/m.py', [], [line]), tmp_path)
+        assert flag.kind == 'exec'
+        assert flag.detail == 'base64 blob (>120 chars)'
+        short = 'b = "' + 'Q' * (gate.BASE64_MIN_CHARS - 1) + '"'
+        assert gate.rules(_diff('pkg/m.py', [], [short]), tmp_path) == []
+
+    def test_base64_blob_split_across_lines(self, tmp_path) -> None:
+        lines = ['    "' + 'QUJD' * 8 + '"' for _ in range(5)]   # 32 each
+        flags = gate.rules(_diff('pkg/m.py', [], lines), tmp_path)
+        assert [f.detail for f in flags] == ['base64 blob (>120 chars)']
 
     @pytest.mark.parametrize('line', [
         'v = ast.literal_eval(text)', 'model.eval()', 'self.exec_cmd()',
@@ -85,7 +137,11 @@ class TestRules:
 
     @pytest.mark.parametrize('line', ['@pytest.mark.skip(reason="x")',
                                       '@pytest.mark.skipif(True)',
-                                      '    pytest.skip("later")'])
+                                      'skip = pytest.mark.skipif(sys.x, y)',
+                                      '@pytest.mark.xfail(strict=False)',
+                                      '    pytest.skip("later")',
+                                      '@unittest.skip("later")',
+                                      '@unittest.skipIf(True, "x")'])
     def test_skip_class(self, tmp_path, line) -> None:
         [flag] = gate.rules(_diff('tests/test_a.py', [], [line]), tmp_path)
         assert flag.kind == 'skip'
@@ -107,10 +163,19 @@ class TestRules:
 
     @pytest.mark.parametrize('path', [
         '.github/workflows/ci.yml', 'Makefile', 'pyproject.toml',
-        'setup.cfg', 'tox.ini', '.pre-commit-config.yaml', 'sub/Makefile'])
+        'setup.cfg', 'tox.ini', '.pre-commit-config.yaml', 'sub/Makefile',
+        'conftest.py', 'tests/conftest.py', 'sitecustomize.py',
+        'usercustomize.py', 'setup.py', 'noxfile.py', '.gitlab-ci.yml',
+        'Dockerfile', 'docker/Dockerfile.dev', 'requirements.txt',
+        'requirements-dev.txt', 'requirements-prod.txt'])
     def test_config_files(self, tmp_path, path) -> None:
         [flag] = gate.rules(_diff(path, ['a'], ['b']), tmp_path)
         assert flag.kind == 'config' and flag.path == path
+
+    @pytest.mark.parametrize('path', ['pkg/requirements_parser.py',
+                                      'pkg/setup.pyi', 'docs/conftest.md'])
+    def test_config_near_misses(self, tmp_path, path) -> None:
+        assert gate.rules(_diff(path, ['a'], ['b']), tmp_path) == []
 
     @pytest.mark.parametrize('path', ['.git/hooks/pre-commit',
                                       '.venv/lib/x.py',
@@ -264,18 +329,30 @@ class TestParseReview:
         # The reviewer's rubric is part of the gate's contract: a change here
         # changes what every recorded gate row meant. Update deliberately.
         digest = hashlib.sha256(gate.GATE_QUESTIONS.encode()).hexdigest()
-        assert digest[:16] == 'cde66b28bd44c902'
+        assert digest[:16] == '640a1ab19c53770d'
         for key in gate.REVIEW_KEYS + ('notes',):
             assert key in gate.GATE_QUESTIONS
+        assert 'untrusted data' in gate.GATE_QUESTIONS
+        assert '<<<DIFF' in gate.GATE_QUESTIONS and '<<<END' in \
+            gate.GATE_QUESTIONS
 
     def test_packet_text_and_truncation(self) -> None:
         text = gate.packet_text('fix it', '', 'I fixed it', 'd' * 50,
-                                max_diff_chars=10)
+                                max_diff_chars=10, nonce='abc123')
         assert 'User request:\nfix it' in text
         assert '(the user request itself)' in text
-        assert "intent for this change:\nI fixed it" in text
-        assert text.endswith('d' * 10 + '\n[diff truncated: 40 more '
-                             'characters]')
+        assert ('intent for this change:\n<<<INTENT abc123>>>\nI fixed it\n'
+                '<<<END abc123>>>') in text
+        assert text.endswith('<<<DIFF abc123>>>\n' + 'd' * 10
+                             + '\n[diff truncated: 40 more characters]\n'
+                             '<<<END abc123>>>')
+
+    def test_packet_nonce_is_fresh_per_call(self) -> None:
+        a = gate.packet_text('r', 't', 'i', 'd')
+        b = gate.packet_text('r', 't', 'i', 'd')
+        assert a != b
+        tag = a.split('<<<DIFF ')[1].split('>>>')[0]
+        assert len(tag) == 16 and a.count(tag) == 4
 
     def test_review_question(self) -> None:
         q = gate.review_question('packet')

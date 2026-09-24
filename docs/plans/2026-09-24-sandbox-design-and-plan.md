@@ -1,7 +1,10 @@
 # Sandboxed execution (Colima) with a lockfile-gated provisioning phase and an AI quality gate — design and plan
 
-Status: design approved in conversation on 2026-09-24; implementation not
-started. Builds on `2026-09-24-audited-tools-plan.md` (fixed-argv runner,
+Status: S1–S4 implemented on `feat/audited-tools` (2026-09-24): runtime,
+provisioning proxy, verbs + gate, eval cases and docs. Outstanding: a real
+end-to-end run of the three `sandbox` eval cases against Colima
+(`python -m guru.evals run --tags sandbox --allow-spend`) and its triage.
+Builds on `2026-09-24-audited-tools-plan.md` (fixed-argv runner,
 tool_events, tools policy, apply_patch).
 
 ## 0. Decisions

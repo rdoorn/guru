@@ -1,0 +1,12 @@
+[project]
+name = "wordcount"
+version = "0.1.0"
+description = "A wc -w-like tool (frozen eval fixture)"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+exclude-newer = "2026-08-06T00:00:00Z"

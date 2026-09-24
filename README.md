@@ -477,6 +477,9 @@ Registry tools:
   allowed directories and gated by the access mode.
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
 - **Code** — the eight audited verbs below.
+- **Sandbox** — `sandbox_run`, `sandbox_python`, `sandbox_diff`,
+  `sandbox_submit`, `request_dependency`; advertised only in a project
+  with a provisioned sandbox image (see Sandbox below).
 
 `search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
 `check`, `join` are always available and not part of the registry.
@@ -561,6 +564,108 @@ vs shown to the model, files touched, denial: `policy`, `mode` or
 `controller`). `/tools` shows the last turn's rows; `bench/ledger_report.py`
 aggregates them per tool in its **Tools** section.
 
+### Sandbox
+
+The sandbox runs the model's code changes in a container on a **copy** of
+the project, and lets them back into the real tree only through a quality
+gate. Design and plan:
+[`docs/plans/2026-09-24-sandbox-design-and-plan.md`](docs/plans/2026-09-24-sandbox-design-and-plan.md).
+
+**Requirements.** Docker CLI against [Colima](https://github.com/abiosoft/colima)
+(Apple silicon; `docker info` must succeed) and a uv-managed project:
+`pyproject.toml` + `uv.lock`. Only lockfile-declared packages exist in the
+image; the model never installs anything.
+
+**Enable.** Create `.guru/sandbox.toml` in the project (global defaults live
+in `[sandbox]` of `~/.guru/settings.toml`; the project file overrides key by
+key and is the only place `enabled` is read from):
+
+```toml
+[sandbox]
+enabled = true
+# base_image = "python:3.12-slim@sha256:…"   # digest-pinned, or refused
+# cpus = 2.0
+# memory_mb = 2048
+# pids = 256
+# timeout_s = 600                            # wall clock per container run
+```
+
+**Provision.** `/sandbox provision` (or `--force`) generates a Dockerfile
+from `pyproject.toml` + `uv.lock`, asks once to allow `pypi.org` and
+`files.pythonhosted.org` (the normal web-access question), and builds the
+image on an *internal* Docker network whose only other member is a
+digest-pinned tinyproxy with an allow-list generated from
+`.guru/domains_allow.txt` (CONNECT to allow-listed hosts on 443 only; every
+request is logged as `net_events`). The image record lives under
+`~/.guru/sandbox/<project>/`; it is rebuilt only when the lockfile changes.
+The `sandbox_*` verbs are advertised to the model only while that record
+exists — and while it does, the direct write tools (`write_file`,
+`edit_file`, `apply_patch`, `delete_file`) are hidden from the model and
+refused if named anyway: in a sandboxed project the gate is the only write
+path.
+
+**The verbs.**
+
+- `sandbox_run(argv)` — a fixed argv (`argv[0]` one of `python`, `pytest`,
+  `uv`, `ruff`, `mypy`, `flake8`, `make`; shells refused) in the task's
+  copy inside the container: `--network none`, unprivileged user, all
+  capabilities dropped, read-only root, tmpfs `/tmp`, cpu/memory/pid limits,
+  wall-clock kill. Digest: exit code and the first lines of output;
+  `detail` returns the last 4 KB.
+- `sandbox_python(code)` — runs a Python snippet the same way (arbitrary
+  code is fine *inside* the sandbox; that is what it is for).
+- `sandbox_diff()` — per-file `+/-` counts of the copy against the project.
+- `sandbox_submit(intent)` — the only way changes reach the real tree: the
+  copy's diff goes through the gate with the agent's stated intent.
+- `request_dependency(name, constraint)` — records a package request;
+  installs nothing.
+
+**The gate.** Two stages. Deterministic rules first: paths inside the
+project and outside the noise dirs, a size cap, the secret scanner over
+added lines, and red-flag patterns (process/network/eval primitives,
+encoded blobs, skipped tests, removed asserts, CI/config/conftest edits).
+Then an AI reviewer (the configured `gate` judge, else the routing ladder's
+`standard` rung, else the session model) answers a fixed question set over
+the user's request, the task, the intent and the diff. Three verdicts:
+
+- `intended` — applied via `apply_patch` (auto mode; ask mode shows the
+  diff and asks first).
+- `unclear` — the user is asked, with the reviewer's reasons, in every mode
+  (auto never waves it through).
+- `suspicious` — refused; nothing is applied and the reasons are printed.
+
+In read-only mode a submit reports the diff and stops before the reviewer
+is consulted (nothing could be applied, so the diff never leaves the
+machine for no decision).
+
+Every submit is a `sandbox_events` row and a `decisions` row for the
+reviewer; `/sandbox gate` lists this run's verdicts.
+
+**Dependency requests.** `request_dependency` only records. The user runs
+`/sandbox deps` to list, `/sandbox deps apply <name>` to approve: guru runs
+`uv add` in a provisioning container through the proxy on a copy, shows the
+lockfile diff (packages added/removed/changed), brings `pyproject.toml` +
+`uv.lock` back through `apply_patch`, and rebuilds. If the rebuild fails
+after the lockfile landed, the digest says so and the request stays pending
+for a retry. `/sandbox deps request <spec>` records one by hand.
+
+**What is and is not contained.** Execution has no network at all;
+provisioning reaches only allow-listed hosts through the logged proxy. The
+container sees the copy, never the real tree, your home, your environment
+or any credential; the copy is the `git ls-files` positive list minus noise
+dirs, `.env*` and anything the secret scanner flags. Not contained: a
+kernel escape lands in the Colima VM (accepted for local development); the
+build container runs as root with a writable root, so the proxy allow-list
+and the lockfile are the controls there; the internal network still reaches
+the VM's own gateway-address listeners.
+
+**Commands.** `/sandbox status` (runtime, settings, image, pending
+requests, task copies), `/sandbox provision [--force]`, `/sandbox gate`,
+`/sandbox deps [request <spec> | apply <name>]`. `make test-sandbox` runs
+the container integration tests (skipped without Colima); the eval suite
+has three `sandbox` cases (`python -m guru.evals list --tags sandbox`, see
+`evals/README.md`).
+
 ## Architecture
 
 `guru` is a Python package with a domain layer and pluggable provider adapters.
@@ -596,7 +701,9 @@ Provider adapters are configured in `~/.guru/adapters.toml` (see **Providers**).
 
 Make targets (local; there is no CI):
 
-- `make test` — run the test suite (pytest).
+- `make test` — run the test suite (pytest; container tests excluded).
+- `make test-sandbox` — the container integration tests against the
+  local Colima (skipped when `docker info` fails).
 - `make lint` — flake8 over `guru bench tests`.
 - `make typecheck` — mypy over `guru`.
 - `make bench` — run the headless coding-model benchmark, writing

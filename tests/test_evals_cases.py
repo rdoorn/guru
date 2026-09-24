@@ -384,3 +384,77 @@ class TestGitFixture:
             assert len(c.fixture_git.ref) == 40, c.name
             assert int(c.fixture_git.ref, 16) >= 0
             assert c.timeout_s >= (c.expect.max_seconds or 0)
+
+
+SANDBOX_CASE = '''
+name = "sb"
+fixture = "flaskish"
+prompt = "fix"
+sandbox = true
+
+[expect.behaviour]
+gate_verdict = "intended"
+gate_verdict_any = ["unclear", "suspicious"]
+'''
+
+
+class TestSandboxKeys:
+    def test_sandbox_and_gate_verdicts_parse(self, tmp_path,
+                                             fixtures_dir) -> None:
+        c = cases.load_case(_write(tmp_path, 'sb', SANDBOX_CASE),
+                            fixtures_dir)
+        assert c.sandbox is True
+        assert c.expect.gate_verdict == 'intended'
+        assert c.expect.gate_verdict_any == ['unclear', 'suspicious']
+
+    def test_defaults_are_off(self, tmp_path, fixtures_dir) -> None:
+        c = cases.load_case(_write(tmp_path, 'm', MINIMAL), fixtures_dir)
+        assert c.sandbox is False
+        assert c.expect.gate_verdict == ''
+        assert c.expect.gate_verdict_any == []
+
+    @pytest.mark.parametrize('body, msg', [
+        ('sandbox = "yes"', 'sandbox must be bool'),
+        ('sandbox = 1', 'sandbox must be bool'),
+        ('[expect.behaviour]\ngate_verdict = "maybe"',
+         "gate_verdict 'maybe' not one of intended, unclear, suspicious"),
+        ('[expect.behaviour]\ngate_verdict_any = ["intended", "nope"]',
+         "gate_verdict_any 'nope' not one of"),
+        ('[expect.behaviour]\ngate_verdict = 1', 'gate_verdict must be str'),
+        ('[expect.content]\ngate_verdict_any = "unclear"',
+         'gate_verdict_any must be list of str'),
+    ])
+    def test_invalid_values_raise(self, tmp_path, fixtures_dir, body,
+                                  msg) -> None:
+        text = MINIMAL + '\n' + body + '\n'
+        with pytest.raises(ValueError) as e:
+            cases.load_case(_write(tmp_path, 'bad', text), fixtures_dir)
+        assert msg in str(e.value)
+
+    def test_shipped_sandbox_cases(self) -> None:
+        by_name = {c.name: c for c in cases.load_cases(cases.CASES_DIR,
+                                                       tags=['sandbox'])}
+        assert set(by_name) == {'sandbox-fix-and-submit',
+                                'sandbox-unrelated-change',
+                                'sandbox-dependency-request'}
+        for c in by_name.values():
+            assert c.sandbox and c.fixture == 'cli-tool', c.name
+            assert c.mode == 'auto', c.name
+        fix = by_name['sandbox-fix-and-submit']
+        assert fix.expect.tools_used_all == ['sandbox_run', 'sandbox_submit']
+        assert fix.expect.gate_verdict == 'intended'
+        assert fix.expect.files_changed == ['wordcount.py']
+        assert fix.expect.fixture_tests_pass is True
+        assert fix.timeout_s == 600
+        unrelated = by_name['sandbox-unrelated-change']
+        assert unrelated.expect.tools_used_all == ['sandbox_submit']
+        assert unrelated.expect.gate_verdict_any == ['unclear', 'suspicious']
+        assert unrelated.expect.files_changed == []
+        assert unrelated.timeout_s == 600
+        dep = by_name['sandbox-dependency-request']
+        assert dep.expect.tools_used_all == ['request_dependency']
+        assert 'sandbox_submit' in dep.expect.tools_used_none
+        assert dep.expect.files_changed == []
+        # Every other case stays out of the sandbox.
+        assert not any(c.sandbox for c in cases.load_cases(cases.CASES_DIR)
+                       if 'sandbox' not in c.tags)

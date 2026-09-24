@@ -5,7 +5,12 @@ and ``request_dependency``, plus the per-task working copies they share.
 Every verb is refused until the project's sandbox image exists
 (``/sandbox provision``); ``guru.domain.tools`` registers thin wrappers
 that import this module lazily and advertises the verbs only while
-:func:`available` says so. A run happens in the task's *copy* of the
+:func:`available` says so — and while it does, the direct write tools
+(``write_file``, ``edit_file``, ``apply_patch``, ``delete_file``) are
+neither advertised nor executable by an agent: in a sandbox-enabled
+project the quality gate is the only write path, and ``apply_patch`` is
+reached as a module function from :func:`sandbox_submit` (and from
+provisioning) only. A run happens in the task's *copy* of the
 project — one per ``(project, task)``, made on the first verb call with
 :func:`guru.sandbox.colima.copy_excludes_for`, removed when the task ends
 (``Orchestrator._finish_task`` → :func:`cleanup_task`) or when a submit
@@ -20,7 +25,10 @@ judge, else ``judges.llm.default_reviewer``) with the user's request, the
 task, the agent's intent and the diff, and ``gate.decide`` gives the
 verdict. ``intended`` applies via ``patch.apply_patch`` (auto mode) or
 asks first (ask mode); ``unclear`` asks in every mode with the reviewer's
-reasons; ``suspicious`` refuses. Each submit is a ``sandbox_events`` row.
+reasons; ``suspicious`` refuses; read-only mode reports the diff without
+consulting the reviewer. The copy's lock is held from the diff through
+the review to the apply, so what the reviewer saw is what lands. Each
+submit is a ``sandbox_events`` row.
 """
 from __future__ import annotations
 
@@ -41,14 +49,23 @@ from guru.repositories.settings import load_sandbox
 from guru.sandbox import colima, provision
 
 NOT_PROVISIONED = 'Refused: sandbox not provisioned; run /sandbox provision'
+COPY_GONE = ('Refused: sandbox copy no longer exists; run a sandbox verb to '
+             'make a fresh one')
 DIGEST_LINES = 30           # lines of stdout/stderr in a run digest
 DETAIL_BYTES = 4096         # tail returned by detail
-SCRIPT_PREFIX = '.guru-sandbox-'
+SCRIPT_PREFIX = colima.SCRIPT_PREFIX
+# First line of the question ``sandbox_submit`` puts to the approval asker;
+# :func:`question_verdict` reads the state back (the eval runner's asker
+# grants ``intended`` only).
+SUBMIT_QUESTION = 'Sandbox submit — gate verdict {state}.'
 _LOG_HEAD = 20_000
 _FALSE = ('', 'false', '0', 'no', 'none')
 
+# Lock order everywhere: a copy's own lock (``_key_lock``) first, then the
+# table lock ``_lock`` for the dicts. ``_copy`` takes only ``_lock``.
 _lock = threading.Lock()
 _copies: dict[tuple[str, str], Path] = {}       # (project, task) -> copy
+_copy_locks: dict[tuple[str, str], threading.RLock] = {}
 _last_run: dict[tuple[str, str], colima.RunResult] = {}
 _script_counter = itertools.count(1)
 
@@ -93,6 +110,16 @@ def _task_key(spec: sb.SandboxSpec) -> tuple[str, str]:
     return (str(spec.project), session.task_id or session.agent_id or 'main')
 
 
+def _key_lock(key: tuple[str, str]) -> threading.RLock:
+    """The per-copy lock: held by a submit from diff to apply, and by a
+    discard, so a copy cannot be removed or changed under a review."""
+    with _lock:
+        lock = _copy_locks.get(key)
+        if lock is None:
+            lock = _copy_locks[key] = threading.RLock()
+        return lock
+
+
 def _copy(spec: sb.SandboxSpec) -> Path:
     """The working copy for this task (made on first use)."""
     key = _task_key(spec)
@@ -109,14 +136,16 @@ def _copy(spec: sb.SandboxSpec) -> Path:
 
 
 def _discard(key: tuple[str, str]) -> None:
-    copy = _copies.pop(key, None)
-    _last_run.pop(key, None)
-    if copy is None:
-        return
-    try:
-        colima.remove_copy(copy)
-    except (ValueError, OSError):
-        log.exc(f'sandbox: could not remove working copy {copy}')
+    with _key_lock(key):
+        with _lock:
+            copy = _copies.pop(key, None)
+            _last_run.pop(key, None)
+        if copy is None:
+            return
+        try:
+            colima.remove_copy(copy)
+        except (ValueError, OSError):
+            log.exc(f'sandbox: could not remove working copy {copy}')
 
 
 def copies() -> dict[tuple[str, str], Path]:
@@ -126,11 +155,12 @@ def copies() -> dict[tuple[str, str], Path]:
 
 
 def cleanup_task(task_id: str) -> int:
-    """Remove every working copy of ``task_id``; returns how many."""
+    """Remove every working copy of ``task_id``; returns how many. Waits
+    for a submit in flight on that copy."""
     with _lock:
         keys = [k for k in _copies if k[1] == task_id]
-        for key in keys:
-            _discard(key)
+    for key in keys:
+        _discard(key)
     return len(keys)
 
 
@@ -138,8 +168,8 @@ def cleanup_all() -> int:
     """Remove every working copy (exit, tests); returns how many."""
     with _lock:
         keys = list(_copies)
-        for key in keys:
-            _discard(key)
+    for key in keys:
+        _discard(key)
     return len(keys)
 
 
@@ -318,13 +348,43 @@ def sandbox_submit(intent: str, project: Optional[Path] = None) -> str:
     if not what:
         return ('Refused: sandbox_submit needs your intent: one or two '
                 'sentences on what the change does and why.')
-    started = time.monotonic()
-    copy = _copy(spec)
-    diff = colima.diff(copy, spec.project)
-    if not diff.strip():
-        return 'Nothing to submit: the sandbox copy is unchanged.'
-    verdict = _verdict(diff, what, spec.project)
-    stat = gate.stat_text(diff)
+    key = _task_key(spec)
+    with _key_lock(key):
+        with _lock:
+            known = _copies.get(key)
+        if known is not None and not known.is_dir():
+            with _lock:
+                _copies.pop(key, None)
+                _last_run.pop(key, None)
+            return COPY_GONE
+        started = time.monotonic()
+        copy = _copy(spec)
+        try:
+            diff = colima.diff(copy, spec.project)
+        except RuntimeError as e:
+            if not copy.is_dir():
+                return COPY_GONE
+            return f'Refused: cannot read the sandbox diff: {e}'
+        if not diff.strip():
+            return 'Nothing to submit: the sandbox copy is unchanged.'
+        stat = gate.stat_text(diff)
+        if config.MODE == config.MODE_READ_ONLY:
+            # No reviewer call: nothing could be applied anyway, so the
+            # diff would leave the machine for no decision.
+            images.record_sandbox_event(
+                'submit', ['submit', what[:80]], time.monotonic() - started,
+                False, 'read-only: not applied')
+            return (f'read-only: not applied. The sandbox copy differs from '
+                    f'the project:\n{stat}\nChange the access mode to '
+                    'submit through the gate.')
+        verdict = _verdict(diff, what, spec.project)
+        return _settle(spec, key, what, diff, stat, verdict, started)
+
+
+def _settle(spec: sb.SandboxSpec, key: tuple[str, str], what: str,
+            diff: str, stat: str, verdict: gate.Verdict,
+            started: float) -> str:
+    """Apply, ask or refuse per ``verdict`` (the copy lock is held)."""
     reasons = '\n'.join(f'  - {r}' for r in verdict.reasons) or '  - (none)'
     images.record_sandbox_event(
         'submit', ['submit', what[:80]], time.monotonic() - started,
@@ -336,12 +396,10 @@ def sandbox_submit(intent: str, project: Optional[Path] = None) -> str:
                 f'nothing was applied.\n{header}\nThe sandbox copy is kept; '
                 'remove the flagged changes and submit again, or explain '
                 'to the user.')
-    if config.MODE == config.MODE_READ_ONLY:
-        return f'Refused: read-only mode. Nothing was applied.\n{header}'
     silent = (verdict.state == gate.INTENDED
               and config.MODE == config.MODE_AUTO and config.AUTO_GRANT)
     if not silent:
-        question = (f'Sandbox submit — gate verdict {verdict.state}.\n'
+        question = (SUBMIT_QUESTION.format(state=verdict.state) + '\n'
                     f'Intent: {what}\n{reasons}\n{stat}\n'
                     f'Apply this change to {spec.project}?')
         if not provision.ask(question):
@@ -357,10 +415,20 @@ def sandbox_submit(intent: str, project: Optional[Path] = None) -> str:
                                 'applied' if ok else applied[:200])
     if not ok:
         return f'{applied}\n{header}\nThe sandbox copy is kept.'
-    with _lock:
-        _discard(_task_key(spec))
+    _discard(key)
     return (f'{header}\n{applied}\nThe sandbox copy was removed; verify '
             'with run_tests on the real tree.')
+
+
+def question_verdict(question: str) -> str:
+    """The gate state a ``sandbox_submit`` approval question carries (its
+    first line is ``SUBMIT_QUESTION``), or ``''`` for any other question
+    (a dependency approval, a path prompt)."""
+    head = (question or '').split('\n', 1)[0]
+    for state in gate.STATES:
+        if head == SUBMIT_QUESTION.format(state=state):
+            return state
+    return ''
 
 
 def request_dependency(name: str, constraint: str = '',

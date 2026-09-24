@@ -8,11 +8,12 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from guru import bench, config, session
+from guru import bench, config, judges, session
 from guru.adapters import turn
 from guru.adapters.base import Adapter
 from guru.agents import Agent
@@ -21,7 +22,9 @@ from guru.evals import cases, runner, runs
 from guru.evals.__main__ import main as cli_main
 from guru.evals.cases import Case, Expect
 from guru.repositories.jsonl_ledger import JsonlLedger
+from guru.repositories.sandbox_images import ImageRecord
 from guru.repositories.settings import RoutingSettings
+from guru.sandbox import colima, provision, verbs
 
 FIXTURES = Path(__file__).resolve().parents[1] / 'evals' / 'fixtures'
 
@@ -1652,3 +1655,266 @@ class TestGitFixture:
                                                   canned) -> None:
         res = runner.run_case(_case(), _base(), [_base().adapter], tmp_path)
         assert res.observed['fixture_git'] is None
+
+
+# --- sandbox cases ----------------------------------------------------------
+
+def _sandbox_case(**expect) -> Case:
+    c = _case(name='sb', fixture='cli-tool', **expect)
+    c.sandbox = True
+    c.mode = config.MODE_AUTO
+    return c
+
+
+def _record(tag: str = 'guru-sandbox/cli-tool-abc:deadbeef0000'
+            ) -> ImageRecord:
+    return ImageRecord(tag, 'sha256:feed', 'l' * 64, 'now', 'd' * 64)
+
+
+class TestSandboxCase:
+    def test_unavailable_is_skipped_with_error(self, tmp_path: Path, canned,
+                                               monkeypatch) -> None:
+        monkeypatch.setattr(colima, 'available', lambda *a, **k: False)
+        calls: list = []
+        monkeypatch.setattr(provision, 'provision',
+                            lambda *a, **k: calls.append(a))
+        case = _sandbox_case(tools_used_all=['sandbox_submit'],
+                             gate_verdict='intended')
+        base = _base()
+        res = runner.run_case(case, base, [base.adapter], tmp_path / 'out')
+        assert res.passed is False
+        obs = res.observed
+        assert obs['skipped'] is True
+        assert obs['error'] == runner.SANDBOX_UNAVAILABLE == \
+            'sandbox unavailable'
+        assert obs['sandbox'] is None and obs['gate_verdicts'] == []
+        assert [c['detail'] for c in res.checks] == [
+            'error: sandbox unavailable'] * 2
+        assert calls == [] and 'prompt' not in canned    # model never ran
+        assert not (Path(tempfile.gettempdir())
+                    / runner.SANDBOX_WORKDIR).exists()
+
+    def test_provisioned_case_records_image_and_verdicts(
+            self, tmp_path: Path, monkeypatch) -> None:
+        seen: dict = {}
+        domains_before = set(config.ALLOWED_DOMAINS)
+        project_before = (config.PROJECT_GURU_DIR, config.SANDBOX_POLICY_PATH)
+        monkeypatch.setattr(colima, 'available', lambda *a, **k: True)
+
+        def fake_provision(project, settings=None, force=False):
+            seen['project'] = Path(project)
+            seen['domains'] = set(config.ALLOWED_DOMAINS)
+            seen['project_dir'] = config.PROJECT_GURU_DIR
+            seen['policy'] = config.SANDBOX_POLICY_PATH
+            seen['asker'] = provision._asker
+            seen['cwd'] = os.getcwd()
+            seen['read'] = set(config.ALLOWED_READ_DIRS)
+            return _record()
+        monkeypatch.setattr(provision, 'provision', fake_provision)
+        cleaned: list = []
+        monkeypatch.setattr(verbs, 'cleanup_all',
+                            lambda: cleaned.append(True) or 0)
+
+        async def submit_twice(self, prompt, timeout=None):
+            from guru.repositories import sandbox_images as images
+            images.record_sandbox_event(
+                'submit', ['submit', 'x'], 0.1, False,
+                'unclear: reviewer: implements the task only partly')
+            images.record_sandbox_event('run', ['pytest'], 0.1, True,
+                                        'exit 0')
+            images.record_sandbox_event(
+                'submit', ['submit', 'x'], 0.1, True,
+                'intended: reviewer: implements the task')
+            return [_agent('main', [
+                {'role': 'tool', 'tool_name': 'sandbox_submit',
+                 'content': 'ok'},
+                {'role': 'assistant', 'content': 'done'}])]
+        monkeypatch.setattr(bench.BenchRun, 'run', submit_twice)
+        case = _sandbox_case(tools_used_all=['sandbox_submit'],
+                             gate_verdict='intended', files_changed=[])
+        base = _base()
+        res = runner.run_case(case, base, [base.adapter], tmp_path / 'out')
+        assert res.passed is True, res.checks
+        obs = res.observed
+        assert obs['gate_verdicts'] == ['unclear', 'intended']
+        assert obs['sandbox'] == {
+            'image': 'guru-sandbox/cli-tool-abc:deadbeef0000',
+            'digest': 'sha256:feed',
+            'build_seconds': obs['sandbox']['build_seconds']}
+        assert obs['sandbox']['build_seconds'] >= 0
+        assert obs['skipped'] is False and obs['error'] == ''
+        # Provisioned inside the case sandbox: the copy at the stable path
+        # (cwd, on the read list), the index domains allowed, the project
+        # dir on the copy, the denying approval asker.
+        copy = seen['project']
+        assert copy.parent == Path(tempfile.gettempdir()) / \
+            runner.SANDBOX_WORKDIR
+        assert copy.name == 'cli-tool'
+        assert Path(seen['cwd']).resolve() == copy.resolve()
+        assert str(copy.resolve()) in seen['read']
+        assert set(provision.REQUIRED_DOMAINS) <= seen['domains']
+        assert seen['project_dir'] == copy.resolve() / '.guru'
+        assert seen['policy'] == copy.resolve() / '.guru' / 'sandbox.toml'
+        assert seen['asker'] is runner._deny
+        assert cleaned == [True]
+        # Removed and restored afterwards.
+        assert not copy.parent.exists()
+        assert set(config.ALLOWED_DOMAINS) == domains_before
+        assert (config.PROJECT_GURU_DIR,
+                config.SANDBOX_POLICY_PATH) == project_before
+
+    def test_only_this_case_s_submits_count(self, tmp_path: Path, canned,
+                                            monkeypatch) -> None:
+        monkeypatch.setattr(colima, 'available', lambda *a, **k: True)
+        monkeypatch.setattr(provision, 'provision',
+                            lambda *a, **k: _record())
+        out = tmp_path / 'out'
+        repo = JsonlLedger(out / 'ledger')
+        repo.dir.mkdir(parents=True)
+        repo.append('sandbox_events', {'kind': 'submit',
+                                       'detail': 'intended: earlier case'})
+        base = _base()
+        res = runner.run_case(_sandbox_case(gate_verdict='intended'), base,
+                              [base.adapter], out)
+        assert res.observed['gate_verdicts'] == []
+        assert res.passed is False
+        assert res.checks[0]['detail'] == 'no sandbox_submit verdict recorded'
+
+    def test_provision_failure_is_the_case_error(self, tmp_path: Path,
+                                                 canned, monkeypatch) -> None:
+        monkeypatch.setattr(colima, 'available', lambda *a, **k: True)
+
+        def boom(project, settings=None, force=False):
+            raise provision.ProvisionError('docker build failed: nope')
+        monkeypatch.setattr(provision, 'provision', boom)
+        base = _base()
+        res = runner.run_case(_sandbox_case(files_changed=[]), base,
+                              [base.adapter], tmp_path / 'out')
+        assert res.passed is False and res.observed['skipped'] is False
+        assert res.observed['error'] == 'docker build failed: nope'
+        assert res.checks[0]['detail'] == 'error: docker build failed: nope'
+        assert 'prompt' not in canned
+
+    def test_allow_spend_installs_the_intended_only_asker(
+            self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(colima, 'available', lambda *a, **k: True)
+        monkeypatch.setattr(provision, 'provision',
+                            lambda *a, **k: _record())
+        seen: dict = {}
+
+        async def peek(self, prompt, timeout=None):
+            seen['asker'] = provision._asker
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', peek)
+        before = provision._asker
+        base = _base()
+        runner.run_case(_sandbox_case(), base, [base.adapter], tmp_path / 'a')
+        assert seen['asker'] is runner._deny
+        runner.run_case(_sandbox_case(), base, [base.adapter], tmp_path / 'b',
+                        allow_spend=True)
+        assert seen['asker'] is runner._grant_intended
+        assert provision._asker is before
+
+    def test_grant_intended_and_question_verdict(self) -> None:
+        intended = verbs.SUBMIT_QUESTION.format(state='intended')
+        unclear = verbs.SUBMIT_QUESTION.format(state='unclear')
+        assert verbs.question_verdict(intended + '\nIntent: x') == 'intended'
+        assert verbs.question_verdict(unclear) == 'unclear'
+        assert verbs.question_verdict('Add dependency six to uv.lock?') == ''
+        assert verbs.question_verdict('') == ''
+        assert runner._grant_intended(intended + '\nIntent: x\nApply?') is True
+        assert runner._grant_intended(unclear + '\nIntent: x') is False
+        assert runner._grant_intended('Add dependency six to uv.lock and '
+                                      'rebuild the sandbox image?') is False
+
+    def test_gate_verdicts_from_rows(self) -> None:
+        rows = [{'kind': 'submit', 'detail': 'intended: reviewer: ok'},
+                {'kind': 'apply', 'detail': 'applied'},
+                {'kind': 'submit', 'detail': 'read-only: not applied'},
+                {'kind': 'submit', 'detail': 'suspicious: exec: x'},
+                {'kind': 'submit'}, {'detail': 'unclear: no kind'}]
+        assert runner.gate_verdicts(rows) == ['intended', 'suspicious']
+
+    def test_project_dir_is_the_copy_for_every_case(self, tmp_path: Path,
+                                                    monkeypatch) -> None:
+        seen: dict = {}
+
+        async def peek(self, prompt, timeout=None):
+            seen['project_dir'] = config.PROJECT_GURU_DIR
+            seen['cwd'] = Path(os.getcwd()).resolve()
+            seen['sandbox_available'] = verbs.available()
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', peek)
+        before = (config.PROJECT_GURU_DIR, config.SANDBOX_POLICY_PATH)
+        base = _base()
+        runner.run_case(_case(), base, [base.adapter], tmp_path / 'out')
+        assert seen['project_dir'] == seen['cwd'] / '.guru'
+        assert seen['sandbox_available'] is False   # flaskish: no image
+        assert (config.PROJECT_GURU_DIR, config.SANDBOX_POLICY_PATH) == before
+
+    def test_run_suite_installs_the_judge_registry(self, tmp_path: Path,
+                                                   monkeypatch) -> None:
+        from guru.judges import llm
+        seen: list = []
+        real = judges.set_registry
+
+        def spy(registry, routing_cfg=None):
+            seen.append((registry, routing_cfg))
+            real(registry, routing_cfg)
+        monkeypatch.setattr(judges, 'set_registry', spy)
+        during: dict = {}
+
+        async def peek(self, prompt, timeout=None):
+            during['registry'] = llm.registry()
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', peek)
+        base = _base()
+        runner.run_suite([_case()], None, tmp_path / 'runs', base_state=base,
+                         adapters=[base.adapter], trajectory_dir=tmp_path)
+        assert during['registry'] is not None
+        assert during['registry'].get('Fake') is base.adapter
+        assert isinstance(seen[0][1], RoutingSettings)   # no file: empty
+        assert seen[-1] == (None, None)
+        assert llm.registry() is None
+
+
+class TestCliSandbox:
+    def test_table_shows_gate_verdicts_and_skips(self, tmp_path: Path,
+                                                 capsys, monkeypatch) -> None:
+        cdir = tmp_path / 'cases'
+        cdir.mkdir()
+        (cdir / 'a.toml').write_text(
+            'name = "a"\nfixture = "docs-only"\nprompt = "hi"\n')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            r = runs.Run(run_id='rid', ts=runs.now_ts(), model='Fake|m',
+                         git_sha='', cases=[
+                             runs.CaseResult(
+                                 case='a', passed=True, checks=[],
+                                 observed={'seconds': 1.0,
+                                           'gate_verdicts': ['unclear',
+                                                             'intended']},
+                                 rubric='', transcript_path='t',
+                                 cost_usd=None),
+                             runs.CaseResult(
+                                 case='b', passed=False,
+                                 checks=[{'name': 'gate_verdict',
+                                          'passed': False,
+                                          'detail': 'error: sandbox '
+                                                    'unavailable'}],
+                                 observed={'seconds': 0.0, 'skipped': True,
+                                           'error': 'sandbox unavailable'},
+                                 rubric='', transcript_path='t',
+                                 cost_usd=None)])
+            runs.save(r, out_root)
+            kw['on_result'](r.cases[1])
+            return r
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['run', '--cases-dir', str(cdir), '--model', 'Fake|m',
+                         '--out', str(tmp_path / 'r')])
+        assert code == 1
+        out = capsys.readouterr().out
+        assert 'gate: unclear, intended' in out
+        assert 'gate intended=1 unclear=1' in out
+        assert '[evals] b: FAIL (0.0s, skipped: sandbox unavailable)' in out
+        assert 'gate_verdict' in out

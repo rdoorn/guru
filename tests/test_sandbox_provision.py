@@ -817,6 +817,33 @@ class TestApplyDependency:
         assert out.startswith('uv add failed') and 'uv failed' in out
         assert (root / 'uv.lock').read_text() == OLD_LOCK and rebuilt == []
 
+    def test_rebuild_failure_keeps_the_request_pending(
+            self, prepared, repo, monkeypatch) -> None:
+        root, settings, req, uv, rebuilt = prepared
+
+        def boom(project, settings=None, force=False):
+            raise provision.ProvisionError('docker build failed: no space')
+        monkeypatch.setattr(provision, 'provision', boom)
+        provision.set_approve_asker(lambda q: True)
+        out = provision.apply_dependency(root, req, settings)
+        # The lockfile change landed through apply_patch ...
+        assert (root / 'uv.lock').read_text() == NEW_LOCK
+        assert 'six>=1.16' in (root / 'pyproject.toml').read_text()
+        # ... the digest says so and names the failure ...
+        assert 'Added six>=1.16 to pyproject.toml and uv.lock' in out
+        assert 'added rich==13.7.0' in out
+        assert 'rebuild failed: docker build failed: no space' in out
+        assert 'stays pending' in out and 'rebuilt:' not in out
+        # ... and the request is still there to retry.
+        new_spec = sb.spec_from(root, settings)
+        assert [r.spec for r in images.pending_requests(new_spec)] == [
+            'six>=1.16']
+        ledger.flush()
+        rows = [r for r in repo.stream('sandbox_events')
+                if r['kind'] == 'dep_apply']
+        assert rows[-1]['ok'] is False
+        assert rows[-1]['detail'].startswith('rebuild failed: docker build')
+
     def test_needs_a_built_image(self, allowed, fake_run) -> None:
         root = _project(allowed)
         provision.set_approve_asker(lambda q: True)
@@ -900,3 +927,33 @@ class TestSandboxCommands:
         import guru.cli as cli
         cli._sandbox_command('deps request "six; rm"')
         assert 'Refused' in capsys.readouterr().out
+
+    def test_deps_reports_errors_in_one_line(self, cli_project, monkeypatch,
+                                             capsys) -> None:
+        import guru.cli as cli
+
+        def boom(*a, **k):
+            raise OSError('disk full')
+        monkeypatch.setattr(provision, 'request_dependency', boom)
+        cli._sandbox_command('deps request six')
+        out = capsys.readouterr().out
+        assert 'sandbox deps: request failed: disk full' in out
+        assert 'Traceback' not in out
+        spec = sb.spec_from(cli_project, _settings())
+        images.add_request(spec, deps.request_from('six', '>=1.16'))
+
+        def boom_apply(project, req, settings=None):
+            raise provision.ProvisionError('proxy container did not start')
+        monkeypatch.setattr(provision, 'apply_dependency', boom_apply)
+        cli._sandbox_command('deps apply six')
+        out = capsys.readouterr().out
+        assert 'sandbox deps: apply failed: proxy container did not start' \
+            in out
+        assert 'Traceback' not in out
+
+        def boom_list(spec):
+            raise RuntimeError('store locked')
+        monkeypatch.setattr(images, 'pending_requests', boom_list)
+        cli._sandbox_command('deps')
+        assert 'sandbox deps: list failed: store locked' in \
+            capsys.readouterr().out

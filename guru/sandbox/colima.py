@@ -60,6 +60,9 @@ DIFF_OUT_KB = 2048
 BUILDKIT_NETWORKS = frozenset(('none', 'default', 'host'))
 # Marker file prepare_copy writes; remove_copy refuses a tree without it.
 COPY_MARKER = '.guru-sandbox-copy'
+# Prefix of the scripts ``sandbox_python`` drops into a copy (removed after
+# the run; git-excluded so a leftover never reaches a diff).
+SCRIPT_PREFIX = '.guru-sandbox-'
 # Git identity for the copy's commits (the scrubbed HOME has no gitconfig).
 _GIT_IDENTITY = ('-c', 'user.name=guru-sandbox',
                  '-c', 'user.email=sandbox@guru.local',
@@ -67,7 +70,8 @@ _GIT_IDENTITY = ('-c', 'user.name=guru-sandbox',
                  '-c', 'init.defaultBranch=main')
 # Ignored inside the copy so caches the container writes stay out of diffs.
 _GIT_EXCLUDE = ('__pycache__/\n.pytest_cache/\n.mypy_cache/\n.ruff_cache/\n'
-                '*.pyc\n.venv/\n' + COPY_MARKER + '\n')
+                '*.pyc\n.venv/\n' + COPY_MARKER + '\n' + SCRIPT_PREFIX
+                + '*\n')
 # Environment the docker CLI needs to find the Colima context: procs.run
 # gives the child a temporary HOME, which would hide ~/.docker.
 _DOCKER_PASSTHROUGH = ('DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY',

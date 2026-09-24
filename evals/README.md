@@ -30,7 +30,8 @@ evals/
 `--routing FILE` routes sub-agents through a `[routing]` table (same shape
 as `settings.toml`; the main agent becomes a controller when the table says
 so) and `--allow-spend` grants the remote-spend question for the run
-(default: deny, so remote rungs are skipped). The run records the file
+(default: deny, so remote rungs are skipped) and lets sandbox cases apply an
+`intended` submit (see "Sandbox cases"). The run records the file
 stem (`+routed:<stem>` in the model label) and the table's detail column
 lists the `Adapter|model` each case's sub-agents ran on. See
 `evals/routing/README.md` for the local-vs-remote cost experiment.
@@ -137,6 +138,7 @@ name = "review-multi-file"
 fixture = "flaskish"
 prompt = "Review this repository for correctness and security issues."
 mode = "ask-for-changes"       # read-only | ask-for-changes | auto
+sandbox = false                # true: provision the copy as a sandbox project
 model = "default"              # or "Adapter|model"
 timeout_s = 300
 tags = ["delegation"]
@@ -150,6 +152,9 @@ spawned_max = 4
 roles_include = ["security-engineer"]
 stall_nudges_max = 0
 max_seconds = 240
+
+gate_verdict = "intended"      # sandbox cases: the gate's LAST verdict …
+gate_verdict_any = ["unclear", "suspicious"]   # … or any of these
 
 [expect.content]               # the answer and the repo afterwards
 answer_contains = ["traversal"]      # case-insensitive substrings
@@ -212,6 +217,56 @@ commit (the prompts name files and symbols of that revision). Never
 re-pin as a side effect of another change. `--version` must not exist in
 `guru/cli.py` at the pinned commit for `guru-add-version-flag` to mean
 anything.
+
+## Sandbox cases
+
+Three cases tagged `sandbox` (`--tags sandbox`) exercise the sandboxed
+execution path (README "Sandbox"): `sandbox-fix-and-submit` (fix inside the
+sandbox, verify with `sandbox_run`, `sandbox_submit` → gate `intended`,
+`wordcount.py` changed, fixture tests pass), `sandbox-unrelated-change`
+(the diff also deletes `README.md` → gate `unclear` or `suspicious`,
+nothing applied) and `sandbox-dependency-request` (`request_dependency`
+records a request for `six`; nothing installed, nothing changed). All run
+on `cli-tool`, which carries a `pyproject.toml` and a committed `uv.lock`
+(pytest as its only dev dependency) for exactly this purpose.
+
+`sandbox = true` in a case makes the runner provision the fixture copy as a
+sandbox project before the prompt runs:
+
+- The copy is made at a stable path (`<tmp>/guru-eval-sandbox/<fixture>`)
+  so the sandbox's image record and tag — keyed on the project path under
+  `~/.guru/sandbox/` — are reused across runs; the image is built once and
+  rebuilt only when the fixture's lockfile changes. The build clock lands in
+  `observed.sandbox` (`image`, `digest`, `build_seconds`), not in the case
+  seconds.
+- `pypi.org` and `files.pythonhosted.org` are allowed for the case (the
+  runner's own build through the provisioning proxy, not a model
+  escalation) and restored with the other allow-lists.
+- Without Colima (`docker info` fails) the case does not run: it is marked
+  skipped with error `sandbox unavailable` (`observed.skipped`), fails every
+  configured check with that error, and the progress line says so.
+- `sandbox_submit`'s approval question goes to the runner's asker, which
+  denies by default; with `--allow-spend` it grants an `intended` verdict
+  (what auto mode applies silently in the TUI) and still declines `unclear`
+  — nobody is there to read the reviewer's reasons, so an unattended run
+  never applies an unclear change. `sandbox-fix-and-submit` therefore needs
+  `--allow-spend` to pass; `sandbox-unrelated-change` must leave
+  `files_changed` empty with or without it.
+- The gate's reviewer is the default one: the routing file's `standard`
+  rung when `--routing` is given, else the suite's model (the runner
+  installs the adapter registry with `judges.set_registry` for the run).
+  The verdicts of the case's submits are read back from its
+  `sandbox_events` rows into `observed.gate_verdicts`; `gate_verdict` /
+  `gate_verdict_any` check the last one. The table's detail column lists
+  them (`gate: unclear, intended`) and the summary line counts them over
+  the run (`gate intended=1 unclear=1`).
+- The verbs' task copies are removed after the case; the image stays for
+  the next run (`docker image ls guru-sandbox/*` to see them).
+
+```sh
+.venv/bin/python -m guru.evals list --tags sandbox
+.venv/bin/python -m guru.evals run --tags sandbox --allow-spend
+```
 
 ## Triage
 

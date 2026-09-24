@@ -265,7 +265,9 @@ def apply_dependency(project: Path, request: DependencyRequest,
     diff back through ``apply_patch``, then :func:`provision` rebuilds.
     Returns a digest (lockfile diff summary, new image digest) or one of
     ``Refused: …`` / ``Declined: …`` / ``uv add failed: …`` / the patch
-    refusal. The request is removed from the pending store once applied."""
+    refusal. The request is removed from the pending store once the
+    rebuild succeeded; when :func:`provision` raises after the lockfile
+    was patched, the digest says so and the request stays pending."""
     cfg = _settings(settings)
     try:
         spec = sb.spec_from(project, cfg)
@@ -325,8 +327,21 @@ def apply_dependency(project: Path, request: DependencyRequest,
         images.record_sandbox_event('dep_apply', ['uv', 'add', request.spec],
                                     res.seconds, False, applied[:200])
         return f'{applied}\nLockfile change not applied ({summary}).'
+    try:
+        rec = provision(spec.project, cfg)
+    except (ProvisionError, ValueError, OSError, RuntimeError) as e:
+        # The real tree already carries the new lockfile; the request
+        # stays pending so the rebuild can be retried (a re-apply finds
+        # the lockfile unchanged and clears it).
+        images.record_sandbox_event('dep_apply', ['uv', 'add', request.spec],
+                                    res.seconds, False,
+                                    f'rebuild failed: {str(e)[:150]}')
+        return (f'Added {request.spec} to pyproject.toml and uv.lock '
+                f'({summary}), but the sandbox image rebuild failed: {e}\n'
+                'The request stays pending; fix the cause and run /sandbox '
+                f'provision, then /sandbox deps apply {request.name} to '
+                'clear it.')
     images.remove_request(spec, request.name)
-    rec = provision(spec.project, cfg)
     images.record_sandbox_event('dep_apply', ['uv', 'add', request.spec],
                                 res.seconds, True, f'{summary}; {rec.digest}')
     return (f'Added {request.spec}. uv.lock: {summary}. Sandbox image '

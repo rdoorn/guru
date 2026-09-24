@@ -11,6 +11,12 @@ The fixture is either ``fixture = "<name>"`` (a frozen directory under
 repository, absolute or relative to this checkout, and ``ref``, a commit sha
 or tag): the runner archives the repo at that ref, so a real project can be
 a fixture without being copied into the suite. Exactly one of the two.
+
+``sandbox = true`` makes the runner provision the fixture copy as a sandbox
+project (it needs ``pyproject.toml`` + ``uv.lock``) before the prompt runs,
+so the ``sandbox_*`` verbs are available; ``gate_verdict`` /
+``gate_verdict_any`` under ``[expect.behaviour]`` check the quality gate's
+last verdict for the case.
 """
 from __future__ import annotations
 
@@ -21,6 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from guru import config
+from guru.domain import gate
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = REPO_ROOT / 'evals' / 'fixtures'
@@ -48,6 +55,10 @@ class Expect:
     files_changed: Optional[list[str]] = None  # exact set; None = no check
     files_unchanged: list[str] = field(default_factory=list)
     fixture_tests_pass: Optional[bool] = None
+    # The quality gate's LAST verdict of the case (``intended`` | ``unclear``
+    # | ``suspicious``): exactly this one, or any of a list.
+    gate_verdict: str = ''
+    gate_verdict_any: list[str] = field(default_factory=list)
     rubric: str = ''
 
 
@@ -71,7 +82,8 @@ class Case:
     """One eval case: prompt, fixture, run settings and expectations.
 
     ``fixture`` names a directory fixture; ``fixture_git`` pins a git
-    repository instead (then ``fixture`` is ``''``).
+    repository instead (then ``fixture`` is ``''``). ``sandbox`` asks the
+    runner to provision the copy as a sandbox project first.
     """
     name: str
     fixture: str
@@ -82,6 +94,7 @@ class Case:
     tags: list[str] = field(default_factory=list)
     expect: Expect = field(default_factory=Expect)
     fixture_git: Optional[GitFixture] = None
+    sandbox: bool = False
 
     @property
     def fixture_label(self) -> str:
@@ -94,7 +107,7 @@ class Case:
 # is expected; ``bool`` is never accepted as an int.
 _TOP_TYPES: dict[str, type] = {
     'name': str, 'fixture': str, 'prompt': str, 'mode': str, 'model': str,
-    'timeout_s': int, 'tags': list, 'fixture_git': dict,
+    'timeout_s': int, 'tags': list, 'fixture_git': dict, 'sandbox': bool,
 }
 _REQUIRED = ('name', 'prompt')
 _GIT_KEYS = ('path', 'ref')
@@ -104,7 +117,7 @@ _EXPECT_TYPES: dict[str, type] = {
     'stall_nudges_max': int, 'max_seconds': float,
     'answer_contains': list, 'answer_not_contains': list,
     'answer_regex': list, 'files_changed': list, 'files_unchanged': list,
-    'fixture_tests_pass': bool,
+    'fixture_tests_pass': bool, 'gate_verdict': str, 'gate_verdict_any': list,
 }
 _EXPECT_SECTIONS = ('behaviour', 'content', 'rubric')
 assert set(_EXPECT_TYPES) | {'rubric'} == {f.name for f in fields(Expect)}
@@ -167,6 +180,12 @@ def _build_expect(where: str, raw: Any) -> Expect:
             kw[key] = _typed(where, key, value, _EXPECT_TYPES[key])
     if 'answer_regex' in kw:
         _compiled_ok(where, kw['answer_regex'])
+    for key in ('gate_verdict', 'gate_verdict_any'):
+        values = kw.get(key)
+        for value in ([values] if isinstance(values, str) else values or []):
+            if value not in gate.STATES:
+                raise ValueError(f'{where}: {key} {value!r} not one of '
+                                 f'{", ".join(gate.STATES)}')
     return Expect(**kw)
 
 

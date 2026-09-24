@@ -141,6 +141,13 @@ def default_reviewer(diff_text: str, adapter: object, model: str
                                       default=True)
         except KeyError:
             local_main = None
+    # Tension, independent of the design doc: a diff the secret scanner
+    # flags is kept off remote models (as every routed task is), so the
+    # review of exactly the change most worth a strong reviewer falls to a
+    # local model — or to the session's own model when no local rung
+    # exists. The rules still refuse a 'secret' flag outright before any
+    # reviewer runs, so the weaker reviewer only ever sees the residue the
+    # scanner missed; a stronger local judge is the way to close this.
     findings = len(policy.scan(diff_text)) if cfg.secret_scan else 0
     route = routing.resolve(
         'review', 'standard', ladders, mode=cfg.mode,

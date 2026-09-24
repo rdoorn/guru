@@ -630,26 +630,31 @@ def _sandbox_deps(args: str) -> str:
     try:
         settings = load_sandbox()
         spec = sb.spec_from(root, settings)
-    except ValueError as e:
-        return f'sandbox deps: {e}'
-    if verb == '':
-        pending = images.pending_requests(spec)
-        if not pending:
-            return 'sandbox deps: no pending dependency requests'
-        return 'pending dependency requests:\n' + '\n'.join(
-            f'  {r.spec}  (requested {r.requested_at}; apply with '
-            f'/sandbox deps apply {r.name})' for r in pending)
-    if verb == 'request' and rest:
-        name, constraint = _split_requirement(rest)
-        return provision.request_dependency(name, constraint, project=root,
-                                            settings=settings)
-    if verb == 'apply' and rest:
-        from guru.domain import deps
-        key = deps.normalise(rest)
-        match = [r for r in images.pending_requests(spec) if r.key == key]
-        if not match:
-            return f"sandbox deps: no pending request named '{rest}'"
-        return provision.apply_dependency(root, match[0], settings)
+        if verb == '':
+            pending = images.pending_requests(spec)
+            if not pending:
+                return 'sandbox deps: no pending dependency requests'
+            return 'pending dependency requests:\n' + '\n'.join(
+                f'  {r.spec}  (requested {r.requested_at}; apply with '
+                f'/sandbox deps apply {r.name})' for r in pending)
+        if verb == 'request' and rest:
+            name, constraint = _split_requirement(rest)
+            return provision.request_dependency(name, constraint,
+                                                project=root,
+                                                settings=settings)
+        if verb == 'apply' and rest:
+            from guru.domain import deps
+            key = deps.normalise(rest)
+            match = [r for r in images.pending_requests(spec)
+                     if r.key == key]
+            if not match:
+                return f"sandbox deps: no pending request named '{rest}'"
+            return provision.apply_dependency(root, match[0], settings)
+    except (ValueError, OSError, RuntimeError,
+            provision.ProvisionError) as e:
+        # One line, never a traceback: bad settings/lockfile, an
+        # unreadable store, a copy or docker failure.
+        return f'sandbox deps: {verb or "list"} failed: {e}'
     return _SANDBOX_USAGE
 
 

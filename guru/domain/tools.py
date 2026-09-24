@@ -38,6 +38,13 @@ _STOP_WORDS = {
 # while the project has a provisioned sandbox image; refused otherwise.
 SANDBOX_TOOLS = ('sandbox_run', 'sandbox_python', 'sandbox_diff',
                  'sandbox_submit', 'request_dependency')
+# In a sandbox-enabled project the quality gate is the ONLY write path: the
+# direct write tools are neither advertised nor executable by an agent
+# (apply_patch stays a module function sandbox_submit and provisioning call).
+DIRECT_WRITE_TOOLS = frozenset(('write_file', 'edit_file', 'apply_patch',
+                                'delete_file'))
+SANDBOX_WRITE_REFUSAL = ('Refused: this project runs in a sandbox; edit '
+                         'inside it and use sandbox_submit')
 
 
 # --- project tool policy (.guru/tools.toml) ----------------------------------
@@ -58,10 +65,12 @@ def _advertised() -> list:
     order. Discovery, pre-activation and the specs sent to the model all
     draw from this list, so a disabled tool is never described to the
     model (and ``execute_tool`` refuses it anyway if called by name). The
-    sandbox verbs are listed only while the project has a sandbox image."""
+    sandbox verbs are listed only while the project has a sandbox image,
+    and then the direct write tools are not (``DIRECT_WRITE_TOOLS``)."""
     sandbox = _sandbox_available()
+    hidden = DIRECT_WRITE_TOOLS if sandbox else frozenset(SANDBOX_TOOLS)
     return [name for name in TOOL_REGISTRY if is_enabled(name)
-            and (sandbox or name not in SANDBOX_TOOLS)]
+            and name not in hidden]
 
 
 # Pluggable domain approval — overridable by the TUI so it doesn't call the
@@ -1148,6 +1157,9 @@ def execute_tool(name: str, arguments: dict) -> str:
         denied = 'controller'
     elif name in TOOL_REGISTRY and not is_enabled(name):
         result = f"Tool '{name}' is disabled by .guru/tools.toml"
+        denied = 'policy'
+    elif name in DIRECT_WRITE_TOOLS and _sandbox_available():
+        result = SANDBOX_WRITE_REFUSAL
         denied = 'policy'
     elif name == "search_tools":
         result = search_tools(**arguments)

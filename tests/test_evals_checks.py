@@ -174,3 +174,37 @@ def test_passed_requires_all() -> None:
     'files_unchanged'])
 def test_list_fields_default_to_unconfigured(field: str) -> None:
     assert getattr(Expect(), field) == []
+
+
+class TestGateVerdict:
+    def test_gate_verdict_looks_at_the_last(self) -> None:
+        e = Expect(gate_verdict='intended')
+        assert one(e, obs(gate_verdicts=['unclear', 'intended'])).passed
+        r = one(e, obs(gate_verdicts=['intended', 'unclear']))
+        assert not r.passed
+        assert "last gate verdict 'unclear', expected 'intended'" in r.detail
+
+    def test_without_a_submit_both_fail(self) -> None:
+        r = one(Expect(gate_verdict='intended'), obs())
+        assert not r.passed and 'no sandbox_submit verdict' in r.detail
+        r = one(Expect(gate_verdict_any=['unclear']), obs())
+        assert not r.passed and 'no sandbox_submit verdict' in r.detail
+
+    def test_gate_verdict_any(self) -> None:
+        e = Expect(gate_verdict_any=['unclear', 'suspicious'])
+        assert one(e, obs(gate_verdicts=['suspicious'])).passed
+        assert one(e, obs(gate_verdicts=['intended', 'unclear'])).passed
+        r = one(e, obs(gate_verdicts=['intended']))
+        assert not r.passed
+        assert "'intended' not in ['unclear', 'suspicious']" in r.detail
+
+    def test_defaults(self) -> None:
+        assert Expect().gate_verdict == ''
+        assert Expect().gate_verdict_any == []
+        o = obs()
+        assert o.gate_verdicts == [] and o.sandbox is None
+        assert o.skipped is False
+        # both configured: two results, in order
+        e = Expect(gate_verdict='unclear', gate_verdict_any=['unclear'])
+        names = [r.name for r in evaluate(e, obs(gate_verdicts=['unclear']))]
+        assert names == ['gate_verdict', 'gate_verdict_any']

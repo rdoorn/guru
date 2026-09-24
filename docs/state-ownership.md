@@ -46,6 +46,21 @@ is injected through setters rather than hard-coded:
   mode), installed from settings by `guru.judges.install()` at startup.
   Whether a point *acts* on its judge is process config
   (`config.DECISIONS_ACTIVE`, category 3), not a property of the judge.
+- `provision.set_approve_asker` (`guru.sandbox.provision`) — the sandbox
+  approval prompt: applying a dependency request (`/sandbox deps apply`),
+  and `sandbox_submit`'s "apply this change?" for an `intended` verdict
+  outside silent auto mode and for every `unclear` verdict (read-only never
+  approves; a raising asker is a decline). The TUI installs its access
+  asker; the eval runner installs a deny, or with `--allow-spend` an asker
+  that grants `intended` submits only (an unattended run never approves
+  `unclear`). None restores the console prompt.
+- `judges.set_registry` (`guru.judges` → `guru.judges.llm`) — the adapter
+  registry, plus optionally the routing settings, that `llm:<Adapter>|<model>`
+  judges and the sandbox gate's default reviewer resolve adapter names and
+  ladders against. The CLI installs `REGISTRY` with the loaded routing at
+  startup; the eval runner installs the suite's registry (and the routing
+  file, or empty settings) for a run and clears it afterwards. Without a
+  registry the default reviewer is the session's own adapter/model.
 - `ledger.set_repository` — the ledger persistence backend, a JSONL
   repository in the CLI/TUI, a fake in tests. `guru.ledger_cli review`
   installs the JSONL repository of the directory it labels for the duration
