@@ -20,15 +20,25 @@ KINDS = ('debug', 'build', 'refactor', 'review', 'explain', 'docs', 'ops',
          'other')
 MODES = ('local-only', 'local-and-remote', 'remote-only')
 # What each label means: the controller hint (config.CONTROLLER_HINT) and
-# the ``labels`` shadow judge (decisions.label_questions) both read these,
-# so the model that labels and the judge that checks it share one rubric.
+# the ``labels`` judge (decisions.label_questions) both read these, so the
+# model that labels and the judge that checks it share one rubric. The
+# examples after "e.g." are drawn from the real cases in
+# evals/triage/2026-09-24-real-cases.md, where labelling was the weak spot.
 COMPLEXITY_DESCRIPTIONS = {
     'trivial': 'greetings, one-line lookups (where is X defined, what does'
-               ' this flag do), a single-file summary, a definition',
+               ' this flag do), a single-file summary, a definition'
+               ' (e.g. summarise one README section; find where a function'
+               ' is defined and who calls it; explain a shell command)',
     'standard': 'read or inspect a few files, explain or fix one bug, a'
-                ' one-file edit with its tests',
+                ' one-file edit with its tests (e.g. explain how one function'
+                ' or one module works; fix one failing test in one file; add'
+                ' a small CLI flag plus a test)',
     'hard': 'multi-file refactors, an architecture or security review of a'
-            ' whole codebase, subtle concurrency or data-race bugs',
+            ' whole codebase, subtle concurrency or data-race bugs (e.g.'
+            ' review several modules for consistency, security or error'
+            ' handling; explain an algorithm that spans multiple files with'
+            ' its measurements and persistence; concurrency bugs;'
+            ' architecture)',
 }
 KIND_DESCRIPTIONS = {
     'debug': 'find and fix a bug, a crash or a failing test',

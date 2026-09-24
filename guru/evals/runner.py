@@ -128,7 +128,8 @@ def load_routing_file(path: Path) -> RoutingSettings:
 
 def load_decisions_file(path: Path) -> Optional[DecisionsSettings]:
     """Parse the optional ``[decisions]`` table of an experiment file
-    (``mode`` plus ``points``/``active``/``thresholds``). None when the
+    (``mode`` plus ``points``/``active``/``thresholds`` and
+    ``labels_margin``). None when the
     file has no such table; ``ValueError`` as :func:`load_routing_file`
     and for an invalid key or value."""
     path = Path(path)
@@ -626,8 +627,9 @@ def _judges_for(decisions: Optional[DecisionsSettings]
                 ) -> Iterator[list[str]]:
     """Install the experiment's judges for the run.
 
-    Sets ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` from
-    ``decisions``, calls ``judges.install()`` and yields the installed
+    Sets ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` and
+    ``config.DECISIONS_LABELS_MARGIN`` from ``decisions``, calls
+    ``judges.install()`` and yields the installed
     judges as ``point=name``; afterwards the config values are restored
     and the judge registry is cleared. No-op (yields ``[]``, touches
     nothing) without a table.
@@ -636,18 +638,21 @@ def _judges_for(decisions: Optional[DecisionsSettings]
         yield []
         return
     prev = (config.DECISIONS_MODE, config.DECISIONS_POINTS,
-            config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS)
+            config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS,
+            config.DECISIONS_LABELS_MARGIN)
     config.DECISIONS_MODE = decisions.mode
     config.DECISIONS_POINTS = dict(decisions.points)
     config.DECISIONS_ACTIVE = dict(decisions.active)
     config.DECISIONS_THRESHOLDS = dict(decisions.thresholds)
+    config.DECISIONS_LABELS_MARGIN = decisions.labels_margin
     try:
         installed = judges.install()
         yield [f'{point}={name}' for point, name in installed.items()]
     finally:
         decision_seam.clear_judges()
         (config.DECISIONS_MODE, config.DECISIONS_POINTS,
-         config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS) = prev
+         config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS,
+         config.DECISIONS_LABELS_MARGIN) = prev
 
 
 def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,

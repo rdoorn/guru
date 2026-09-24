@@ -9,7 +9,7 @@ sibling table)::
 
     [routing]
     mode = "local-and-remote"   # local-only | local-and-remote | remote-only
-    controller = false
+    controller = true           # default: on when any ladder rung is set
     complexity_router = true
     type_router = false
     spend_confirm = "ask"            # ask | auto | never
@@ -30,10 +30,18 @@ Validation is strict: unknown keys, unknown enum values and duplicate
 defaults raise ``ValueError`` naming the offender, so a typo cannot silently
 route a task to the wrong model.
 
+``controller`` defaults to *on when any ladder rung is configured* (a
+ladder without a controller is the over-reading configuration of triage
+2026-09-24: the main agent inspects dozens of files itself before it
+delegates); write ``controller = false`` next to a ladder to keep the main
+agent hands-on. Without a ladder the default is off.
+``RoutingSettings.controller`` is always the effective boolean.
+
 ``[decisions]`` (:func:`load_decisions`) carries the judge setup an eval
 experiment installs for its run — ``mode`` plus the ``points``, ``active``
-and ``thresholds`` sub-tables that ``config`` documents; the sidecar and
-timing keys stay in ``settings.toml``.
+and ``thresholds`` sub-tables and the ``labels_margin`` tie-breaker margin
+that ``config`` documents; the sidecar and timing keys stay in
+``settings.toml``.
 """
 from __future__ import annotations
 
@@ -65,9 +73,14 @@ class RungSpec:
 @dataclass
 class RoutingSettings:
     """The validated ``[routing]`` table. ``ladders`` maps ``'default'`` and
-    per-kind names to their rung specs, lowest rung first."""
+    per-kind names to their rung specs, lowest rung first.
+
+    ``controller`` may be given as None (the key was not set): it then
+    resolves to True when any ladder has a rung, else False, so after
+    construction it is always the effective boolean.
+    """
     mode: str = 'local-and-remote'
-    controller: bool = False
+    controller: Optional[bool] = None
     complexity_router: bool = True
     type_router: bool = False
     spend_confirm: str = 'ask'
@@ -78,19 +91,27 @@ class RoutingSettings:
     # leaves ``config.SECRET_SCAN`` off, and routing is inert.
     present: bool = False
 
+    def __post_init__(self) -> None:
+        if self.controller is None:
+            self.controller = any(
+                bool(specs) for specs in self.ladders.values())
 
-_DECISION_KEYS = frozenset(('mode', 'points', 'active', 'thresholds'))
+
+_DECISION_KEYS = frozenset(
+    ('mode', 'points', 'active', 'thresholds', 'labels_margin'))
+DEFAULT_LABELS_MARGIN = 0.15
 
 
 @dataclass
 class DecisionsSettings:
     """The validated ``[decisions]`` table of an experiment file: the
-    values ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` take for a
-    run."""
+    values ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` and
+    ``config.DECISIONS_LABELS_MARGIN`` take for a run."""
     mode: str = 'off'
     points: dict[str, str] = field(default_factory=dict)
     active: dict[str, bool] = field(default_factory=dict)
     thresholds: dict[str, float] = field(default_factory=dict)
+    labels_margin: float = DEFAULT_LABELS_MARGIN
 
 
 def _is_number(v: object) -> bool:
@@ -131,6 +152,11 @@ def load_decisions(section: dict) -> DecisionsSettings:
         raise ValueError(
             f'[decisions] mode = {mode!r}; expected one of '
             + ', '.join(config.DECISIONS_MODES))
+    margin = section.get('labels_margin', DEFAULT_LABELS_MARGIN)
+    if not _is_number(margin) or margin < 0:
+        raise ValueError(
+            f'[decisions] labels_margin = {margin!r}; expected a '
+            'non-negative number')
     return DecisionsSettings(
         mode=str(mode),
         points=_typed_table(section, 'points',
@@ -139,6 +165,7 @@ def load_decisions(section: dict) -> DecisionsSettings:
                             lambda v: isinstance(v, bool), 'booleans'),
         thresholds=_typed_table(section, 'thresholds', _is_number,
                                 'numbers', float),
+        labels_margin=float(margin),
     )
 
 
@@ -151,9 +178,12 @@ def _enum(section: dict, key: str, allowed: tuple, default: str) -> str:
     return str(value)
 
 
-def _flag(section: dict, key: str, default: bool) -> bool:
+def _flag(section: dict, key: str, default: Optional[bool]
+          ) -> Optional[bool]:
+    """``section[key]`` as a bool; ``default`` when absent (None lets the
+    dataclass resolve it)."""
     value = section.get(key, default)
-    if not isinstance(value, bool):
+    if value is not None and not isinstance(value, bool):
         raise ValueError(f'[routing] {key} = {value!r}; expected a boolean')
     return value
 
@@ -230,11 +260,11 @@ def load_routing(section: Optional[dict] = None) -> RoutingSettings:
             ladders[str(kind)] = _ladder(raw, f'routing.ladders.{kind}')
     return RoutingSettings(
         mode=_enum(section, 'mode', routing.MODES, 'local-and-remote'),
-        controller=_flag(section, 'controller', False),
-        complexity_router=_flag(section, 'complexity_router', True),
-        type_router=_flag(section, 'type_router', False),
+        controller=_flag(section, 'controller', None),
+        complexity_router=bool(_flag(section, 'complexity_router', True)),
+        type_router=bool(_flag(section, 'type_router', False)),
         spend_confirm=_enum(section, 'spend_confirm', SPEND_CONFIRM, 'ask'),
-        secret_scan=_flag(section, 'secret_scan', True),
+        secret_scan=bool(_flag(section, 'secret_scan', True)),
         ladders=ladders,
         present=present,
     )

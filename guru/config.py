@@ -108,12 +108,16 @@ BENCH_MODEL_TIMEOUT = 600
 #   timeout_ms = 1500            # active: max wait for a judge per decision
 #   breaker_timeouts = 5         # active: consecutive timeouts that open the
 #   breaker_cooldown_s = 60      #   per-point breaker, and for how long
+#   labels_margin = 0.15         # active labels: the judge's top tier must
+#                                #   beat its runner-up by this much to
+#                                #   override the controller's complexity
 #   [decisions.points]           # decision point -> judge spec
 #   stall = "ollama"             # ollama | ollama:<model> | encoder |
 #   panel = "encoder"            # encoder:<hf-model> | injection
 #   injection = "injection"
 #   [decisions.active]           # active mode: which points the judge decides
 #   stall = true
+#   labels = true                # complexity tie-breaker (margin-gated)
 #   [decisions.thresholds]       # noul: judge says yes when P(yes) >= this
 #   stall = 0.6                  # (default 0.5)
 DECISIONS_MODES = ('off', 'shadow', 'active')
@@ -127,6 +131,7 @@ DECISIONS_THRESHOLDS: dict = {}
 DECISIONS_TIMEOUT_MS = 1500
 DECISIONS_BREAKER_TIMEOUTS = 5
 DECISIONS_BREAKER_COOLDOWN_S = 60.0
+DECISIONS_LABELS_MARGIN = 0.15
 
 # Routing (guru/domain/routing.py, guru/repositories/settings.py): the typed
 # [routing] table is loaded by the CLI at startup. SECRET_SCAN mirrors its
@@ -331,6 +336,12 @@ REVIEW_PANEL = [
 # Set 0 to disable the nudge.
 DELEGATION_NUDGE_MIN_READS = 3
 DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
+# Over-read guard (turn._drive): a delegation-capable MAIN agent that reads
+# this many DISTINCT paths in one turn without spawning is nudged to
+# delegate right away, mid-turn, once per turn (triage 2026-09-24: plain
+# Sonnet read 87 files before delegating). Never for a controller (it has
+# no read tools). Set 0 to disable.
+OVER_READ_LIMIT = 8
 
 
 def review_tasks(area: str = 'the repository') -> list:
@@ -511,7 +522,8 @@ def _apply_settings() -> None:
     global DECISIONS_MODE, DECISIONS_SIDECAR_MODEL, DECISIONS_SIDECAR_URL
     global DECISIONS_POINTS, DECISIONS_ACTIVE, DECISIONS_THRESHOLDS
     global DECISIONS_TIMEOUT_MS, DECISIONS_BREAKER_TIMEOUTS
-    global DECISIONS_BREAKER_COOLDOWN_S, LEDGER_ENABLED, PRICING_OVERRIDES
+    global DECISIONS_BREAKER_COOLDOWN_S, DECISIONS_LABELS_MARGIN
+    global LEDGER_ENABLED, PRICING_OVERRIDES
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -569,6 +581,13 @@ def _apply_settings() -> None:
             dec.get('breaker_cooldown_s', DECISIONS_BREAKER_COOLDOWN_S))
     except (TypeError, ValueError):
         pass
+    margin = dec.get('labels_margin', DECISIONS_LABELS_MARGIN)
+    if isinstance(margin, (int, float)) and not isinstance(margin, bool) \
+            and margin >= 0:
+        DECISIONS_LABELS_MARGIN = float(margin)
+    else:
+        log.info('ignoring [decisions] labels_margin %r; expected a '
+                 'non-negative number', margin)
     ev = settings_section('evals')
     model = ev.get('model', EVALS_MODEL)
     if isinstance(model, str):

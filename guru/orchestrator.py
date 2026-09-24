@@ -461,17 +461,28 @@ class Orchestrator:
     def _plan_child(self, parent, task: str, kind: str, complexity: str,
                     local_only: bool = False) -> _Plan:
         """Decide how a child for ``task`` would run: normalise the labels,
-        scan the task text (findings force a local rung), resolve the route
-        and gather the reasons. Pure apart from the spend question and the
-        ``labels`` shadow judge, which sees the normalised labels as its
-        heuristics (skipped for the local retry: same task, same labels).
+        let the ``labels`` judge check them, scan the task text (findings
+        force a local rung), resolve the route and gather the reasons.
+        Pure apart from the spend question and the judge, which sees the
+        normalised labels as its heuristics (skipped for the local retry:
+        same task, same labels).
+
+        Judge: in shadow (or with ``labels`` not active) both label
+        questions are shadowed and the controller's labels route. With
+        ``labels`` active the complexity question is a synchronous,
+        margin-gated tie-breaker (:func:`decisions.decide_choice`): the
+        judge's tier routes when it beats the runner-up by
+        ``config.DECISIONS_LABELS_MARGIN``, recorded as
+        ``labels:judge override standard->hard (0.57 vs 0.33)``; the kind
+        question stays shadow (kind routes nothing while ``type_router``
+        is off).
         """
         kind, complexity = routing.normalise_labels(kind, complexity)
-        if not local_only:
-            decisions.shadow('labels', decisions.label_questions(task),
-                             heuristics=[complexity, kind])
-        cfg = self._routing()
         reason: list = []
+        if not local_only:
+            complexity = self._judged_complexity(task, kind, complexity,
+                                                 reason)
+        cfg = self._routing()
         findings = len(policy.scan(task)) if cfg.secret_scan else 0
         if findings:
             reason.append(f'scan:{findings} finding(s) in task text')
@@ -482,6 +493,27 @@ class Orchestrator:
         else:
             reason.extend(route.reason)
         return _Plan(kind, complexity, findings, route, confirmation, reason)
+
+    @staticmethod
+    def _judged_complexity(task: str, kind: str, complexity: str,
+                           reason: list) -> str:
+        """The complexity to route on after the ``labels`` judge: the
+        controller's unless the point is active and the judge overrides
+        it by margin (then noted in ``reason``). See :meth:`_plan_child`.
+        """
+        complexity_q, kind_q = decisions.label_questions(task)
+        if not decisions.active('labels'):
+            decisions.shadow('labels', [complexity_q, kind_q],
+                             heuristics=[complexity, kind])
+            return complexity
+        verdict = decisions.decide_choice(
+            'labels', complexity_q, heuristic=complexity,
+            margin=config.DECISIONS_LABELS_MARGIN)
+        decisions.shadow('labels', [kind_q], heuristic=kind)
+        if verdict.overrode and isinstance(verdict.chosen, str):
+            reason.append('labels:' + verdict.describe())
+            return verdict.chosen
+        return complexity
 
     def _make_child(self, parent, task: str, role: str = '', skill: str = '',
                     index: int = 0, env: Optional[dict] = None,

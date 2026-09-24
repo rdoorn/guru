@@ -259,3 +259,44 @@ class TestDecisionsSettings:
             load_decisions({'thresholds': {'stall': True}})
         with pytest.raises(ValueError, match='thresholds'):
             load_decisions({'thresholds': {'stall': '0.7'}})
+
+    def test_labels_margin_defaults_and_parses(self) -> None:
+        assert load_decisions({}).labels_margin == 0.15
+        assert load_decisions({'labels_margin': 0.3}).labels_margin == 0.3
+        assert load_decisions({'labels_margin': 0}).labels_margin == 0.0
+
+    @pytest.mark.parametrize('value', ['0.3', True, -0.1])
+    def test_labels_margin_must_be_a_non_negative_number(self, value):
+        with pytest.raises(ValueError, match='labels_margin'):
+            load_decisions({'labels_margin': value})
+
+
+class TestControllerDefault:
+    """``controller`` defaults to on when any ladder rung is configured;
+    an explicit value always wins."""
+
+    _RUNG = {'adapter': 'A', 'model': 'm', 'max_complexity': 'hard'}
+
+    def test_ladder_without_controller_key_turns_it_on(self) -> None:
+        assert load_routing({'ladder': [self._RUNG]}).controller is True
+        assert load_routing(
+            {'ladders': {'review': [self._RUNG]}}).controller is True
+
+    def test_no_ladder_leaves_it_off(self) -> None:
+        assert load_routing({}).controller is False
+        assert load_routing({'mode': 'local-only'}).controller is False
+        assert load_routing({'ladder': []}).controller is False
+
+    def test_explicit_false_with_ladder_stays_off(self) -> None:
+        s = load_routing({'controller': False, 'ladder': [self._RUNG]})
+        assert s.controller is False
+
+    def test_explicit_true_without_ladder_stays_on(self) -> None:
+        assert load_routing({'controller': True}).controller is True
+
+    def test_dataclass_resolves_the_default_too(self) -> None:
+        rung = RungSpec('A', 'm', 'hard')
+        assert RoutingSettings(ladders={'default': [rung]}).controller is True
+        assert RoutingSettings().controller is False
+        assert RoutingSettings(controller=False,
+                               ladders={'default': [rung]}).controller is False

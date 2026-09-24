@@ -1,14 +1,20 @@
-# Config 2: claude-tiers plus the small local judges in shadow mode.
+# Config 2: claude-tiers plus the small local judges, labels as tie-breaker.
 #
 # Same [routing] as claude-tiers.toml. The [decisions] table installs the
-# encoder judges for the run (data collection only: in "shadow" mode a
-# judge's verdict is logged in the ledger `decisions` stream next to the
-# heuristic's and never changes behaviour). No sidecar LLM judge is
-# configured; the panel, injection and labels judges need the judge extra
-# (`uv sync --extra judge`) — without it they are skipped with a log line
-# and the run records no judges. `labels` shadows the controller's
-# kind/complexity labels per spawned task (two choice questions over the
-# task text; the encoder picks among the tier/kind descriptions).
+# encoder judges for the run. Mode is "active" but only the `labels` point
+# is listed under [decisions.active]: the panel and injection judges stay
+# shadow (their verdicts are logged in the ledger `decisions` stream next
+# to the heuristic's and never change behaviour). For `labels` the
+# complexity question is a synchronous, margin-gated tie-breaker: the
+# judge's tier replaces the controller's only when it differs and beats
+# the runner-up by `labels_margin` (real cases 2026-09-24: the review the
+# controller called `standard` scored hard 0.57 vs 0.33 and would go to
+# Opus; the 0.44/0.43 explain case would not move). The kind question stays
+# shadow (kind routes nothing while type_router is off). No sidecar LLM
+# judge is configured; the encoder judges need the judge extra
+# (`uv sync --extra judge`) — without it they are skipped with a log line,
+# `labels` falls back to the controller's label (rows say no_judge) and
+# the run records no judges.
 
 [routing]
 mode = "local-and-remote"
@@ -35,9 +41,13 @@ model = "aws/claude-5-5-opus"
 max_complexity = "hard"
 
 [decisions]
-mode = "shadow"
+mode = "active"
+labels_margin = 0.15
 
 [decisions.points]
 panel = "encoder"
 injection = "injection"
 labels = "encoder"
+
+[decisions.active]
+labels = true

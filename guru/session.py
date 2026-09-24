@@ -25,8 +25,9 @@ if TYPE_CHECKING:                     # avoid an import cycle at runtime
 # them); a TaskRecord/TurnRecord carries them so the ledger can tell a
 # smooth task from one that limped to its answer.
 STRUGGLE_KEYS: tuple[str, ...] = (
-    'stall_nudges', 'delegation_nudges', 'compactions', 'tool_errors',
-    'sha_mismatches', 'provider_errors', 'refusals', 'redactions')
+    'stall_nudges', 'delegation_nudges', 'over_read', 'compactions',
+    'tool_errors', 'sha_mismatches', 'provider_errors', 'refusals',
+    'redactions')
 
 
 class SessionState:

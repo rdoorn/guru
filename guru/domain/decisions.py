@@ -6,11 +6,15 @@ heuristic's land as one row per question in the ledger's ``decisions``
 stream. *Active mode*: for the points listed in ``[decisions.active]``,
 :func:`decide` waits (bounded by ``DECISIONS_TIMEOUT_MS``) for the judge and
 returns its answer, falling back to the heuristic on timeout, error or a
-missing judge; every other point stays shadow. Every row says which answer
-was ``used`` and why it fell back (``timeout`` | ``error`` | ``no_judge`` |
-``breaker``), and carries ``queued_ms`` (time the item waited for its
-worker) next to the judge's own ``ms`` so a slow judge can be told from a
-busy worker. Every failure is swallowed and logged.
+missing judge; every other point stays shadow. :func:`decide_choice` is
+the CHOICE variant used as a *tie-breaker*: the judge's top option replaces
+the heuristic only when it differs and beats the runner-up by a margin
+(rows say ``fallback_reason='margin'`` otherwise). Every row says which
+answer was ``used`` and why it fell back (``timeout`` | ``error`` |
+``no_judge`` | ``breaker`` | ``margin``), and carries ``queued_ms`` (time
+the item waited for its worker) next to the judge's own ``ms`` so a slow
+judge can be told from a busy worker. Every failure is swallowed and
+logged.
 Design: docs/plans/2026-09-23-routing-framework-design.md
 
 Two daemon workers, each a ``threading.Thread`` draining a bounded
@@ -35,7 +39,7 @@ import hashlib
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional, Protocol, Union, cast
 
 from guru import config, log, session
@@ -49,7 +53,7 @@ DEFAULT_THRESHOLD = 0.5
 USED_JUDGE, USED_HEURISTIC = 'judge', 'heuristic'
 FALLBACK_TIMEOUT, FALLBACK_ERROR = 'timeout', 'error'
 FALLBACK_NO_JUDGE, FALLBACK_NOT_ACTIVE = 'no_judge', 'not_active'
-FALLBACK_BREAKER = 'breaker'
+FALLBACK_BREAKER, FALLBACK_MARGIN = 'breaker', 'margin'
 QUEUE_MAX = 256                  # items per worker queue before dropping
 _DROP_WARNING_INTERVAL_S = 60.0
 
@@ -318,6 +322,61 @@ def _judge_chosen(point: str, q: Question, a: Optional[Answer]) -> object:
     return a.chosen
 
 
+def _active_judge(point: str, question: Question, heuristic: object,
+                  keys: dict, margin: Optional[float] = None
+                  ) -> tuple[Optional[Judge], str]:
+    """The judge for an active ``point``, or ``(None, reason)`` after
+    writing the fallback row (``no_judge`` | ``breaker``)."""
+    judge = _judges.get(point)
+    if judge is None:
+        log.info('decision %s active but no judge; using heuristic', point)
+        ledger.submit('decisions', _row(
+            point, None, question, None, heuristic, keys, '',
+            mode='active', used=USED_HEURISTIC,
+            fallback_reason=FALLBACK_NO_JUDGE, margin=margin))
+        return None, FALLBACK_NO_JUDGE
+    if _breaker_open(point):
+        ledger.submit('decisions', _row(
+            point, judge, question, None, heuristic, keys, '',
+            mode='active', used=USED_HEURISTIC,
+            fallback_reason=FALLBACK_BREAKER, margin=margin))
+        return None, FALLBACK_BREAKER
+    return judge, ''
+
+
+def _consult(point: str, judge: Judge, question: Question
+             ) -> tuple[Optional[Answer], str, str, int]:
+    """Ask ``judge`` on the active worker within ``DECISIONS_TIMEOUT_MS``.
+
+    Returns ``(answer, error, fallback_reason, queued_ms)``: the answer
+    (None on timeout, error or an undecided judge), the error text, the
+    fallback reason so far (``timeout`` | ``error`` | ``''``) and the
+    queue wait. Notes the outcome on the point's breaker.
+    """
+    timeout_s = max(0.0, float(config.DECISIONS_TIMEOUT_MS)) / 1000.0
+    started: dict = {}
+    put_at = time.monotonic()
+
+    def _call() -> tuple:
+        started['at'] = time.monotonic()
+        return _ask(point, judge, [question])
+    value, exc, timed_out = _run_with_timeout(_call, timeout_s)
+    # Queue wait: put -> call start; a timeout before the call started
+    # waited the whole budget (worker busy, not judge slow).
+    queued_ms = int(1000 * ((started['at'] - put_at) if 'at' in started
+                            else timeout_s))
+    _breaker_note(point, timed_out=timed_out)
+    if timed_out:
+        log.info('judge %s timed out at %s after %d ms (queued %d ms);'
+                 ' using heuristic', getattr(judge, 'name', '?'), point,
+                 config.DECISIONS_TIMEOUT_MS, queued_ms)
+        return None, 'timeout', FALLBACK_TIMEOUT, queued_ms
+    if exc is not None:
+        return None, repr(exc)[:200], FALLBACK_ERROR, queued_ms
+    answers, error = cast(tuple, value)
+    return answers[0], error, '', queued_ms
+
+
 def decide(point: str, question: Question, heuristic: object) -> object:
     """Return the decision for ``question`` at ``point``: the judge's when
     the point is active and its judge answers within
@@ -325,53 +384,18 @@ def decide(point: str, question: Question, heuristic: object) -> object:
 
     Active decisions write one ``decisions`` row (``mode='active'``) with
     ``used='judge'`` or ``used='heuristic'`` plus ``fallback_reason``
-    (``timeout`` | ``error`` | ``no_judge``). Anything else behaves like
-    :func:`shadow` and returns ``heuristic``.
+    (``timeout`` | ``error`` | ``no_judge`` | ``breaker``). Anything else
+    behaves like :func:`shadow` and returns ``heuristic``.
     """
     try:
         if not active(point):
             shadow(point, [question], heuristic)
             return heuristic
-        judge = _judges.get(point)
         keys = _keys()
+        judge, _reason = _active_judge(point, question, heuristic, keys)
         if judge is None:
-            log.info('decision %s active but no judge; using heuristic',
-                     point)
-            ledger.submit('decisions', _row(
-                point, None, question, None, heuristic, keys, '',
-                mode='active', used=USED_HEURISTIC,
-                fallback_reason=FALLBACK_NO_JUDGE))
             return heuristic
-        if _breaker_open(point):
-            ledger.submit('decisions', _row(
-                point, judge, question, None, heuristic, keys, '',
-                mode='active', used=USED_HEURISTIC,
-                fallback_reason=FALLBACK_BREAKER))
-            return heuristic
-        timeout_s = max(0.0, float(config.DECISIONS_TIMEOUT_MS)) / 1000.0
-        started: dict = {}
-        put_at = time.monotonic()
-
-        def _call() -> tuple:
-            started['at'] = time.monotonic()
-            return _ask(point, judge, [question])
-        value, exc, timed_out = _run_with_timeout(_call, timeout_s)
-        # Queue wait: put -> call start; a timeout before the call started
-        # waited the whole budget (worker busy, not judge slow).
-        queued_ms = int(1000 * ((started['at'] - put_at) if 'at' in started
-                                else timeout_s))
-        _breaker_note(point, timed_out=timed_out)
-        if timed_out:
-            log.info('judge %s timed out at %s after %d ms (queued %d ms);'
-                     ' using heuristic', getattr(judge, 'name', '?'), point,
-                     config.DECISIONS_TIMEOUT_MS, queued_ms)
-            answer, error, reason = None, 'timeout', FALLBACK_TIMEOUT
-        elif exc is not None:
-            answer, error, reason = None, repr(exc)[:200], FALLBACK_ERROR
-        else:
-            answers, error = cast(tuple, value)
-            answer = answers[0]
-            reason = ''
+        answer, error, reason, queued_ms = _consult(point, judge, question)
         chosen = _judge_chosen(point, question, answer)
         if chosen is None and not reason:
             reason = FALLBACK_ERROR
@@ -386,6 +410,116 @@ def decide(point: str, question: Question, heuristic: object) -> object:
     except Exception:                            # noqa: BLE001
         log.exc(f'decide failed at {point}; using heuristic')
         return heuristic
+
+
+@dataclass(frozen=True)
+class ChoiceDecision:
+    """The outcome of :func:`decide_choice`.
+
+    ``chosen`` is the option to use (the judge's top option or the
+    heuristic); ``judge_top`` is what the judge would have picked (None
+    when it gave no answer), with its probability ``top`` and the
+    runner-up's ``second`` (None without a distribution). ``used`` and
+    ``fallback_reason`` are the row's fields.
+    """
+    chosen: object
+    heuristic: object
+    used: str
+    fallback_reason: str
+    margin: float
+    judge_top: Optional[str] = None
+    top: Optional[float] = None
+    second: Optional[float] = None
+
+    @property
+    def overrode(self) -> bool:
+        """True when the judge's option replaced the heuristic."""
+        return self.used == USED_JUDGE and self.chosen != self.heuristic
+
+    def describe(self) -> str:
+        """``'judge override standard->hard (0.57 vs 0.33)'`` for an
+        override, ``''`` otherwise (for a route's ``reason`` list)."""
+        if not self.overrode:
+            return ''
+        top = f'{self.top:.2f}' if self.top is not None else '?'
+        second = f'{self.second:.2f}' if self.second is not None else '?'
+        return (f'judge override {self.heuristic}->{self.chosen}'
+                f' ({top} vs {second})')
+
+
+def _ranked(q: Question, a: Optional[Answer]
+            ) -> tuple[Optional[str], Optional[float], Optional[float]]:
+    """``(top_option, p_top, p_second)`` from a choice answer's ``dist``
+    over the question's options; without a usable distribution the
+    judge's ``chosen`` (if it is an option) with unknown probabilities."""
+    if a is None:
+        return None, None, None
+    dist = a.dist if isinstance(a.dist, dict) else {}
+    scored = sorted(((float(v), str(k)) for k, v in dist.items()
+                     if k in q.options and isinstance(v, (int, float))
+                     and not isinstance(v, bool)), reverse=True)
+    if not scored:
+        chosen = a.chosen if (isinstance(a.chosen, str)
+                              and a.chosen in q.options) else None
+        return chosen, None, None
+    top, key = scored[0]
+    second = scored[1][0] if len(scored) > 1 else 0.0
+    return key, top, second
+
+
+def decide_choice(point: str, question: Question, heuristic: object, *,
+                  margin: float) -> ChoiceDecision:
+    """Margin-gated tie-breaker for a CHOICE ``question`` at an active
+    ``point``. Never raises.
+
+    The judge's top option is used only when it differs from
+    ``heuristic`` and its probability beats the runner-up's by at least
+    ``margin`` (a judge that gives no distribution can never override);
+    otherwise the heuristic stands and the row says
+    ``fallback_reason='margin'`` with the judge's top as ``chosen`` so the
+    ledger shows what it would have said. Agreement is a judge decision
+    without override. Timeout, error, no judge and open breaker fall back
+    as :func:`decide` does; the row carries ``margin``. When the point is
+    not active the question is shadowed and the heuristic returned.
+    """
+    base = ChoiceDecision(chosen=heuristic, heuristic=heuristic,
+                          used=USED_HEURISTIC, fallback_reason='',
+                          margin=margin)
+    try:
+        if question.kind != CHOICE:
+            raise ValueError(
+                f'decide_choice needs a {CHOICE} question, got '
+                f'{question.kind!r} ({question.id})')
+        if not active(point):
+            shadow(point, [question], heuristic)
+            return replace(base, fallback_reason=FALLBACK_NOT_ACTIVE)
+        keys = _keys()
+        judge, reason = _active_judge(point, question, heuristic, keys,
+                                      margin=margin)
+        if judge is None:
+            return replace(base, fallback_reason=reason)
+        answer, error, reason, queued_ms = _consult(point, judge, question)
+        top_key, top, second = _ranked(question, answer)
+        if top_key is None and not reason:
+            reason = FALLBACK_ERROR
+            error = error or 'judge undecided'
+        elif not reason and top_key != heuristic and (
+                top is None or second is None or top - second < margin):
+            reason = FALLBACK_MARGIN
+        used = USED_HEURISTIC if reason else USED_JUDGE
+        ledger.submit('decisions', _row(
+            point, judge, question, answer, heuristic, keys, error,
+            mode='active', used=used, fallback_reason=reason,
+            chosen=(top_key if used == USED_JUDGE or reason == FALLBACK_MARGIN
+                    else None),
+            queued_ms=queued_ms, margin=margin))
+        return ChoiceDecision(
+            chosen=top_key if used == USED_JUDGE else heuristic,
+            heuristic=heuristic, used=used, fallback_reason=reason,
+            margin=margin, judge_top=top_key, top=top, second=second)
+    except Exception:                            # noqa: BLE001
+        log.exc(f'decide_choice failed at {point}; using heuristic')
+        return replace(base, fallback_reason=FALLBACK_ERROR)
 
 
 def flush(timeout: Optional[float] = None) -> None:
@@ -422,12 +556,15 @@ def _row(point: str, judge: Optional[Judge], q: Question,
          a: Optional[Answer], heuristic: object, keys: dict, error: str, *,
          mode: str = 'shadow', used: str = USED_HEURISTIC,
          fallback_reason: str = '', chosen: object = None,
-         queued_ms: Optional[int] = None) -> dict:
+         queued_ms: Optional[int] = None,
+         margin: Optional[float] = None) -> dict:
     """One ``decisions`` row. ``chosen`` is the judge's verdict as the seam
     read it: a noul is re-thresholded from ``dist['yes']`` with the point's
     configured threshold (the row's ``threshold``) in shadow and active
     rows alike, so shadow rows preview what the judge would decide; an
-    active fallback row leaves it None."""
+    active fallback row leaves it None (except a ``margin`` fallback, which
+    keeps the judge's top option). ``margin`` is the tie-breaker margin of
+    a :func:`decide_choice` row, None elsewhere."""
     if chosen is None and a is not None and mode == 'shadow':
         chosen = _judge_chosen(point, q, a)
     return {
@@ -445,7 +582,7 @@ def _row(point: str, judge: Optional[Judge], q: Question,
         if (chosen is not None and heuristic is not None) else None,
         'mode': mode, 'used': used, 'fallback_reason': fallback_reason,
         'threshold': threshold(point) if q.kind == NOUL else None,
-        'error': error, 'outcome': None}
+        'margin': margin, 'error': error, 'outcome': None}
 
 
 def _run(point: str, judge: Judge, questions: list, heuristics: list,
@@ -534,7 +671,10 @@ def label_questions(task_text: str) -> list:
     :data:`routing.COMPLEXITY`, described as the controller hint does)
     and its ``kind`` (over :data:`routing.KINDS`). The heuristics are the
     controller's own labels; ``shadow('labels', ..., heuristics=[...])``
-    logs one row per question."""
+    logs one row per question, and with ``labels`` active the
+    orchestrator passes the complexity question to :func:`decide_choice`
+    (the kind stays shadow: it routes nothing while ``type_router`` is
+    off)."""
     state = 'Task: ' + task_text[:LABEL_STATE_CHARS]
     complexity = Question(
         id='complexity', kind=CHOICE,

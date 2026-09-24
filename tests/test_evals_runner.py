@@ -1271,6 +1271,7 @@ def judged(monkeypatch):
         seen['points'] = dict(config.DECISIONS_POINTS)
         seen['active'] = dict(config.DECISIONS_ACTIVE)
         seen['thresholds'] = dict(config.DECISIONS_THRESHOLDS)
+        seen['labels_margin'] = config.DECISIONS_LABELS_MARGIN
         seen['judges'] = dict(seam._judges)
         return _canned_agents()
 
@@ -1294,6 +1295,7 @@ class TestRunSuiteJudges:
         monkeypatch.setattr(config, 'DECISIONS_POINTS', {'stall': 'ollama'})
         monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {})
         monkeypatch.setattr(config, 'DECISIONS_THRESHOLDS', {})
+        monkeypatch.setattr(config, 'DECISIONS_LABELS_MARGIN', 0.15)
         seam.clear_judges()
         yield
         seam.clear_judges()
@@ -1332,6 +1334,19 @@ class TestRunSuiteJudges:
         assert seam._judges == {}
         # persisted and reloadable
         assert runs.load(next(tmp_path.glob('*.json'))).judges == run.judges
+
+    def test_labels_margin_installed_and_restored(
+            self, tmp_path: Path, judged, monkeypatch) -> None:
+        from guru.judges import encoder
+        monkeypatch.setattr(encoder, 'available', lambda: True)
+        self._run(tmp_path, _decisions(mode='active',
+                                       points={'labels': 'encoder'},
+                                       active={'labels': True},
+                                       labels_margin=0.3))
+        assert judged['mode'] == 'active'
+        assert judged['active'] == {'labels': True}
+        assert judged['labels_margin'] == 0.3
+        assert config.DECISIONS_LABELS_MARGIN == 0.15         # restored
 
     def test_unavailable_judges_leave_the_list_empty(
             self, tmp_path: Path, judged, monkeypatch) -> None:

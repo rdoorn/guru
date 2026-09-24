@@ -465,6 +465,12 @@ class TestLabelQuestions:
             assert desc in config.CONTROLLER_HINT
         assert len(set(q.options.values())) == len(q.options)
 
+    def test_complexity_options_carry_the_tier_examples(self) -> None:
+        q = decisions.label_questions('t')[0]
+        assert 'summarise one README section' in q.options['trivial']
+        assert 'fix one failing test in one file' in q.options['standard']
+        assert 'concurrency bugs' in q.options['hard']
+
     def test_kind_options_are_one_line_and_distinct(self) -> None:
         q = decisions.label_questions('t')[1]
         for key, desc in q.options.items():
@@ -526,3 +532,172 @@ class TestShadowPerQuestionHeuristics:
         decisions.shadow('stall', [_noul('a'), _noul('b')], heuristic=True,
                          heuristics=[False, True])
         assert [r['heuristic'] for r in self._rows()] == [False, True]
+
+
+class DistJudge:
+    """Judge answering every choice with a fixed distribution."""
+    name = 'dist-fake'
+
+    def __init__(self, dist: dict, fail: bool = False,
+                 chosen: object = 'argmax') -> None:
+        self.dist, self.fail, self.chosen, self.calls = dist, fail, chosen, []
+
+    def ask(self, questions: list) -> list:
+        self.calls.append(questions)
+        if self.fail:
+            raise RuntimeError('judge exploded')
+        top = (max(self.dist, key=self.dist.get) if self.dist else None)
+        chosen = top if self.chosen == 'argmax' else self.chosen
+        return [decisions.Answer(chosen=chosen, dist=dict(self.dist),
+                                 confidence=0.5, judge=self.name, ms=2)
+                for _ in questions]
+
+
+class TestDecideChoice:
+    """decide_choice(): a margin-gated tie-breaker for CHOICE questions."""
+
+    @pytest.fixture(autouse=True)
+    def _repo(self, fake_repo, monkeypatch) -> None:
+        decisions.clear_judges()
+        decisions.reset_breakers()
+        self.repo = fake_repo
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'active')
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'labels': True})
+        monkeypatch.setattr(config, 'DECISIONS_TIMEOUT_MS', 500)
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+
+    def _rows(self):
+        decisions.flush()
+        ledger.flush()
+        return [r for s, r in self.repo.rows if s == 'decisions']
+
+    def _q(self):
+        return decisions.label_questions('review the adapters')[0]
+
+    def _decide(self, heuristic='standard', margin=0.15):
+        return decisions.decide_choice('labels', self._q(),
+                                       heuristic=heuristic, margin=margin)
+
+    def test_clear_winner_overrides_the_heuristic(self) -> None:
+        decisions.set_judge('labels', DistJudge(
+            {'trivial': 0.10, 'standard': 0.33, 'hard': 0.57}))
+        d = self._decide()
+        assert d.chosen == 'hard' and d.used == 'judge'
+        assert d.overrode is True and d.fallback_reason == ''
+        assert (d.top, d.second) == (0.57, 0.33)
+        assert d.describe() == 'judge override standard->hard (0.57 vs 0.33)'
+        [r] = self._rows()
+        assert r['mode'] == 'active' and r['used'] == 'judge'
+        assert r['chosen'] == 'hard' and r['heuristic'] == 'standard'
+        assert r['agree'] is False and r['margin'] == 0.15
+        assert r['fallback_reason'] == ''
+
+    def test_narrow_margin_keeps_the_heuristic(self) -> None:
+        decisions.set_judge('labels', DistJudge(
+            {'trivial': 0.15, 'standard': 0.40, 'hard': 0.45}))
+        d = self._decide()
+        assert d.chosen == 'standard' and d.used == 'heuristic'
+        assert d.overrode is False and d.fallback_reason == 'margin'
+        assert d.judge_top == 'hard'
+        [r] = self._rows()
+        assert r['used'] == 'heuristic' and r['fallback_reason'] == 'margin'
+        assert r['chosen'] == 'hard'          # what the judge would have said
+        assert r['agree'] is False and r['margin'] == 0.15
+
+    def test_margin_exactly_met_overrides(self) -> None:
+        decisions.set_judge('labels', DistJudge(
+            {'trivial': 0.10, 'standard': 0.35, 'hard': 0.55}))
+        d = self._decide(margin=0.2)
+        assert d.chosen == 'hard' and d.overrode is True
+
+    def test_agreement_is_a_judge_decision_without_override(self) -> None:
+        decisions.set_judge('labels', DistJudge(
+            {'trivial': 0.30, 'standard': 0.40, 'hard': 0.30}))
+        d = self._decide()
+        assert d.chosen == 'standard' and d.used == 'judge'
+        assert d.overrode is False and d.describe() == ''
+        [r] = self._rows()
+        assert r['used'] == 'judge' and r['agree'] is True
+
+    def test_no_distribution_can_never_override(self) -> None:
+        decisions.set_judge('labels', DistJudge({}, chosen='hard'))
+        d = self._decide()
+        assert d.chosen == 'standard' and d.fallback_reason == 'margin'
+        assert d.judge_top == 'hard' and d.top is None
+
+    def test_undecided_judge_is_an_error_fallback(self) -> None:
+        decisions.set_judge('labels', DistJudge({}, chosen=None))
+        d = self._decide()
+        assert d.chosen == 'standard' and d.fallback_reason == 'error'
+        [r] = self._rows()
+        assert r['fallback_reason'] == 'error' and r['chosen'] is None
+
+    def test_timeout_falls_back_to_heuristic(self, monkeypatch) -> None:
+        gate = threading.Event()
+
+        class Slow(DistJudge):
+            def ask(self, questions):
+                gate.wait(5)
+                return super().ask(questions)
+        monkeypatch.setattr(config, 'DECISIONS_TIMEOUT_MS', 50)
+        decisions.set_judge('labels', Slow({'hard': 0.9, 'standard': 0.1}))
+        try:
+            d = self._decide()
+            assert d.chosen == 'standard' and d.used == 'heuristic'
+            assert d.fallback_reason == 'timeout'
+            ledger.flush()
+            [r] = [r for s, r in self.repo.rows if s == 'decisions']
+            assert r['fallback_reason'] == 'timeout' and r['chosen'] is None
+            assert r['margin'] == 0.15
+        finally:
+            gate.set()
+            decisions.flush()
+
+    def test_judge_error_falls_back_to_heuristic(self) -> None:
+        decisions.set_judge('labels', DistJudge({'hard': 0.9}, fail=True))
+        d = self._decide()
+        assert d.chosen == 'standard' and d.fallback_reason == 'error'
+
+    def test_no_judge_falls_back_with_reason(self) -> None:
+        d = self._decide()
+        assert d.chosen == 'standard' and d.fallback_reason == 'no_judge'
+        [r] = self._rows()
+        assert r['fallback_reason'] == 'no_judge' and r['mode'] == 'active'
+
+    def test_not_active_shadows_and_returns_heuristic(self, monkeypatch):
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {})
+        j = DistJudge({'trivial': 0.1, 'standard': 0.2, 'hard': 0.7})
+        decisions.set_judge('labels', j)
+        d = self._decide()
+        assert d.chosen == 'standard' and d.used == 'heuristic'
+        assert d.fallback_reason == 'not_active'
+        [r] = self._rows()
+        assert r['mode'] == 'shadow' and r['chosen'] == 'hard'
+        assert j.calls
+
+    def test_off_mode_is_silent(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
+        j = DistJudge({'hard': 0.9})
+        decisions.set_judge('labels', j)
+        d = self._decide()
+        assert d.chosen == 'standard' and self._rows() == [] and not j.calls
+
+    def test_rejects_non_choice_questions(self) -> None:
+        decisions.set_judge('labels', DistJudge({'hard': 0.9}))
+        d = decisions.decide_choice('labels', _noul(), heuristic='standard',
+                                    margin=0.1)
+        assert d.chosen == 'standard' and d.fallback_reason == 'error'
+
+    def test_never_raises(self, monkeypatch) -> None:
+        monkeypatch.setattr(decisions, '_run_with_timeout',
+                            lambda *a, **k: 1 / 0)
+        decisions.set_judge('labels', DistJudge({'hard': 0.9}))
+        d = self._decide()
+        assert d.chosen == 'standard' and d.fallback_reason == 'error'
+
+    def test_decide_rows_carry_no_margin(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'stall': True})
+        decisions.set_judge('stall', FakeJudge(p_yes=0.9))
+        decisions.decide('stall', _noul(), heuristic=False)
+        [r] = self._rows()
+        assert r['margin'] is None

@@ -1155,51 +1155,65 @@ class TestLocalRetry:
         assert launched == [] and main.queue
 
 
+def _capture_shadow(monkeypatch) -> list:
+    """Replace ``decisions.shadow`` with a recorder; returns the list of
+    ``(point, question ids, states, heuristic, heuristics)`` seen."""
+    from guru.domain import decisions
+    seen: list = []
+
+    def fake_shadow(point, questions, heuristic=None, *, heuristics=None):
+        seen.append((point, [q.id for q in questions],
+                     [q.state for q in questions], heuristic, heuristics))
+    monkeypatch.setattr(decisions, 'shadow', fake_shadow)
+    return seen
+
+
+def _labels_orch(rungs=None):
+    """An orchestrator with one local adapter and a routed main agent;
+    ``rungs`` defaults to a single ``hard`` rung."""
+    from guru.orchestrator import Orchestrator
+    from guru.repositories.adapters import AdapterRegistry
+    from guru.repositories.settings import RoutingSettings, RungSpec
+    registry = AdapterRegistry([_fake_adapter('Local', False)])
+    rungs = rungs or [RungSpec('Local', 'qwen3:14b', 'hard', default=True)]
+    o = Orchestrator(registry=registry, routing=RoutingSettings(
+        ladders={'default': rungs}, spend_confirm='auto'))
+    main = o.manager.active
+    main.busy = True
+    main.state.adapter = registry.get('Local')
+    main.state.model = 'qwen3:32b'
+    return o, main
+
+
+@pytest.fixture
+def labels_isolated(monkeypatch):
+    """Fresh spend/scanner/judge state around a labels-judge test."""
+    from guru.domain import decisions, policy, spend
+    monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+    spend.reset()
+    spend.set_spend_asker(None)
+    policy.set_scanner(None)
+    decisions.clear_judges()
+    yield
+    decisions.clear_judges()
+    spend.reset()
+    spend.set_spend_asker(None)
+    policy.set_scanner(None)
+
+
 class TestLabelsShadow:
     """_plan_child shadows the controller's kind/complexity labels at the
     ``labels`` point, one heuristic per question."""
 
     @pytest.fixture(autouse=True)
-    def _isolate(self, monkeypatch):
-        from guru.domain import decisions, policy, spend
-        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+    def _isolate(self, monkeypatch, labels_isolated):
         monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
-        spend.reset()
-        spend.set_spend_asker(None)
-        policy.set_scanner(None)
-        decisions.clear_judges()
-        yield
-        decisions.clear_judges()
-        spend.reset()
-        spend.set_spend_asker(None)
-        policy.set_scanner(None)
 
     def _seen(self, monkeypatch) -> list:
-        from guru.domain import decisions
-        seen: list = []
-
-        def fake_shadow(point, questions, heuristic=None, *,
-                        heuristics=None):
-            seen.append((point, [q.id for q in questions],
-                         [q.state for q in questions], heuristic,
-                         heuristics))
-        monkeypatch.setattr(decisions, 'shadow', fake_shadow)
-        return seen
+        return _capture_shadow(monkeypatch)
 
     def _orch(self):
-        from guru.orchestrator import Orchestrator
-        from guru.repositories.adapters import AdapterRegistry
-        from guru.repositories.settings import RoutingSettings, RungSpec
-        registry = AdapterRegistry([_fake_adapter('Local', False)])
-        o = Orchestrator(registry=registry, routing=RoutingSettings(
-            ladders={'default': [RungSpec('Local', 'qwen3:14b', 'hard',
-                                          default=True)]},
-            spend_confirm='auto'))
-        main = o.manager.active
-        main.busy = True
-        main.state.adapter = registry.get('Local')
-        main.state.model = 'qwen3:32b'
-        return o, main
+        return _labels_orch()
 
     def test_spawn_shadows_normalised_labels_per_question(
             self, monkeypatch, fake_repo) -> None:
@@ -1258,3 +1272,116 @@ class TestLabelsShadow:
         assert rows['kind']['heuristic'] == 'explain'
         assert rows['kind']['chosen'] == 'debug'
         assert rows['kind']['agree'] is False
+
+
+class TestLabelsTieBreaker:
+    """With ``[decisions] mode = "active"`` and ``labels`` active,
+    ``_plan_child`` lets the judge break a complexity tie by margin; the
+    ``kind`` question stays shadow."""
+
+    @pytest.fixture(autouse=True)
+    def _active(self, monkeypatch, labels_isolated):
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'active')
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'labels': True})
+        monkeypatch.setattr(config, 'DECISIONS_LABELS_MARGIN', 0.15)
+        monkeypatch.setattr(config, 'DECISIONS_TIMEOUT_MS', 500)
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+
+    class _Dist:
+        name = 'dist'
+
+        def __init__(self, dist: dict) -> None:
+            self.dist, self.calls = dist, []
+
+        def ask(self, questions):
+            from guru.domain import decisions
+            self.calls.append([q.id for q in questions])
+            out = []
+            for q in questions:
+                if q.id == 'complexity':
+                    dist = dict(self.dist)
+                else:
+                    dist = {k: (0.9 if k == 'review' else 0.01)
+                            for k in q.options}
+                out.append(decisions.Answer(
+                    chosen=max(dist, key=dist.get), dist=dist,
+                    confidence=0.5, judge=self.name, ms=1))
+            return out
+
+    def _rows(self, fake_repo) -> dict:
+        from guru.domain import decisions
+        decisions.flush()
+        ledger.flush()
+        return {r['question']: r for s, r in fake_repo.rows
+                if s == 'decisions' and r['point'] == 'labels'}
+
+    def _orch(self):
+        return _labels_orch()
+
+    def test_judge_override_routes_and_records_the_reason(self, fake_repo):
+        from guru.domain import decisions
+        judge = self._Dist({'trivial': 0.10, 'standard': 0.33, 'hard': 0.57})
+        decisions.set_judge('labels', judge)
+        o, main = self._orch()
+        child = o._make_child(main, 'review the adapters', kind='review',
+                              complexity='standard')
+        assert child is not None
+        assert child.task_rec.complexity == 'hard'
+        assert child.task_rec.route['complexity'] == 'hard'
+        assert ('labels:judge override standard->hard (0.57 vs 0.33)'
+                in child.task_rec.reason)
+        rows = self._rows(fake_repo)
+        assert rows['complexity']['mode'] == 'active'
+        assert rows['complexity']['used'] == 'judge'
+        assert rows['complexity']['chosen'] == 'hard'
+        assert rows['kind']['mode'] == 'shadow'          # kind stays shadow
+        assert rows['kind']['fallback_reason'] == 'not_active'
+        assert rows['kind']['heuristic'] == 'review'
+        # one synchronous complexity ask, one background kind ask
+        assert sorted(judge.calls) == [['complexity'], ['kind']]
+
+    def test_narrow_margin_keeps_the_controller_label(self, fake_repo):
+        from guru.domain import decisions
+        decisions.set_judge('labels', self._Dist(
+            {'trivial': 0.15, 'standard': 0.40, 'hard': 0.45}))
+        o, main = self._orch()
+        child = o._make_child(main, 'review the adapters', kind='review',
+                              complexity='standard')
+        assert child.task_rec.complexity == 'standard'
+        assert not any(r.startswith('labels:') for r in child.task_rec.reason)
+        rows = self._rows(fake_repo)
+        assert rows['complexity']['fallback_reason'] == 'margin'
+        assert rows['complexity']['margin'] == 0.15
+
+    def test_override_feeds_the_route(self, fake_repo) -> None:
+        """The judge's tier picks the rung: standard->hard climbs the
+        ladder."""
+        from guru.domain import decisions
+        from guru.repositories.settings import RungSpec
+        decisions.set_judge('labels', self._Dist(
+            {'trivial': 0.05, 'standard': 0.25, 'hard': 0.70}))
+        o, main = _labels_orch([
+            RungSpec('Local', 'small', 'standard', default=True),
+            RungSpec('Local', 'big', 'hard')])
+        child = o._make_child(main, 'review it', kind='review',
+                              complexity='standard')
+        assert child.state.model == 'big'
+        assert child.task_rec.route['rung_index'] == 1
+
+    def test_local_retry_asks_no_judge(self, fake_repo) -> None:
+        from guru.domain import decisions
+        judge = self._Dist({'hard': 0.9, 'standard': 0.05, 'trivial': 0.05})
+        decisions.set_judge('labels', judge)
+        o, main = self._orch()
+        plan = o._plan_child(main, 't', 'review', 'standard',
+                             local_only=True)
+        assert plan.complexity == 'standard' and judge.calls == []
+
+    def test_labels_not_active_keeps_shadowing_both(self, monkeypatch,
+                                                    fake_repo) -> None:
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'stall': True})
+        seen = _capture_shadow(monkeypatch)
+        o, main = self._orch()
+        o._make_child(main, 'review it', kind='review', complexity='standard')
+        assert [(s[0], s[1], s[4]) for s in seen] == [
+            ('labels', ['complexity', 'kind'], ['standard', 'review'])]

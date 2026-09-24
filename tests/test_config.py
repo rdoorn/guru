@@ -87,6 +87,35 @@ class TestControllerHint:
                      'whole codebase'):
             assert word in hint, word
 
+    def test_concrete_tier_examples_from_the_real_cases(self) -> None:
+        """Each tier carries examples drawn from the 2026-09-24 real
+        cases (triage: labels were the weak spot)."""
+        hint = config.CONTROLLER_HINT
+        for phrase in (
+                # trivial
+                'summarise one README section',
+                'find where a function is defined and who calls it',
+                'explain a shell command',
+                # standard
+                'explain how one function or one module works',
+                'fix one failing test in one file',
+                'add a small CLI flag plus a test',
+                # hard
+                'review several modules for consistency, security or error'
+                ' handling',
+                'explain an algorithm that spans multiple files with its'
+                ' measurements and persistence',
+                'concurrency bugs', 'architecture'):
+            assert phrase in hint, phrase
+
+    def test_examples_sit_under_their_own_tier(self) -> None:
+        from guru.domain import routing
+        d = routing.COMPLEXITY_DESCRIPTIONS
+        assert 'summarise one README section' in d['trivial']
+        assert 'fix one failing test in one file' in d['standard']
+        assert 'concurrency bugs' in d['hard']
+        assert 'architecture' in d['hard']
+
 
 class TestModelCtxStore:
     """Per-model context persistence (~/.guru/model_ctx.json)."""
@@ -208,6 +237,7 @@ class TestDecisionsAndLedgerSettings:
                               ('DECISIONS_ACTIVE', {}),
                               ('DECISIONS_THRESHOLDS', {}),
                               ('DECISIONS_TIMEOUT_MS', 1500),
+                              ('DECISIONS_LABELS_MARGIN', 0.15),
                               ('DECISIONS_SIDECAR_MODEL', 'qwen3:4b'),
                               ('LEDGER_ENABLED', True),
                               ('PRICING_OVERRIDES', {})):
@@ -225,9 +255,20 @@ class TestDecisionsAndLedgerSettings:
     def test_defaults(self) -> None:
         assert config.DECISIONS_MODE == 'off'
         assert config.DECISIONS_POINTS == {}
+        assert config.DECISIONS_LABELS_MARGIN == 0.15
+        assert config.OVER_READ_LIMIT == 8
         assert config.LEDGER_ENABLED is True
         assert config.LEDGER_DIR == config.GURU_HOME / 'ledger'
         assert config.PRICING_OVERRIDES == {}
+
+    def test_labels_margin_read_and_validated(
+            self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch,
+                    '[decisions]\nmode = "active"\nlabels_margin = 0.3\n')
+        assert config.DECISIONS_LABELS_MARGIN == 0.3
+        self._apply(tmp_path, monkeypatch,
+                    '[decisions]\nlabels_margin = "wide"\n')
+        assert config.DECISIONS_LABELS_MARGIN == 0.15      # kept
 
     def test_reads_all_three_tables(self, tmp_path, monkeypatch) -> None:
         self._apply(tmp_path, monkeypatch, (

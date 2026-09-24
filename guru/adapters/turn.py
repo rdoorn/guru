@@ -7,6 +7,9 @@ module owns the shared skeleton so all adapters get the same behaviour:
 
 * cancel checks (between rounds, and mid-stream where the adapter supports it),
 * the act-nudge that pokes a model which announced an action but ran no tool,
+* the delegation nudges (end of turn after a broad read-heavy answer, and
+  the mid-turn over-read guard after ``config.OVER_READ_LIMIT`` distinct
+  files without a spawn),
 * duplicate-call suppression, and
 * final-answer rendering.
 
@@ -87,11 +90,39 @@ def _single_target_request(request: str) -> bool:
     return len(set(_FILE_TOKEN_RE.findall(request))) <= 1
 
 
-def _distinct_reads() -> int:
-    """Distinct paths this conversation read with the read tools (by the
-    ``path`` argument recorded on tool messages); -1 once a spawn ran."""
+def _is_nudge(text: str) -> bool:
+    """True for a user message the loop itself injected (act, delegation
+    or over-read nudge)."""
+    return (text in (_NUDGE_TEXT, _DELEGATION_TEXT)
+            or text.endswith(_DELEGATION_TEXT))
+
+
+def _over_read_text(n: int) -> str:
+    """The over-read nudge: how many files were read, then the delegation
+    text (``_is_nudge`` recognises it by its suffix)."""
+    return f'You have read {n} files without delegating. ' + _DELEGATION_TEXT
+
+
+def _turn_start() -> int:
+    """Index in ``session.messages`` of this turn's request (the last user
+    message that is not a nudge); 0 when there is none."""
+    for i in range(len(session.messages) - 1, -1, -1):
+        m = session.messages[i]
+        if not isinstance(m, dict) or m.get('role') != 'user':
+            continue
+        text = (m.get('content') or '').strip()
+        if text and not _is_nudge(text):
+            return i
+    return 0
+
+
+def _distinct_reads(start: int = 0) -> int:
+    """Distinct paths read with the read tools (by the ``path`` argument
+    recorded on tool messages) from ``session.messages[start:]`` on — the
+    whole conversation by default, this turn with ``_turn_start()``; -1
+    once a spawn ran in that span."""
     paths: set = set()
-    for m in session.messages:
+    for m in session.messages[start:]:
         if not isinstance(m, dict) or m.get('role') != 'tool':
             continue
         name = m.get('tool_name', '')
@@ -122,6 +153,18 @@ def _should_delegate() -> bool:
     return not _single_target_request(_turn_request())
 
 
+def _over_read() -> int:
+    """How many distinct files a delegation-capable main agent has read
+    this turn once that reaches ``config.OVER_READ_LIMIT`` without a spawn
+    (the cue for the mid-turn over-read nudge); 0 otherwise. Never for a
+    controller or a sub-agent; 0 disables the guard."""
+    if (session.controller or not session.can_spawn
+            or config.OVER_READ_LIMIT <= 0):
+        return 0
+    reads = _distinct_reads(_turn_start())
+    return reads if reads >= config.OVER_READ_LIMIT else 0
+
+
 def looks_like_preamble(content: str) -> bool:
     """True if text announces an action instead of answering — a short
     'Let me… / I'll…' preamble, or one trailing off into a promised list.
@@ -140,7 +183,7 @@ def _turn_request() -> str:
         if not isinstance(m, dict) or m.get('role') != 'user':
             continue
         text = (m.get('content') or '').strip()
-        if text and text not in (_NUDGE_TEXT, _DELEGATION_TEXT):
+        if text and not _is_nudge(text):
             return text
     return ''
 
@@ -241,6 +284,7 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list) -> str:
     called: set = set()
     nudged = 0
     delegation_nudged = False
+    over_read_nudged = False
     panel_asked = False
     while True:
         if session.cancel_requested:
@@ -315,3 +359,17 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list) -> str:
             # results.
             ui.console.print("[dim]\\[waiting for sub-agents][/dim]")
             return ''
+        if nudge and not over_read_nudged:
+            reads = _over_read()
+            if reads:
+                # Over-read guard (triage 2026-09-24): the model is reading
+                # the codebase itself instead of delegating; tell it now,
+                # once, rather than after it has read everything.
+                over_read_nudged = True
+                ledger.bump('over_read')
+                ui.console.print(
+                    f"[dim yellow]\\[DELEGATE][/dim yellow] {reads} files"
+                    " read, no sub-agents — asking it to spawn a domain"
+                    " panel")
+                add_user(_over_read_text(reads))
+                continue

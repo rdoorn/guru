@@ -12,7 +12,7 @@ which `Adapter|model` each case's sub-agents ran on, and the summary's
 |---|---|---|---|
 | 0 | plain Sonnet, no routing | Sonnet (inherited) | none |
 | 1 | Sonnet controller | Claude tiers by complexity | `claude-tiers.toml` |
-| 2 | Sonnet controller | Claude tiers by complexity | `claude-tiers-judges.toml` |
+| 2 | Sonnet controller | Claude tiers by complexity, labels judge breaks ties | `claude-tiers-judges.toml` |
 
 Configs 1 and 2 carry the same ladder: trivial tasks on
 `SBP Litellm|aws/claude-4-5-haiku`, standard on
@@ -20,11 +20,22 @@ Configs 1 and 2 carry the same ladder: trivial tasks on
 `SBP Litellm|aws/claude-5-5-opus`. Both set `controller = true` (the main
 agent only spawns, checks and joins), `spend_confirm = "auto"` (no prompt;
 `--allow-spend` is still required, see below) and `secret_scan = true`.
-Config 2 adds a `[decisions]` table: `mode = "shadow"` with the `panel`
-point on the `encoder` judge and the `injection` point on the `injection`
-judge, no sidecar LLM. In shadow mode the judges only log their verdicts
-next to the heuristic's in the ledger `decisions` stream (data collection
-for the review loop); they never change what the run does.
+Config 2 adds a `[decisions]` table: `mode = "active"` with the `panel`
+point on the `encoder` judge, the `injection` point on the `injection`
+judge and the `labels` point on the `encoder` judge, no sidecar LLM. Only
+`labels` is listed under `[decisions.active]`, so panel and injection stay
+shadow: they log their verdicts next to the heuristic's in the ledger
+`decisions` stream and never change what the run does. `labels` is an
+active *tie-breaker* for the controller's complexity label: the judge's
+tier routes the task only when it differs from the controller's and beats
+the runner-up by `labels_margin = 0.15` (real cases 2026-09-24: the
+adapter review labelled `standard` scored hard 0.57 vs 0.33 and moves to
+Opus; the GPU explanation at 0.44/0.43 stays where the controller put it).
+An override is recorded in the task row's `reason` as
+`labels:judge override standard->hard (0.57 vs 0.33)`; a judge that lost
+on margin leaves a `decisions` row with `fallback_reason = "margin"`. The
+kind question stays shadow (kind routes nothing while `type_router` is
+off).
 
 The `adapter` in every rung must match the `name` of an `[[adapter]]` in
 `~/.guru/adapters.toml` exactly (here `SBP Litellm`); a rung on an unknown
@@ -55,10 +66,10 @@ every rung here is remote, sub-agents fall back to the controller's own
     --routing evals/routing/claude-tiers.toml \
     --allow-spend --note '1: claude tiers'
 
-# 2: as 1, plus panel/injection judges in shadow
+# 2: as 1, plus panel/injection judges in shadow and the labels tie-breaker
 .venv/bin/python -m guru.evals run --model 'SBP Litellm|aws/claude-5-sonnet' \
     --routing evals/routing/claude-tiers-judges.toml \
-    --allow-spend --note '2: claude tiers + shadow judges'
+    --allow-spend --note '2: claude tiers + judges, labels tie-breaker'
 
 # then
 .venv/bin/python -m guru.evals compare evals/runs/<0>.json evals/runs/<1>.json
@@ -89,6 +100,14 @@ that triage apply to every config here: a `join` that opens a barrier
 ends the controller's turn (no more polling rounds), and the delegation
 nudge fires only after three distinct files were read on a request that
 is not a single-file edit, never for a controller.
+
+Since the 2026-09-24 real-case runs (`evals/triage/2026-09-24-real-cases.md`):
+the controller hint carries concrete examples per tier, `labels` in config
+2 is an active tie-breaker (above), a non-controller main agent that reads
+eight distinct files in one turn without spawning is nudged to delegate
+mid-turn (`config.OVER_READ_LIMIT`, struggle counter `over_read`), and
+`controller` defaults to on whenever a ladder is configured (both files
+here still set it explicitly).
 
 ## Runs (2026-09-23, git 8296e89)
 

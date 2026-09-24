@@ -190,7 +190,7 @@ class TestAccumulators:
         assert st.unpriced_calls == 0 and st.last_error == ''
         assert st.struggle == {k: 0 for k in session.STRUGGLE_KEYS}
         assert set(session.STRUGGLE_KEYS) == {
-            'stall_nudges', 'delegation_nudges', 'compactions',
+            'stall_nudges', 'delegation_nudges', 'over_read', 'compactions',
             'tool_errors', 'sha_mismatches', 'provider_errors', 'refusals',
             'redactions'}
 

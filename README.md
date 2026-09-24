@@ -164,19 +164,29 @@ mode = "shadow"                 # off | shadow | active
 sidecar_model = "qwen3:4b"      # Ollama model for the "ollama" judge (~3.5 GB resident)
 sidecar_url = "http://localhost:11434"
 timeout_ms = 1500               # active: max wait for a judge per decision
+labels_margin = 0.15            # active labels: judge's top tier must beat the
+                                #   runner-up by this much to override
 [decisions.points]              # decision point -> judge spec
 stall = "ollama"                # small decoder, JSON-constrained answer
 panel = "encoder"               # zero-shot NLI encoder (needs the extra)
 injection = "injection"         # prompt-injection classifier (needs the extra)
+labels = "encoder"              # the controller's kind/complexity labels
 [decisions.active]              # active mode only: which points the judge decides
 stall = true
+labels = true
 [decisions.thresholds]          # P(yes) at or above which a judge says yes
 stall = 0.6
 ```
 
-Today only the `stall` point can act on a judge's verdict (whether a turn is
-nudged); `panel` and `injection` are shadow-only until the review loop
-promotes them. The promotion rule (100+ labelled rows, judge beats the
+Two points can act on a judge's verdict: `stall` (whether a turn is
+nudged) and `labels`, a margin-gated *tie-breaker* for the complexity label
+a controller puts on a spawned task — the judge's tier routes the task
+only when it differs from the controller's and beats the runner-up by
+`labels_margin`; the task row's `reason` then says
+`labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
+lost on margin leaves a row with `fallback_reason = "margin"` (the kind
+label is only observed). `panel` and `injection` are shadow-only until the
+review loop promotes them. The promotion rule (100+ labelled rows, judge beats the
 heuristic, acceptable false-positive rate) and the labelling procedure are in
 `docs/review-loop.md`.
 
@@ -212,7 +222,8 @@ fills in — `kind` (`debug`, `build`, `refactor`, `review`, `explain`, `docs`,
 ```toml
 [routing]
 mode = "local-and-remote"   # local-only | local-and-remote | remote-only
-controller = false          # main agent only coordinates (see below)
+controller = true           # main agent only coordinates (see below);
+                            # default: on when any ladder rung is configured
 complexity_router = true    # pick the lowest rung that covers the complexity
 type_router = false         # use the per-kind ladders below (default: no)
 spend_confirm = "ask"       # ask | auto | never
@@ -271,10 +282,17 @@ verbatim in the task row's `reason` (and its `route`).
 coordinator: it converses, clarifies, decomposes with
 `spawn(task, kind, complexity, role, skill)`, polls with `check`, waits with
 `join` and synthesises — and never executes a task itself. Its tool set is
-exactly `spawn`, `check`, `join`, `use_skill` (no file or web tools). A
-controller that does the work anyway is measured, not punished: the turn row
-carries `controller_executed = true` when it attempted any other tool or
-answered with more than 600 characters without spawning.
+exactly `spawn`, `check`, `join`, `use_skill` (no file or web tools). The
+key defaults to on as soon as any ladder rung is configured (a ladder
+without a controller is the configuration that over-read in the
+2026-09-24 real cases); set `controller = false` next to a ladder to keep
+the main agent hands-on, and it is off without a ladder. A controller
+that does the work anyway is measured, not punished: the turn row carries
+`controller_executed = true` when it attempted any other tool or answered
+with more than 600 characters without spawning. A hands-on main agent has
+an over-read guard instead: after `OVER_READ_LIMIT` (8) distinct files
+read in one turn without a spawn it is told, once, to delegate
+(struggle counter `over_read`).
 
 **Spend confirmation.** In `ask` mode the first task that would run on a
 remote (paid) *ladder rung* asks once per run — "Allow remote model spend for this
