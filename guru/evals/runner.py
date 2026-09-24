@@ -250,10 +250,14 @@ def files_changed(repo: Path) -> list[str]:
 def _fixture_env(repo: Path) -> dict:
     """The environment for the fixture's pytest: ``PYTHONPATH`` starts with
     the copy, so a copied package (a git fixture of a real project, which
-    has no venv of its own) shadows any installed one."""
+    has no venv of its own) shadows any installed one, and bytecode writing
+    is off so edits between two runs are never masked by a cached .pyc."""
     env = dict(os.environ)
     prev = env.get('PYTHONPATH', '')
     env['PYTHONPATH'] = str(repo) + (os.pathsep + prev if prev else '')
+    # No bytecode in the copy: a stale .pyc (same size and mtime second as
+    # an edited source) would make the fixture's tests report the old code.
+    env['PYTHONDONTWRITEBYTECODE'] = '1'
     return env
 
 

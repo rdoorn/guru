@@ -1568,6 +1568,7 @@ class TestGitFixture:
         assert env['PYTHONPATH'] == f'{tmp_path}{os.pathsep}/elsewhere'
         monkeypatch.delenv('PYTHONPATH')
         assert runner._fixture_env(tmp_path)['PYTHONPATH'] == str(tmp_path)
+        assert runner._fixture_env(tmp_path)['PYTHONDONTWRITEBYTECODE'] == '1'
 
     def test_run_case_records_fixture_git_in_observed(self, tmp_path, repo,
                                                       canned) -> None:
