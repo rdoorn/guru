@@ -15,6 +15,7 @@ Config (adapters.toml):
     # models = ["azure/gpt-4.1", "anthropic/claude-..."]  # optional allowlist
 """
 import json
+import math
 import os
 import time
 
@@ -189,25 +190,20 @@ class LiteLLMAdapter(Adapter):
 
     # --- ledger --------------------------------------------------------------
 
-    def _record_call(self, phase: str, resp, seconds: float) -> None:
-        """Write one CallRecord. A LiteLLM proxy's per-response cost, when it
-        exposes one, is on ``resp._hidden_params['response_cost']``; it wins
-        over the price table. Never raises into the turn."""
+    def _record_call(self, phase: str, resp, seconds: float,
+                     cost_header=None) -> None:
+        """Write one CallRecord. ``cost_header`` is the proxy's per-response
+        cost (from :func:`_complete`); it wins over the price table. Never
+        raises into the turn."""
         try:
             usage = getattr(resp, 'usage', None)
-            hidden = getattr(resp, '_hidden_params', None)
-            header_cost = hidden.get('response_cost') \
-                if isinstance(hidden, dict) else None
             ledger.record_call(
                 adapter=self.name, model=session.model,
                 usage=pricing.Usage(
                     input_tokens=getattr(usage, 'prompt_tokens', 0) or 0,
                     output_tokens=getattr(
                         usage, 'completion_tokens', 0) or 0),
-                seconds=seconds, phase=phase,
-                cost_header=float(header_cost)
-                if isinstance(header_cost, (int, float))
-                and not isinstance(header_cost, bool) else None)
+                seconds=seconds, phase=phase, cost_header=cost_header)
         except Exception:                                # noqa: BLE001
             log.exc('litellm call record failed')
 
@@ -223,7 +219,8 @@ class LiteLLMAdapter(Adapter):
             or None on error (printed) — the shared loop handles cancel."""
             t0 = time.perf_counter()
             try:
-                resp = client.chat.completions.create(
+                resp, cost = _complete(
+                    client,
                     model=session.model,
                     messages=native,
                     tools=oa_tools or None,
@@ -241,7 +238,8 @@ class LiteLLMAdapter(Adapter):
                     getattr(usage, 'completion_tokens', 0) or 0)
                 session.ctx_used = (
                     getattr(usage, 'prompt_tokens', 0) or session.ctx_used)
-            self._record_call('step', resp, time.perf_counter() - t0)
+            self._record_call(
+                'step', resp, time.perf_counter() - t0, cost)
 
             msg = resp.choices[0].message
             text = msg.content or ''
@@ -305,7 +303,8 @@ class LiteLLMAdapter(Adapter):
     def summarise(self, transcript: str) -> str:
         try:
             t0 = time.perf_counter()
-            resp = self._client().chat.completions.create(
+            resp, cost = _complete(
+                self._client(),
                 model=session.model,
                 max_tokens=1024,
                 messages=[
@@ -321,12 +320,39 @@ class LiteLLMAdapter(Adapter):
                     {'role': 'user', 'content': transcript},
                 ],
             )
-            self._record_call('summarise', resp, time.perf_counter() - t0)
+            self._record_call(
+                'summarise', resp, time.perf_counter() - t0, cost)
             return (resp.choices[0].message.content or '').strip() \
                 or '(summary unavailable)'
         except Exception as e:
             _note_error(e)
             return f'(summary failed: {e})'
+
+
+_COST_HEADER = 'x-litellm-response-cost'
+
+
+def _complete(client, **kwargs) -> tuple:
+    """Run one chat completion; return ``(response, cost_or_None)``.
+
+    Goes through ``with_raw_response`` so the proxy's HTTP headers are
+    visible: a LiteLLM proxy reports the per-call price in
+    ``x-litellm-response-cost``. The ``openai`` client never populates the
+    litellm SDK's ``_hidden_params``, so the header is the only source.
+    Exceptions from the call propagate to the caller unchanged.
+    """
+    raw = client.chat.completions.with_raw_response.create(**kwargs)
+    return raw.parse(), _header_cost(getattr(raw, 'headers', None))
+
+
+def _header_cost(headers):
+    """Parse the cost header to a float; None when absent or malformed."""
+    try:
+        value = headers.get(_COST_HEADER) if headers is not None else None
+        cost = float(value) if value not in (None, '') else None
+        return cost if cost is not None and math.isfinite(cost) else None
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def _note_error(e: Exception) -> None:

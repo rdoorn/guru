@@ -826,29 +826,25 @@ class TestCallRecords:
 
     # --- litellm -------------------------------------------------------------
 
-    def _litellm(self, monkeypatch, resp):
+    def _litellm(self, monkeypatch, resp, headers=None):
         a = lite.LiteLLMAdapter(base_url='http://proxy')
-        client = SimpleNamespace(chat=SimpleNamespace(
-            completions=SimpleNamespace(create=lambda **kw: resp)))
-        monkeypatch.setattr(a, '_client', lambda: client)
+        monkeypatch.setattr(
+            a, '_client', lambda: _fake_openai_client(resp, headers))
         return a
 
-    def _litellm_resp(self, text='hi', hidden=None, **usage):
-        resp = SimpleNamespace(
+    def _litellm_resp(self, text='hi', **usage):
+        return SimpleNamespace(
             usage=SimpleNamespace(**usage),
             choices=[SimpleNamespace(
                 message=SimpleNamespace(content=text, tool_calls=None),
                 finish_reason='stop')])
-        if hidden is not None:
-            resp._hidden_params = hidden
-        return resp
 
     def test_litellm_step_prefers_cost_header(
             self, monkeypatch, fake_repo) -> None:
         repo = self._arm(monkeypatch, fake_repo)
         a = self._litellm(monkeypatch, self._litellm_resp(
-            prompt_tokens=10, completion_tokens=5,
-            hidden={'response_cost': 0.002}))
+            prompt_tokens=10, completion_tokens=5),
+            headers={'x-litellm-response-cost': '0.002'})
         a.run_turn()
         [row] = self._calls(repo)
         assert row['adapter'] == 'LiteLLM' and row['phase'] == 'step'
@@ -859,8 +855,17 @@ class TestCallRecords:
             self, monkeypatch, fake_repo) -> None:
         repo = self._arm(monkeypatch, fake_repo)
         a = self._litellm(monkeypatch, self._litellm_resp(
-            prompt_tokens=10, completion_tokens=5,
-            hidden={'response_cost': 'n/a'}))
+            prompt_tokens=10, completion_tokens=5))
+        a.run_turn()
+        [row] = self._calls(repo)
+        assert row['cost_source'] in ('table', 'unknown')
+
+    def test_litellm_step_ignores_non_numeric_cost_header(
+            self, monkeypatch, fake_repo) -> None:
+        repo = self._arm(monkeypatch, fake_repo)
+        a = self._litellm(monkeypatch, self._litellm_resp(
+            prompt_tokens=10, completion_tokens=5),
+            headers={'x-litellm-response-cost': 'n/a'})
         a.run_turn()
         [row] = self._calls(repo)
         assert row['cost_source'] in ('table', 'unknown')
@@ -869,11 +874,24 @@ class TestCallRecords:
             self, monkeypatch, fake_repo) -> None:
         repo = self._arm(monkeypatch, fake_repo)
         a = self._litellm(monkeypatch, self._litellm_resp(
-            text='sum', prompt_tokens=8, completion_tokens=2,
-            hidden={'response_cost': 0.001}))
+            text='sum', prompt_tokens=8, completion_tokens=2),
+            headers={'x-litellm-response-cost': '0.001'})
         assert a.summarise('long transcript') == 'sum'
         [row] = self._calls(repo)
         assert row['phase'] == 'summarise' and row['cost_usd'] == 0.001
+        assert row['cost_source'] == 'header'
+
+
+def _fake_openai_client(resp=None, headers=None, create=None):
+    """Fake ``openai.OpenAI`` exposing only what the LiteLLM adapter calls:
+    ``chat.completions.with_raw_response.create`` -> raw with ``.parse()``
+    and dict-like ``.headers``. ``create`` overrides the call (for raising)."""
+    def _create(**kw):
+        if create is not None:
+            create(**kw)
+        return SimpleNamespace(parse=lambda: resp, headers=headers or {})
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        with_raw_response=SimpleNamespace(create=_create))))
 
 
 class TestStruggleCounters(TestCallRecords):
@@ -931,9 +949,8 @@ class TestStruggleCounters(TestCallRecords):
     def test_litellm_step_error(self, monkeypatch, fake_repo) -> None:
         self._fresh(monkeypatch, fake_repo)
         a = lite.LiteLLMAdapter(base_url='http://proxy')
-        client = SimpleNamespace(chat=SimpleNamespace(
-            completions=SimpleNamespace(
-                create=self._raising(ConnectionError('refused')))))
+        client = _fake_openai_client(
+            create=self._raising(ConnectionError('refused')))
         monkeypatch.setattr(a, '_client', lambda: client)
         a.run_turn()
         assert session.struggle['provider_errors'] == 1
@@ -942,9 +959,8 @@ class TestStruggleCounters(TestCallRecords):
     def test_litellm_summarise_error(self, monkeypatch, fake_repo) -> None:
         self._fresh(monkeypatch, fake_repo)
         a = lite.LiteLLMAdapter(base_url='http://proxy')
-        client = SimpleNamespace(chat=SimpleNamespace(
-            completions=SimpleNamespace(
-                create=self._raising(ConnectionError('refused')))))
+        client = _fake_openai_client(
+            create=self._raising(ConnectionError('refused')))
         monkeypatch.setattr(a, '_client', lambda: client)
         assert a.summarise('t').startswith('(summary failed')
         assert session.struggle['provider_errors'] == 1
