@@ -13,3 +13,8 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-23T20:18:12+00:00 | 3bff8cb9eb58 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers+controller | 0/9 | 0.6 | n/a | config 1 rerun: controller knows cwd, complexity guidance |
 | 2026-09-23T20:21:20+00:00 | c7473cbe8524 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers+controller | 8/9 | 38.9 | $1.21 | config 1 rerun: controller knows cwd, complexity guidance |
 | 2026-09-23T20:28:43+00:00 | ad9f5e9caece | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers+controller | 9/9 | 29.1 | $0.77 | config 3: haiku controller, claude tiers |
+| 2026-09-24T07:57:12+00:00 | 807a96827d02 | SBP Litellm\|aws/claude-5-sonnet@125k | 2/3 | 352.8 | $8.20 | config 0 real cases: plain sonnet |
+| 2026-09-24T08:07:59+00:00 | 475fe1576de0 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers-judges+controller | 3/3 | 184.4 | $4.71 | sonnet controller + tiers + judges, real cases |
+| 2026-09-24T08:07:47+00:00 | 65a0ce16e651 | SBP Litellm\|aws/claude-5-5-opus@125k | 3/3 | 196.2 | $12.38 | config 0-opus real cases: plain opus 5.5 |
+| 2026-09-24T08:15:16+00:00 | 125934108305 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 166.7 | $2.78 | config 3+judges real cases: haiku controller |
+| 2026-09-24T08:18:00+00:00 | 974716735cf6 | SBP Litellm\|aws/claude-5-5-opus@125k+routed:claude-tiers-judges+controller | 2/3 | 131.5 | $3.77 | opus controller + tiers + judges, real cases |

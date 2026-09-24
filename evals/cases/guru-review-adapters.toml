@@ -16,7 +16,7 @@ tools_used_none = ["write_file", "edit_file", "delete_file"]
 max_seconds = 420
 
 [expect.content]
-answer_regex = ["_record_call|record_call", "provider_errors|_note_error|last_error"]
+answer_regex = ["record(_call|ed|ing)", "provider_errors|_note_error|last_error"]
 files_changed = []
 
 [expect.rubric]

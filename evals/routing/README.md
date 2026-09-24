@@ -110,3 +110,5 @@ drawing further conclusions.
 
 - `ad9f5e9caece` — config 3: Haiku 4.5 controller + Claude tiers: 9/9, 29.1 s, $0.769 (beats plain Sonnet). See the triage note.
 - `c7473cbe8524` — config 1 rerun after the controller-context fix: 8/9, 38.9 s, $1.205.
+
+- Real cases on guru (2026-09-24): see `evals/triage/2026-09-24-real-cases.md` — Haiku controller + tiers matched plain Opus quality at 22% of its cost.
