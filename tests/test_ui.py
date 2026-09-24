@@ -237,3 +237,68 @@ class TestLedgerCommand:
                                         'tasks': 0}}
         text = cli._format_run_summary(summary)
         assert '$?' in text and 'A|m' in text
+
+
+class TestToolsCommand:
+    """/tools prints the last turn's tool events as a table."""
+
+    def _events(self, rid: str) -> list:
+        return [
+            {'run_id': rid, 'turn_id': 'turn1', 'tool': 'read_file',
+             'args': {'path': 'guru/cli.py'}, 'seconds': 0.0123,
+             'produced_bytes': 9000, 'shown_bytes': 400, 'denied': '',
+             'ok': True},
+            {'run_id': rid, 'turn_id': 'turn1', 'tool': 'write_file',
+             'args': {'path': 'x.py', 'content': 'c' * 300},
+             'seconds': 0.5, 'produced_bytes': 40, 'shown_bytes': 40,
+             'denied': 'mode', 'ok': False},
+            {'run_id': rid, 'turn_id': 'other', 'tool': 'web_fetch',
+             'args': {'url': 'https://ghost.example'}, 'seconds': 1.0,
+             'produced_bytes': 1, 'shown_bytes': 1, 'denied': '',
+             'ok': True},
+            {'run_id': 'old', 'turn_id': 'turn1', 'tool': 'list_dir',
+             'args': {'path': 'stale'}, 'seconds': 1.0,
+             'produced_bytes': 1, 'shown_bytes': 1, 'denied': '',
+             'ok': True}]
+
+    def test_prints_last_turn_events(self, monkeypatch, capsys) -> None:
+        from guru.domain import ledger
+        repo = _RowsRepo({'tool_events': self._events(ledger.RUN_ID)})
+        ledger.set_repository(repo)
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+        monkeypatch.setattr(session, 'turn_id', 'turn1')
+        try:
+            cli._tools_command()
+        finally:
+            ledger.set_repository(None)
+        out = capsys.readouterr().out
+        assert 'read_file' in out and 'guru/cli.py' in out
+        assert 'write_file' in out and 'mode' in out
+        assert 'ghost' not in out and 'stale' not in out
+        assert '400' in out and '9000' in out           # shown/produced
+        assert 'c' * 300 not in out                     # args head only
+
+    def test_no_events_in_turn(self, monkeypatch, capsys) -> None:
+        from guru.domain import ledger
+        repo = _RowsRepo({'tool_events': []})
+        ledger.set_repository(repo)
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+        monkeypatch.setattr(session, 'turn_id', 'turn1')
+        try:
+            cli._tools_command()
+        finally:
+            ledger.set_repository(None)
+        assert 'no tool calls' in capsys.readouterr().out.lower()
+
+    def test_without_repository(self, capsys) -> None:
+        from guru.domain import ledger
+        ledger.set_repository(None)
+        cli._tools_command()
+        assert 'ledger' in capsys.readouterr().out.lower()
+
+    def test_format_table(self) -> None:
+        text = cli._format_tool_events(self._events('r')[:2])
+        lines = text.splitlines()
+        assert lines[0].split()[:2] == ['tool', 'args']
+        assert any(ln.startswith('read_file') for ln in lines)
+        assert '0.01' in text and '0.50' in text

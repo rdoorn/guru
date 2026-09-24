@@ -103,6 +103,18 @@ def load_routing() -> routing_settings.RoutingSettings:
     return routing
 
 
+def load_tools_policy() -> tools.ToolsPolicy:
+    """The project's ``.guru/tools.toml`` policy; an invalid file warns and
+    yields the default (everything enabled) rather than aborting startup."""
+    from guru import log
+    try:
+        return routing_settings.load_tools_policy()
+    except ValueError as e:
+        log.warning('%s; all tools stay enabled', e)
+        ui.console.print(f"[yellow]{e}; all tools stay enabled.[/yellow]")
+        return tools.ToolsPolicy()
+
+
 def _enabled_adapters() -> list:
     return [a for a in ADAPTERS if a.enabled] or ADAPTERS
 
@@ -409,6 +421,52 @@ def _ledger_command() -> None:
                      highlight=False)
 
 
+_ARGS_COL = 44                       # width of the args column in /tools
+
+
+def _args_head(args: object) -> str:
+    """``k=v`` pairs of a tool_events ``args`` dict, cut to the column."""
+    if not isinstance(args, dict):
+        return str(args or '')[:_ARGS_COL]
+    text = ' '.join(f"{k}={' '.join(str(v).split())}" for k, v in args.items())
+    return text if len(text) <= _ARGS_COL else text[:_ARGS_COL - 1] + '…'
+
+
+def _format_tool_events(rows: list) -> str:
+    """Plain-text table of tool_events rows for ``/tools``: tool, args
+    head, seconds, bytes shown/produced and the denial (if any)."""
+    header = f"{'tool':<22} {'args':<{_ARGS_COL}} {'secs':>7}  " \
+             f"{'shown/produced':>16}  denied"
+    lines = [header]
+    for r in rows:
+        secs = r.get('seconds')
+        ratio = f"{r.get('shown_bytes') or 0}/{r.get('produced_bytes') or 0}"
+        lines.append(
+            f"{str(r.get('tool') or '?'):<22} "
+            f"{_args_head(r.get('args')):<{_ARGS_COL}} "
+            f"{('?' if secs is None else f'{float(secs):.2f}'):>7}  "
+            f"{ratio:>16}  {r.get('denied') or ''}".rstrip())
+    return '\n'.join(lines)
+
+
+def _tools_command() -> None:
+    """``/tools``: print the last turn's tool calls from the audit stream."""
+    repo = ledger.repository()
+    rows_fn = getattr(repo, 'rows', None)
+    if repo is None or not callable(rows_fn) or not config.LEDGER_ENABLED:
+        ui.console.print('[yellow]No readable ledger repository.[/yellow]')
+        return
+    turn_id = session.turn_id
+    ledger.flush()                       # queued rows land before we read
+    rows = [r for r in rows_fn('tool_events', run_id=ledger.RUN_ID)
+            if turn_id and r.get('turn_id') == turn_id]
+    if not rows:
+        ui.console.print('[dim]No tool calls in the last turn.[/dim]')
+        return
+    ui.console.print(_format_tool_events(rows), markup=False,
+                     highlight=False)
+
+
 def _handle_slash_search(query: str) -> None:
     """Directly invoke web_search and optionally web_fetch for testing."""
     if not tools.ensure_domain_allowed(config.SEARCH_BACKEND_DOMAIN):
@@ -470,6 +528,7 @@ def main() -> None:
     skills.setup(reset=args.reset_skills)
 
     ledger.set_repository(JsonlLedger(config.LEDGER_DIR))
+    tools.set_policy(load_tools_policy())
 
     session.num_ctx_override = args.num_ctx
     global ADAPTERS, REGISTRY

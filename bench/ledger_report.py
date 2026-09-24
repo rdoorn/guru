@@ -3,8 +3,10 @@
     .venv/bin/python bench/ledger_report.py [--dir ~/.guru/ledger]
 
 Which models are called how often, task latency p50/p95 per (kind,
-complexity), tokens and cost per model, fallback/retry rates and how the
-shadow judges agree with the heuristics and with ``/good`` ``/bad`` labels.
+complexity), tokens and cost per model, fallback/retry rates, how the
+shadow judges agree with the heuristics and with ``/good`` ``/bad`` labels,
+and the tools called (per tool: calls, mean seconds, bytes shown vs
+produced, denials).
 The aggregation lives in ``guru.domain.ledger_report``; this script only
 loads the streams and prints.
 """
@@ -19,7 +21,8 @@ from guru import config                                         # noqa: E402
 from guru.domain import ledger_report                           # noqa: E402
 from guru.repositories.jsonl_ledger import JsonlLedger          # noqa: E402
 
-STREAMS = ('calls', 'tasks', 'turns', 'decisions', 'labels')
+STREAMS = ('calls', 'tasks', 'turns', 'decisions', 'labels',
+           'tool_events')
 
 
 def load(directory: Path) -> dict:

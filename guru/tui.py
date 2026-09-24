@@ -481,6 +481,10 @@ def run(registry=None, routing=None) -> None:
             import guru.cli as cli
             cli._ledger_command()
             return True
+        if text == '/tools':
+            import guru.cli as cli
+            cli._tools_command()
+            return True
         if text == '/review' or text.startswith('/review '):
             area = text[7:].strip() or 'the repository'
             tasks = config.review_tasks(area)

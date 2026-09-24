@@ -394,3 +394,128 @@ class TestRemoteRedaction:
         monkeypatch.setattr(tools, 'use_skill', lambda name: 'all clear')
         assert tools.execute_tool('use_skill', {'name': 'x'}) == 'all clear'
         assert session.struggle['redactions'] == 0
+
+
+class TestToolsPolicy:
+    """tools.is_enabled / set_policy: .guru/tools.toml gating (A3)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        yield
+        tools.set_policy(None)
+
+    def test_default_policy_enables_everything(self) -> None:
+        tools.set_policy(None)
+        assert tools.is_enabled('read_file') and tools.is_enabled('web_fetch')
+        assert tools.active_policy() == tools.ToolsPolicy()
+
+    def test_disabled_wins_over_enabled(self) -> None:
+        tools.set_policy(tools.ToolsPolicy(enabled={'read_file'},
+                                           disabled={'read_file'}))
+        assert tools.is_enabled('read_file') is False
+
+    def test_enabled_list_is_an_allowlist(self) -> None:
+        tools.set_policy(tools.ToolsPolicy(enabled={'read_file'}))
+        assert tools.is_enabled('read_file') is True
+        assert tools.is_enabled('web_fetch') is False
+
+    def test_always_on_tools_are_never_gated(self) -> None:
+        tools.set_policy(tools.ToolsPolicy(
+            enabled={'read_file'},
+            disabled={'search_tools', 'use_skill', 'spawn', 'check', 'join'}))
+        for name in ('search_tools', 'use_skill', 'spawn', 'check', 'join'):
+            assert tools.is_enabled(name) is True
+
+
+class TestToolEvents:
+    """execute_tool writes one tool_events row per call (A2, A3)."""
+
+    @pytest.fixture(autouse=True)
+    def _quiet(self, monkeypatch, fake_repo):
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', False)
+        monkeypatch.setattr(session, 'turn_id', 'turnX')
+        self.repo = fake_repo
+        yield
+        tools.set_policy(None)
+
+    def _event(self) -> dict:
+        from guru.domain import ledger
+        ledger.flush()
+        [row] = self.repo.stream('tool_events')
+        return row
+
+    def test_registry_tool_event(self, monkeypatch) -> None:
+        monkeypatch.setitem(tools.TOOL_REGISTRY, 'read_file', {
+            **tools.TOOL_REGISTRY['read_file'],
+            'fn': lambda path, lines='': 'x' * 40})
+        out = tools.execute_tool('read_file', {'path': 'a.py'})
+        assert out == 'x' * 40
+        row = self._event()
+        assert row['tool'] == 'read_file' and row['turn_id'] == 'turnX'
+        assert row['ok'] is True and row['denied'] == ''
+        assert row['produced_bytes'] == 40 and row['shown_bytes'] == 40
+        assert row['files_touched'] == ['a.py']
+        assert row['args'] == {'path': 'a.py'}
+        assert row['seconds'] >= 0
+
+    def test_unknown_tool_event(self) -> None:
+        out = tools.execute_tool('teleport', {'to': 'mars'})
+        assert out.startswith('Unknown tool')
+        row = self._event()
+        assert row['tool'] == 'teleport' and row['ok'] is False
+        assert row['files_touched'] == []
+        assert row['produced_bytes'] == len(out)
+
+    def test_tool_error_is_not_ok(self, monkeypatch) -> None:
+        def boom(path, lines=''):
+            raise RuntimeError('nope')
+        monkeypatch.setitem(tools.TOOL_REGISTRY, 'read_file', {
+            **tools.TOOL_REGISTRY['read_file'], 'fn': boom})
+        tools.execute_tool('read_file', {'path': 'a.py'})
+        row = self._event()
+        assert row['ok'] is False and row['denied'] == ''
+
+    def test_disabled_tool_is_refused_and_denied(self, monkeypatch) -> None:
+        called = []
+        monkeypatch.setitem(tools.TOOL_REGISTRY, 'read_file', {
+            **tools.TOOL_REGISTRY['read_file'],
+            'fn': lambda path, lines='': called.append(path) or 'ran'})
+        tools.set_policy(tools.ToolsPolicy(disabled={'read_file'}))
+        out = tools.execute_tool('read_file', {'path': 'a.py'})
+        assert out == "Tool 'read_file' is disabled by .guru/tools.toml"
+        assert called == []
+        row = self._event()
+        assert row['denied'] == 'policy' and row['ok'] is False
+
+    def test_read_only_refusal_is_denied_mode(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_READ_ONLY)
+        out = tools.execute_tool('write_file', {'path': '/tmp/x',
+                                                'content': 'c'})
+        assert out.startswith('Refused: read-only mode')
+        row = self._event()
+        assert row['denied'] == 'mode' and row['files_touched'] == ['/tmp/x']
+
+    def test_controller_refusal_is_denied(self, monkeypatch) -> None:
+        monkeypatch.setattr(session, 'controller', True)
+        tools.execute_tool('read_file', {'path': 'a.py'})
+        row = self._event()
+        assert row['denied'] == 'controller' and row['ok'] is False
+
+    def test_shown_bytes_after_redaction(self, monkeypatch) -> None:
+        from types import SimpleNamespace
+        from guru.domain import policy
+        monkeypatch.setattr(tools, 'use_skill',
+                            lambda name: 'token SECRET for x')
+        monkeypatch.setattr(config, 'SECRET_SCAN', True)
+        monkeypatch.setattr(session, 'adapter',
+                            SimpleNamespace(name='Remote', remote=True))
+        policy.set_scanner(_Marker())
+        try:
+            out = tools.execute_tool('use_skill', {'name': 'x'})
+        finally:
+            policy.set_scanner(None)
+        row = self._event()
+        assert row['produced_bytes'] == len('token SECRET for x')
+        assert row['shown_bytes'] == len(out) != row['produced_bytes']

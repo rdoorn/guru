@@ -31,6 +31,10 @@ PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
 # matches suppress a finding (known test fixtures, sample keys).
 SENSITIVE_MARKERS_PATH = PROJECT_GURU_DIR / 'sensitive_markers.txt'
 SCAN_ALLOW_PATH = PROJECT_GURU_DIR / 'scan_allow.txt'
+# Tool policy (guru/repositories/settings.py load_tools_policy): which
+# registry tools a project enables/disables, its test runner and any
+# subprocess-limit overrides. Missing file = everything enabled.
+TOOLS_POLICY_PATH = PROJECT_GURU_DIR / 'tools.toml'
 
 # Access mode (session-level policy). Separate from the allow-lists: it decides
 # whether we prompt, auto-approve, or refuse. read-only refuses writes; ask
@@ -79,6 +83,18 @@ PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
 # are always sent), so it's off by default and best for large-context models.
 # Overridable via settings.toml's [tools] flat = true.
 FLAT_TOOLS = False
+
+# Subprocess ceilings for the audited tools (guru/domain/procs.py): wall-clock
+# timeout, CPU seconds, address space, largest file a child may write, and
+# how much of each output stream is kept. Overridable via settings.toml's
+# [tools.limits] table (timeout_s, cpu_s, mem_mb, fsize_mb, out_kb); a
+# project's .guru/tools.toml [tools.limits] overrides again per project.
+PROC_TIMEOUT_S = 120
+PROC_CPU_S = 120
+PROC_MEM_MB = 2048
+PROC_FSIZE_MB = 64
+PROC_OUT_KB = 256
+PROC_LIMIT_KEYS = ('timeout_s', 'cpu_s', 'mem_mb', 'fsize_mb', 'out_kb')
 
 # Sampling overrides applied on top of a model's own modelfile defaults (the
 # authoritative per-model source). Empty by default so each model keeps its
@@ -519,6 +535,7 @@ def _apply_settings() -> None:
     global EVALS_MODEL, EVALS_NUM_CTX
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
     global BENCH_MODEL_TIMEOUT, FLAT_TOOLS
+    global PROC_TIMEOUT_S, PROC_CPU_S, PROC_MEM_MB, PROC_FSIZE_MB, PROC_OUT_KB
     global DECISIONS_MODE, DECISIONS_SIDECAR_MODEL, DECISIONS_SIDECAR_URL
     global DECISIONS_POINTS, DECISIONS_ACTIVE, DECISIONS_THRESHOLDS
     global DECISIONS_TIMEOUT_MS, DECISIONS_BREAKER_TIMEOUTS
@@ -537,6 +554,14 @@ def _apply_settings() -> None:
     if isinstance(pre, list):
         PREACTIVATE_TOOLS = [str(x) for x in pre]
     FLAT_TOOLS = bool(tl.get('flat', FLAT_TOOLS))
+    limits = tl.get('limits')
+    if isinstance(limits, dict):
+        parsed = _proc_limits(limits)
+        PROC_TIMEOUT_S = parsed.get('timeout_s', PROC_TIMEOUT_S)
+        PROC_CPU_S = parsed.get('cpu_s', PROC_CPU_S)
+        PROC_MEM_MB = parsed.get('mem_mb', PROC_MEM_MB)
+        PROC_FSIZE_MB = parsed.get('fsize_mb', PROC_FSIZE_MB)
+        PROC_OUT_KB = parsed.get('out_kb', PROC_OUT_KB)
     sampling = settings_section('sampling')
     # Scalar keys are global overrides; sub-tables are per-model overrides.
     SAMPLING = {k: v for k, v in sampling.items()
@@ -602,6 +627,27 @@ def _apply_settings() -> None:
                  if isinstance(v, (int, float))}
         for k, tbl in settings_section('pricing').items()
         if isinstance(tbl, dict)}
+
+
+def _proc_limits(table: dict) -> dict:
+    """The valid ``[tools.limits]`` entries of ``table`` as ``{key: int}``.
+
+    A key outside ``PROC_LIMIT_KEYS`` or a value that is not a positive
+    number is logged and skipped, so a typo never disables a ceiling.
+    """
+    out: dict = {}
+    for key, value in table.items():
+        if key not in PROC_LIMIT_KEYS:
+            log.info('ignoring unknown [tools.limits] key %r; expected one '
+                     'of %s', key, ', '.join(PROC_LIMIT_KEYS))
+            continue
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or value <= 0):
+            log.info('ignoring [tools.limits] %s = %r; expected a positive '
+                     'number', key, value)
+            continue
+        out[str(key)] = int(value)
+    return out
 
 
 def _toml_value(value: object) -> str:

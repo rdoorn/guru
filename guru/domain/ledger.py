@@ -32,7 +32,7 @@ except OSError:                          # cwd deleted underneath us
 
 class LedgerRepository(Protocol):
     """Append a row to a named stream (calls, tasks, turns, decisions,
-    labels).
+    labels, tool_events).
 
     A repository may also offer ``save_transcript(task_id, messages)``
     returning a path, and ``rows(stream, run_id=None)`` returning the stored
@@ -484,6 +484,41 @@ def record_label(target_id: str, labeller: str, label: str,
                           'note': note or ''})
     except Exception:                            # noqa: BLE001
         log.exc('ledger record_label failed')
+
+
+# --- tool events -------------------------------------------------------------
+
+# Longest stored value of a tool argument (write_file's content, edit_file's
+# old/new) so the audit row stays a row; the transcript holds the full text.
+ARGS_HEAD = 200
+
+
+def _args_head(args: dict) -> dict:
+    return {str(k): str(v)[:ARGS_HEAD] for k, v in (args or {}).items()}
+
+
+def record_tool_event(tool: str, args: dict, *, seconds: float, ok: bool,
+                      produced_bytes: int, shown_bytes: int,
+                      files_touched: list, denied: str = '') -> None:
+    """Append one tool call to the ``tool_events`` stream.
+
+    ``produced_bytes`` is the raw result's size, ``shown_bytes`` what the
+    model saw after redaction/digest; ``files_touched`` the paths the call
+    named; ``denied`` names the gate that refused it (``policy``, ``mode``,
+    ``controller``) or is empty. Argument values are stringified and cut at
+    ``ARGS_HEAD``. Session join keys as for calls. Never raises.
+    """
+    try:
+        submit('tool_events', {
+            **base_row(), 'agent': session.agent_id,
+            'task_id': session.task_id, 'turn_id': session.turn_id,
+            'tool': tool, 'args': _args_head(args), 'seconds': seconds,
+            'ok': bool(ok), 'produced_bytes': int(produced_bytes),
+            'shown_bytes': int(shown_bytes),
+            'files_touched': [str(f) for f in files_touched],
+            'denied': denied or ''})
+    except Exception:                            # noqa: BLE001
+        log.exc('ledger record_tool_event failed')
 
 
 # --- read-side aggregation ---------------------------------------------------

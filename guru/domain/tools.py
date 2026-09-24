@@ -4,6 +4,10 @@ Tool execution is provider-agnostic. Adapters call ``execute_tool`` when a
 model requests a tool; this module handles the domain allow-list gate,
 ``search_tools`` activation, and running the tool, returning a result string.
 """
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
@@ -14,6 +18,10 @@ from guru.domain import decisions, files, ledger, policy, routing
 # The tools a controller (``[routing] controller = true``) keeps: it
 # coordinates and never executes (design doc §2).
 CONTROLLER_TOOLS = frozenset(('spawn', 'check', 'join', 'use_skill'))
+# Tools every agent has regardless of the project tool policy: discovery,
+# method selection and the delegation mailbox are not registry tools.
+ALWAYS_ON_TOOLS = frozenset(
+    ('search_tools', 'use_skill', 'spawn', 'check', 'join'))
 
 _STOP_WORDS = {
     'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for',
@@ -21,6 +29,52 @@ _STOP_WORDS = {
     'which', 'that', 'this', 'are', 'was', 'were', 'be', 'been',
     'being', 'do', 'does', 'did', 'me', 'my', 'you', 'your', 'its',
 }
+
+
+# --- project tool policy (.guru/tools.toml) ----------------------------------
+
+@dataclass
+class ToolsPolicy:
+    """A project's tool policy (loaded by
+    ``guru.repositories.settings.load_tools_policy``).
+
+    ``disabled`` always wins; a non-empty ``enabled`` set is an allowlist
+    for registry tools. ``test_runner`` is ``pytest`` or ``unittest``;
+    ``limits`` holds ``[tools.limits]`` overrides for ``procs.Limits``.
+    The default (no file) enables everything.
+    """
+    enabled: set = field(default_factory=set)
+    disabled: set = field(default_factory=set)
+    test_runner: str = 'pytest'
+    limits: dict = field(default_factory=dict)
+
+
+_policy = ToolsPolicy()
+
+
+def set_policy(pol: Optional[ToolsPolicy]) -> None:
+    """Install the project tool policy (the CLI at startup); None resets
+    to the default that enables everything."""
+    global _policy
+    _policy = pol if pol is not None else ToolsPolicy()
+
+
+def active_policy() -> ToolsPolicy:
+    """The installed project tool policy."""
+    return _policy
+
+
+def is_enabled(name: str) -> bool:
+    """Whether the project policy lets ``name`` run: always-on tools are
+    never gated; ``disabled`` wins; a non-empty ``enabled`` set allows only
+    its members."""
+    if name in ALWAYS_ON_TOOLS:
+        return True
+    if name in _policy.disabled:
+        return False
+    if _policy.enabled:
+        return name in _policy.enabled
+    return True
 
 
 # Pluggable domain approval — overridable by the TUI so it doesn't call the
@@ -705,11 +759,34 @@ def _redact_for_remote(name: str, result: str) -> str:
     return policy.redact(result, findings)
 
 
+def _mode_denial(result: str) -> bool:
+    """Whether a tool result text is an access-mode/allow-list refusal
+    (message texts owned by guru.domain.files / ensure_domain_allowed)."""
+    head = result[:300]
+    return (head.startswith('Refused: read-only mode')
+            or 'was denied by the user' in head
+            or (head.startswith('Write access to ') and head.rstrip()
+                .endswith('was denied.')))
+
+
+def _record_event(name: str, arguments: dict, raw: str, shown: str,
+                  seconds: float, denied: str) -> None:
+    """One ``tool_events`` audit row for a finished execute_tool call."""
+    ok = not denied and not raw.startswith(('Tool error:', 'Unknown tool:'))
+    path = arguments.get('path') if isinstance(arguments, dict) else None
+    ledger.record_tool_event(
+        name, arguments, seconds=seconds, ok=ok, produced_bytes=len(raw),
+        shown_bytes=len(shown),
+        files_touched=[str(path)] if path else [], denied=denied)
+
+
 def execute_tool(name: str, arguments: dict) -> str:
     """Run a tool the model requested and return its result text.
 
-    Handles search_tools activation and unknown/error cases. The domain
-    allow-list gate is applied inside the individual web tools.
+    Handles search_tools activation, the project tool policy, and
+    unknown/error cases; the domain and directory allow-list gates are
+    applied inside the individual tools. Every call — including refused
+    and unknown ones — writes one ``tool_events`` ledger row.
     """
     # File-write tools render their own '⏺ Verb(file)' diff block, so the raw
     # note (which would dump the whole content/old/new) is shown as just the
@@ -718,11 +795,17 @@ def execute_tool(name: str, arguments: dict) -> str:
         ui.note_tool(name, str(arguments.get('path', '')))
     elif name != 'delete_file':
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
+    denied = ''
+    started = time.monotonic()
     if session.controller and name not in CONTROLLER_TOOLS:
         # A controller coordinates only; CONTROLLER_HINT promises it has no
         # other tools, so keep that true (the attempt is still measured by
         # turn.controller_executed).
         result = f"Unknown tool: {name}"
+        denied = 'controller'
+    elif name in TOOL_REGISTRY and not is_enabled(name):
+        result = f"Tool '{name}' is disabled by .guru/tools.toml"
+        denied = 'policy'
     elif name == "search_tools":
         result = search_tools(**arguments)
         for tn in _match_tools(arguments.get("query", "")):
@@ -742,6 +825,10 @@ def execute_tool(name: str, arguments: dict) -> str:
             result = f"Tool error: {e}"
     else:
         result = f"Unknown tool: {name}"
+    seconds = time.monotonic() - started
+    if not denied and _mode_denial(result):
+        denied = 'mode'
+    raw = result
     result = _redact_for_remote(name, result)
     # Struggle counters: a tool that raised, or an edit_file refused because
     # the model passed a stale sha (message text owned by files.edit_file).
@@ -749,6 +836,7 @@ def execute_tool(name: str, arguments: dict) -> str:
         ledger.bump('tool_errors')
     elif name == 'edit_file' and result.startswith('sha mismatch:'):
         ledger.bump('sha_mismatches')
+    _record_event(name, arguments, raw, result, seconds, denied)
     # Show the output's size — the context cost of this tool result.
     ui.note_tool_result(len(result))
     return result

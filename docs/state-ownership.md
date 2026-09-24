@@ -50,6 +50,14 @@ is injected through setters rather than hard-coded:
   repository in the CLI/TUI, a fake in tests. `guru.ledger_cli review`
   installs the JSONL repository of the directory it labels for the duration
   of the command and restores the previous one afterwards.
+- `tools.set_policy` — the project's tool policy (`.guru/tools.toml`, loaded
+  by `guru.repositories.settings.load_tools_policy`): which registry tools
+  are enabled/disabled, the test runner and any subprocess-limit overrides.
+  The CLI installs it at startup; the default (no file, or `set_policy(None)`)
+  enables everything. `tools.execute_tool` consults it through
+  `tools.is_enabled` and writes a `denied = "policy"` `tool_events` row for a
+  refused call. The always-on tools (`search_tools`, `use_skill`, `spawn`,
+  `check`, `join`) are never subject to it.
 
 These are the dependency-injection points, and they already exist where
 front-ends actually diverge.
@@ -68,6 +76,10 @@ Single-valued, process-wide configuration lives as module-level state in
   `DECISIONS_TIMEOUT_MS` — the decision seam's mode, which points act on
   their judge, the per-point `P(yes)` threshold and the active-mode wait
   budget (`[decisions]` in settings.toml),
+- `config.PROC_TIMEOUT_S` / `PROC_CPU_S` / `PROC_MEM_MB` / `PROC_FSIZE_MB` /
+  `PROC_OUT_KB` — the subprocess ceilings `guru.domain.procs.Limits` defaults
+  to (`[tools.limits]` in settings.toml; a project's `.guru/tools.toml`
+  overrides per call through the installed policy),
 - `config.SECRET_SCAN` — mirrors `[routing] secret_scan` for the tool layer,
   and stays off (no scanner bound) when no `[routing]` table is configured
   (the typed `RoutingSettings` itself travels with the `Orchestrator`, which

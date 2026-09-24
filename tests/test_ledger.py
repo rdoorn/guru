@@ -575,3 +575,51 @@ class TestJsonlLedgerRunFilter:
                                       {'run_id': 'r2', 'a': 2}, {'a': 3}]
         assert repo.rows('calls', run_id='r2') == [{'run_id': 'r2', 'a': 2}]
         assert repo.rows('calls', run_id='zz') == []
+
+
+class TestToolEvents:
+    """record_tool_event writes the ``tool_events`` audit stream (A2)."""
+
+    def test_row_has_session_keys_and_fields(self, fake_repo,
+                                             monkeypatch) -> None:
+        monkeypatch.setattr(session, 'agent_id', 'agent3')
+        monkeypatch.setattr(session, 'task_id', 't7')
+        monkeypatch.setattr(session, 'turn_id', 'u1')
+        ledger.record_tool_event(
+            'read_file', {'path': 'a.py', 'lines': '1-5'}, seconds=0.25,
+            ok=True, produced_bytes=900, shown_bytes=300,
+            files_touched=['/abs/a.py'])
+        ledger.flush()
+        [(stream, row)] = fake_repo.rows
+        assert stream == 'tool_events'
+        assert row['agent'] == 'agent3' and row['task_id'] == 't7'
+        assert row['turn_id'] == 'u1' and row['run_id'] == ledger.RUN_ID
+        assert row['tool'] == 'read_file'
+        assert row['args'] == {'path': 'a.py', 'lines': '1-5'}
+        assert row['seconds'] == 0.25 and row['ok'] is True
+        assert (row['produced_bytes'], row['shown_bytes']) == (900, 300)
+        assert row['files_touched'] == ['/abs/a.py']
+        assert row['denied'] == ''
+        assert 'ts' in row and 'project' in row
+
+    def test_args_are_stringified_and_headed(self, fake_repo) -> None:
+        ledger.record_tool_event(
+            'write_file', {'path': 'x', 'content': 'y' * 5000, 'depth': 3},
+            seconds=0.0, ok=False, produced_bytes=0, shown_bytes=0,
+            files_touched=[], denied='policy')
+        ledger.flush()
+        [(_, row)] = fake_repo.rows
+        assert len(row['args']['content']) == ledger.ARGS_HEAD
+        assert row['args']['depth'] == '3'
+        assert row['denied'] == 'policy' and row['ok'] is False
+
+    def test_never_raises(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+        ledger.set_repository(ExplodingRepo())
+        try:
+            ledger.record_tool_event('t', {}, seconds=0, ok=True,
+                                     produced_bytes=0, shown_bytes=0,
+                                     files_touched=[])
+            ledger.flush()
+        finally:
+            ledger.set_repository(None)

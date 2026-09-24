@@ -393,6 +393,26 @@ def turns_summary(turns_rows: list) -> dict:
                                  for r in turns_rows)}
 
 
+def tools_summary(tool_events_rows: list) -> dict:
+    """``{tool: {'calls', 'mean_seconds', 'produced_bytes', 'shown_bytes',
+    'denials'}}`` over the ``tool_events`` audit stream, sorted by tool;
+    ``denials`` counts rows with a non-empty ``denied``."""
+    out: dict = {}
+    for r in tool_events_rows:
+        t = out.setdefault(r.get('tool') or '?', {
+            'calls': 0, 'mean_seconds': 0.0, 'produced_bytes': 0,
+            'shown_bytes': 0, 'denials': 0})
+        t['calls'] += 1
+        t['mean_seconds'] += float(r.get('seconds') or 0.0)
+        t['produced_bytes'] += int(r.get('produced_bytes') or 0)
+        t['shown_bytes'] += int(r.get('shown_bytes') or 0)
+        if r.get('denied'):
+            t['denials'] += 1
+    for t in out.values():
+        t['mean_seconds'] = t['mean_seconds'] / t['calls']
+    return dict(sorted(out.items()))
+
+
 def controller_labelled(tasks_rows: list) -> bool:
     """True once any task row carries a controller ``kind`` (routing
     writes it); until then controller-vs-judge agreement is ``n/a``."""
@@ -400,11 +420,14 @@ def controller_labelled(tasks_rows: list) -> bool:
 
 
 def build_report(*, calls: list, tasks: list, turns: list, decisions: list,
-                 labels: list) -> dict:
+                 labels: list, tool_events: Optional[list] = None) -> dict:
     """Every aggregation in one dict (keys: ``models``, ``latency``,
     ``fallback``, ``judge_vs_heuristic``, ``judge_vs_labels``,
-    ``judge_metrics``, ``turns``, ``controller_labelled``, ``counts``)."""
+    ``judge_metrics``, ``turns``, ``tools``, ``controller_labelled``,
+    ``counts``). ``tool_events`` may be omitted (older ledgers)."""
+    events = list(tool_events or [])
     return {'models': ledger.per_model_usage(calls),
+            'tools': tools_summary(events),
             'controller_labelled': controller_labelled(tasks),
             'latency': latency_by_kind(tasks),
             'fallback': fallback_retry(tasks),
@@ -414,7 +437,7 @@ def build_report(*, calls: list, tasks: list, turns: list, decisions: list,
             'turns': turns_summary(turns),
             'counts': {'calls': len(calls), 'tasks': len(tasks),
                        'turns': len(turns), 'decisions': len(decisions),
-                       'labels': len(labels)}}
+                       'labels': len(labels), 'tool_events': len(events)}}
 
 
 # --- Markdown ----------------------------------------------------------------
@@ -495,7 +518,8 @@ def render_markdown(report: dict) -> str:
     c = report['counts']
     out = ['# Ledger report', '',
            f"rows: {c['calls']} calls, {c['tasks']} tasks, {c['turns']} "
-           f"turns, {c['decisions']} decisions, {c['labels']} labels", '']
+           f"turns, {c['decisions']} decisions, {c['labels']} labels, "
+           f"{c.get('tool_events', 0)} tool events", '']
     out += ['## Calls per model', '']
     out += _table(
         ['adapter', 'model', 'calls', 'tokens in', 'tokens out',
@@ -557,4 +581,16 @@ def render_markdown(report: dict) -> str:
                   [[t['n'], _money(t['cost_usd']), _secs(t['seconds_p50']),
                     _secs(t['seconds_p95']), t['controller_executed'],
                     t['tasks_spawned']]] if t['n'] else [])
+    out += ['## Tools', '',
+            'Per tool over the `tool_events` audit stream: calls, mean '
+            'seconds, bytes the model saw vs bytes the tool produced '
+            '(`shown/produced` is the digest ratio) and refused calls.', '']
+    out += _table(['tool', 'calls', 'mean s', 'shown bytes',
+                   'produced bytes', 'shown/produced', 'denials'],
+                  [[name, v['calls'], _secs(v['mean_seconds']),
+                    v['shown_bytes'], v['produced_bytes'],
+                    _rate(v['shown_bytes'] / v['produced_bytes']
+                          if v['produced_bytes'] else None),
+                    v['denials']]
+                   for name, v in report.get('tools', {}).items()])
     return '\n'.join(out).rstrip() + '\n'

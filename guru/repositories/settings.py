@@ -42,16 +42,36 @@ experiment installs for its run — ``mode`` plus the ``points``, ``active``
 and ``thresholds`` sub-tables and the ``labels_margin`` tie-breaker margin
 that ``config`` documents; the sidecar and timing keys stay in
 ``settings.toml``.
+
+``.guru/tools.toml`` (:func:`load_tools_policy`) is the per-project tool
+policy — the ``ToolsPolicy`` entity lives in ``guru.domain.tools``::
+
+    [tools]
+    enabled = ["read_file", "run_tests"]   # non-empty: allowlist
+    disabled = ["web_search"]              # always wins
+    [tools.tests]
+    runner = "pytest"                      # pytest | unittest
+    [tools.limits]
+    timeout_s = 60                         # see config.PROC_LIMIT_KEYS
+
+A missing file is the default policy (everything enabled); unknown keys,
+an unknown runner or a mistyped limit raise ``ValueError`` naming the file.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from guru import config, log
 from guru.domain import routing
 from guru.domain.routing import Ladder, Rung
+from guru.domain.tools import ToolsPolicy
 from guru.repositories.adapters import AdapterRegistry
+
+__all__ = ['DecisionsSettings', 'RoutingSettings', 'RungSpec',
+           'ToolsPolicy', 'ladders_from_settings', 'load_decisions',
+           'load_routing', 'load_tools_policy']
 
 SPEND_CONFIRM = ('ask', 'auto', 'never')
 
@@ -295,3 +315,85 @@ def ladders_from_settings(settings: RoutingSettings,
         if rungs:
             ladders[name] = Ladder(rungs)
     return ladders
+
+
+# --- .guru/tools.toml --------------------------------------------------------
+
+TEST_RUNNERS = ('pytest', 'unittest')
+_TOOLS_KEYS = frozenset(('enabled', 'disabled', 'tests', 'limits'))
+
+
+def _name_list(table: dict, key: str, where: str) -> set:
+    raw = table.get(key, [])
+    if not isinstance(raw, list) or not all(
+            isinstance(x, str) for x in raw):
+        raise ValueError(f'{where}: [tools] {key} must be a list of tool '
+                         'names')
+    return set(raw)
+
+
+def _tools_limits(raw: object, where: str) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError(f'{where}: [tools.limits] must be a table')
+    unknown = sorted(set(raw) - set(config.PROC_LIMIT_KEYS))
+    if unknown:
+        raise ValueError(
+            f'{where}: [tools.limits] unknown keys: ' + ', '.join(unknown)
+            + '; expected ' + ', '.join(config.PROC_LIMIT_KEYS))
+    out: dict = {}
+    for key, value in raw.items():
+        if not _is_number(value) or value <= 0:
+            raise ValueError(
+                f'{where}: [tools.limits] {key} = {value!r}; expected a '
+                'positive number')
+        out[str(key)] = int(value)
+    return out
+
+
+def load_tools_policy(path: Optional[Path] = None) -> ToolsPolicy:
+    """Parse and validate a project's ``.guru/tools.toml``.
+
+    ``path`` defaults to ``config.TOOLS_POLICY_PATH``; a missing file
+    yields the default policy (everything enabled). Raises ``ValueError``
+    naming the file on invalid TOML, an unknown key or table, a runner
+    outside ``TEST_RUNNERS`` or a bad ``[tools.limits]`` value.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:                       # Python < 3.11
+        import tomli as tomllib                        # type: ignore
+    target = Path(path) if path is not None else config.TOOLS_POLICY_PATH
+    where = str(target)
+    try:
+        text = target.read_text(encoding='utf-8')
+    except OSError:
+        return ToolsPolicy()
+    try:
+        data = tomllib.loads(text)
+    except ValueError as e:                        # TOMLDecodeError
+        raise ValueError(f'{where}: invalid TOML: {e}') from e
+    unknown = sorted(set(data) - {'tools'})
+    if unknown:
+        raise ValueError(f'{where}: unknown tables: ' + ', '.join(unknown)
+                         + '; expected [tools]')
+    table = data.get('tools', {})
+    if not isinstance(table, dict):
+        raise ValueError(f'{where}: [tools] must be a table')
+    unknown = sorted(set(table) - _TOOLS_KEYS)
+    if unknown:
+        raise ValueError(f'{where}: [tools] unknown keys: '
+                         + ', '.join(unknown) + '; expected '
+                         + ', '.join(sorted(_TOOLS_KEYS)))
+    tests = table.get('tests', {})
+    if not isinstance(tests, dict) or set(tests) - {'runner'}:
+        raise ValueError(f'{where}: [tools.tests] takes only runner')
+    runner = tests.get('runner', 'pytest')
+    if runner not in TEST_RUNNERS:
+        raise ValueError(
+            f'{where}: [tools.tests] runner = {runner!r}; expected one of '
+            + ', '.join(TEST_RUNNERS))
+    return ToolsPolicy(
+        enabled=_name_list(table, 'enabled', where),
+        disabled=_name_list(table, 'disabled', where),
+        test_runner=str(runner),
+        limits=_tools_limits(table.get('limits', {}), where))

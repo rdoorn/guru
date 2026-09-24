@@ -453,3 +453,64 @@ class TestChoiceRows:
                                     _label('k3', 'hard'),
                                     {'target_id': 'k4', 'label': ''}])
         assert truth == {'k1': True, 'k2': False, 'k3': 'hard'}
+
+
+def _event(tool: str, *, seconds: float = 1.0, produced: int = 100,
+           shown: int = 50, denied: str = '') -> dict:
+    return {'tool': tool, 'seconds': seconds, 'produced_bytes': produced,
+            'shown_bytes': shown, 'denied': denied, 'ok': not denied,
+            'turn_id': 'turn1', 'args': {}}
+
+
+class TestToolsSummary:
+    def test_per_tool_counts_means_bytes_and_denials(self) -> None:
+        rows = [_event('read_file', seconds=1.0, produced=1000, shown=200),
+                _event('read_file', seconds=3.0, produced=500, shown=500),
+                _event('write_file', seconds=0.5, denied='mode'),
+                _event('web_fetch', seconds=2.0, produced=0, shown=0,
+                       denied='policy')]
+        s = lr.tools_summary(rows)
+        assert list(s) == ['read_file', 'web_fetch', 'write_file']
+        assert s['read_file'] == {'calls': 2, 'mean_seconds': 2.0,
+                                  'produced_bytes': 1500, 'shown_bytes': 700,
+                                  'denials': 0}
+        assert s['write_file']['denials'] == 1
+        assert s['web_fetch'] == {'calls': 1, 'mean_seconds': 2.0,
+                                  'produced_bytes': 0, 'shown_bytes': 0,
+                                  'denials': 1}
+
+    def test_missing_fields_default_to_zero(self) -> None:
+        s = lr.tools_summary([{'tool': 'x'}, {}])
+        assert s['x'] == {'calls': 1, 'mean_seconds': 0.0,
+                          'produced_bytes': 0, 'shown_bytes': 0,
+                          'denials': 0}
+        assert '?' in s
+
+    def test_report_and_markdown_section(self) -> None:
+        rep = lr.build_report(calls=[], tasks=[], turns=[], decisions=[],
+                              labels=[], tool_events=[
+                                  _event('read_file', seconds=2.0,
+                                         produced=1000, shown=250),
+                                  _event('lint', denied='policy')])
+        assert rep['tools']['read_file']['calls'] == 1
+        assert rep['counts']['tool_events'] == 2
+        md = lr.render_markdown(rep)
+        assert '## Tools' in md
+        assert '| read_file | 1 | 2.00 | 250 | 1000 | 25% | 0 |' in md
+        assert '| lint | 1 | 1.00 | 50 | 100 | 50% | 1 |' in md
+
+    def test_report_without_tool_events_still_renders(self) -> None:
+        rep = lr.build_report(calls=[], tasks=[], turns=[], decisions=[],
+                              labels=[])
+        assert rep['tools'] == {} and rep['counts']['tool_events'] == 0
+        assert '## Tools' in lr.render_markdown(rep)
+
+    def test_script_prints_tools_section(self, tmp_path: Path) -> None:
+        d = tmp_path / 'ledger'
+        _write(d, 'tool_events', '2026-09-24',
+               [_event('run_tests', seconds=4.0, produced=8000, shown=400)])
+        proc = subprocess.run([sys.executable, str(SCRIPT), '--dir', str(d)],
+                              capture_output=True, text=True, cwd=REPO_ROOT)
+        assert proc.returncode == 0, proc.stderr
+        assert '## Tools' in proc.stdout
+        assert '| run_tests | 1 | 4.00 | 400 | 8000 | 5% | 0 |' in proc.stdout

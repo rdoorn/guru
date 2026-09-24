@@ -300,3 +300,66 @@ class TestControllerDefault:
         assert RoutingSettings().controller is False
         assert RoutingSettings(controller=False,
                                ladders={'default': [rung]}).controller is False
+
+
+class TestToolsPolicyLoader:
+    """load_tools_policy parses a project's .guru/tools.toml (A3)."""
+
+    def _load(self, tmp_path, text: str):
+        from guru.repositories.settings import load_tools_policy
+        p = tmp_path / 'tools.toml'
+        p.write_text(text, encoding='utf-8')
+        return load_tools_policy(p)
+
+    def test_missing_file_is_the_default_policy(self, tmp_path) -> None:
+        from guru.repositories.settings import ToolsPolicy, load_tools_policy
+        pol = load_tools_policy(tmp_path / 'absent.toml')
+        assert pol == ToolsPolicy()
+        assert pol.enabled == set() and pol.disabled == set()
+        assert pol.test_runner == 'pytest' and pol.limits == {}
+
+    def test_default_path_is_config(self, tmp_path, monkeypatch) -> None:
+        from guru.repositories.settings import load_tools_policy
+        p = tmp_path / 'tools.toml'
+        p.write_text('[tools]\ndisabled = ["web_fetch"]\n', encoding='utf-8')
+        monkeypatch.setattr(config, 'TOOLS_POLICY_PATH', p)
+        assert load_tools_policy().disabled == {'web_fetch'}
+
+    def test_full_table(self, tmp_path) -> None:
+        pol = self._load(tmp_path,
+                         '[tools]\nenabled = ["read_file", "run_tests"]\n'
+                         'disabled = ["web_search"]\n'
+                         '[tools.tests]\nrunner = "unittest"\n'
+                         '[tools.limits]\ntimeout_s = 30\nout_kb = 8\n')
+        assert pol.enabled == {'read_file', 'run_tests'}
+        assert pol.disabled == {'web_search'}
+        assert pol.test_runner == 'unittest'
+        assert pol.limits == {'timeout_s': 30, 'out_kb': 8}
+
+    def test_unknown_key_names_the_path(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml') as e:
+            self._load(tmp_path, '[tools]\nenable = ["x"]\n')
+        assert 'enable' in str(e.value)
+
+    def test_unknown_top_level_table(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[routing]\nmode = "x"\n')
+
+    def test_bad_runner(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml') as e:
+            self._load(tmp_path, '[tools.tests]\nrunner = "nose"\n')
+        assert 'nose' in str(e.value) and 'pytest' in str(e.value)
+
+    def test_bad_limits(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools.limits]\ntimeout_s = "slow"\n')
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools.limits]\nram = 4\n')
+
+    def test_lists_must_hold_strings(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools]\nenabled = "read_file"\n')
+
+    def test_invalid_toml_names_the_path(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools\nx = \n')

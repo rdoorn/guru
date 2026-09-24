@@ -50,6 +50,7 @@ Requires the Ollama app running in the menu bar (for local models).
 | `/search <query>` | Call `web_search` directly and optionally `web_fetch` a result |
 | `/good [note]`, `/bad [note]` | Label the last completed turn (and the sub-agent tasks it spawned) in the ledger's `labels` stream |
 | `/ledger` | Print this run's spend: calls, tokens and cost per model, tasks per model, the three most expensive tasks |
+| `/tools` | Print the last turn's tool calls from the audit stream: tool, args head, seconds, bytes shown/produced, denials |
 | `exit` / `quit` | Exit |
 
 ## Roles & skills
@@ -412,6 +413,10 @@ Remote models are queried for their context window; no memory is shown.
   - `flat = true` — pre-activate the ENTIRE registry on every agent, so a
     capable, large-context model gets the whole toolset up front (costs more
     prompt tokens; off by default).
+  - `[tools.limits]` — ceilings for every subprocess the audited tools start
+    (`guru/domain/procs.py`): `timeout_s` (default `120`), `cpu_s` (`120`),
+    `mem_mb` (`2048`), `fsize_mb` (`64`), `out_kb` (`256`, per output
+    stream). A project's `.guru/tools.toml` can override them again.
 - `[sampling]` — sampling overrides applied on top of a model's own modelfile
   defaults. Scalar keys here are global (all models); a `[sampling."<model>"]`
   sub-table holds per-model overrides (per-model wins). Empty by default.
@@ -431,6 +436,7 @@ state travels with the project (created lazily on first write):
 - `.guru/domains_allow.txt` — this project's network allow-list (see below).
 - `.guru/read_dirs_allow.txt` / `.guru/write_dirs_allow.txt` — approved
   file-read / file-write directories.
+- `.guru/tools.toml` — the project's tool policy (see **Tools policy**).
 - `.guru/memory/*.memory` — saved conversations, one JSON file per `/save`.
 
 ## Access modes & safeguards
@@ -472,6 +478,36 @@ Registry tools:
 
 `search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
 `check`, `join` are always available and not part of the registry.
+
+### Tools policy
+
+A project can narrow the toolset with `.guru/tools.toml`:
+
+```toml
+[tools]
+enabled = ["read_file", "search_code", "run_tests"]   # non-empty: allowlist
+disabled = ["web_search", "web_fetch"]                 # always wins
+
+[tools.tests]
+runner = "pytest"          # pytest | unittest
+
+[tools.limits]
+timeout_s = 60             # per-project subprocess ceilings (see [tools.limits])
+```
+
+No file means everything is enabled. `disabled` wins over `enabled`; a
+non-empty `enabled` list is an allowlist for registry tools. The always-on
+tools (`search_tools`, `use_skill`, `spawn`, `check`, `join`) are never
+subject to it. A disabled tool answers `Tool '<name>' is disabled by
+.guru/tools.toml` and the call is recorded with `denied = "policy"`. Unknown
+keys, an unknown runner or a bad limit are reported at startup (naming the
+file) and the default policy is used.
+
+Every tool call — allowed, refused or unknown — writes one row to the
+ledger's `tool_events` stream (tool, args head, seconds, bytes produced vs
+shown to the model, files touched, denial). `/tools` shows the last turn's
+rows; `bench/ledger_report.py` aggregates them per tool in its **Tools**
+section.
 
 ## Architecture
 
