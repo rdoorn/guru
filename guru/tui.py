@@ -485,6 +485,10 @@ def run(registry=None, routing=None) -> None:
             import guru.cli as cli
             cli._tools_command()
             return True
+        if text == '/sandbox' or text.startswith('/sandbox '):
+            import guru.cli as cli
+            await _in_terminal(cli._sandbox_command, text[8:].strip())
+            return True
         if text == '/review' or text.startswith('/review '):
             area = text[7:].strip() or 'the repository'
             tasks = config.review_tasks(area)
@@ -562,7 +566,7 @@ def run(registry=None, routing=None) -> None:
             " · Shift+Tab cycle access mode · double Ctrl+C exit")
         main.console.print(
             "[dim]/mode /role /skill /review /models /context /adapters /save"
-            " /resume /compact /search[/dim]\n")
+            " /resume /compact /search /sandbox[/dim]\n")
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()

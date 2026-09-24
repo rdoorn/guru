@@ -58,6 +58,22 @@ An absent file is the default policy (everything enabled); an unreadable
 file, unknown keys, an unknown runner or a mistyped limit raise
 ``ValueError`` naming the file (the CLI then fails closed: every registry
 tool disabled).
+
+``[sandbox]`` (:func:`load_sandbox`) configures sandboxed execution. The
+global table in ``settings.toml`` sets the defaults; a project's
+``.guru/sandbox.toml`` carries the same table and wins key by key, and is
+the *only* place ``enabled`` may be set (a sandbox is a per-project
+opt-in)::
+
+    [sandbox]
+    enabled = true                       # project file only
+    runtime = "docker"
+    base_image = "python:3.12-slim@sha256:…"   # digest-pinned, always
+    cpus = 2.0
+    memory_mb = 2048
+    pids = 256
+    timeout_s = 600
+    proxy_image = "ghcr.io/…@sha256:…"   # S2: the provisioning proxy
 """
 from __future__ import annotations
 
@@ -73,8 +89,9 @@ from guru.domain.toolpolicy import ToolsPolicy
 from guru.repositories.adapters import AdapterRegistry
 
 __all__ = ['DecisionsSettings', 'RoutingSettings', 'RungSpec',
-           'ToolsPolicy', 'ladders_from_settings', 'load_decisions',
-           'load_routing', 'load_tools_policy']
+           'SandboxSettings', 'ToolsPolicy', 'ladders_from_settings',
+           'load_decisions', 'load_routing', 'load_sandbox',
+           'load_tools_policy']
 
 SPEND_CONFIRM = ('ask', 'auto', 'never')
 
@@ -400,3 +417,130 @@ def load_tools_policy(path: Optional[Path] = None) -> ToolsPolicy:
         disabled=_name_list(table, 'disabled', where),
         test_runner=str(runner),
         limits=_tools_limits(table.get('limits', {}), where))
+
+
+# --- [sandbox] / .guru/sandbox.toml -----------------------------------------
+
+SANDBOX_RUNTIMES = ('docker',)
+# docker.io/library/python:3.12-slim, multi-arch index digest as served on
+# 2026-09-24 (``docker buildx imagetools inspect python:3.12-slim``).
+DEFAULT_BASE_IMAGE = ('python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a'
+                      '686e2cb9a83de48e70534b94cd8ebbe06a9')
+# PLACEHOLDER: the provisioning proxy (chunk S2) pins a real digest; until
+# then this is a syntactically valid reference no registry serves.
+DEFAULT_PROXY_IMAGE = ('ghcr.io/tinyproxy/tinyproxy:latest@sha256:'
+                       + '0' * 64)
+_SANDBOX_KEYS = frozenset(('enabled', 'runtime', 'base_image', 'cpus',
+                           'memory_mb', 'pids', 'timeout_s', 'proxy_image'))
+_SANDBOX_INTS = ('memory_mb', 'pids', 'timeout_s')
+
+
+@dataclass
+class SandboxSettings:
+    """The validated, merged ``[sandbox]`` table (global defaults, project
+    overrides). ``enabled`` is False unless the project file sets it."""
+    enabled: bool = False
+    runtime: str = 'docker'
+    base_image: str = DEFAULT_BASE_IMAGE
+    cpus: float = 2.0
+    memory_mb: int = 2048
+    pids: int = 256
+    timeout_s: int = 600
+    proxy_image: str = DEFAULT_PROXY_IMAGE
+
+
+def _pinned(value: object, key: str, where: str) -> str:
+    if not isinstance(value, str) or '@sha256:' not in value or any(
+            ch.isspace() for ch in value):
+        raise ValueError(f'{where}: {key} = {value!r}; expected a '
+                         'digest-pinned image reference <image>@sha256:<hex>')
+    return value
+
+
+def _apply_sandbox(out: SandboxSettings, table: dict, where: str,
+                   allow_enabled: bool) -> None:
+    """Validate ``table`` and apply its keys onto ``out`` in place."""
+    unknown = sorted(set(table) - _SANDBOX_KEYS)
+    if unknown:
+        raise ValueError(f'{where}: [sandbox] unknown keys: '
+                         + ', '.join(unknown) + '; expected '
+                         + ', '.join(sorted(_SANDBOX_KEYS)))
+    if 'enabled' in table:
+        if not allow_enabled:
+            raise ValueError(f'{where}: [sandbox] enabled may only be set in '
+                             'a project\'s .guru/sandbox.toml')
+        if not isinstance(table['enabled'], bool):
+            raise ValueError(f'{where}: [sandbox] enabled = '
+                             f'{table["enabled"]!r}; expected a boolean')
+        out.enabled = table['enabled']
+    if 'runtime' in table:
+        if table['runtime'] not in SANDBOX_RUNTIMES:
+            raise ValueError(f'{where}: [sandbox] runtime = '
+                             f'{table["runtime"]!r}; expected one of '
+                             + ', '.join(SANDBOX_RUNTIMES))
+        out.runtime = str(table['runtime'])
+    for key in ('base_image', 'proxy_image'):
+        if key in table:
+            setattr(out, key, _pinned(table[key], key, where))
+    if 'cpus' in table:
+        cpus = table['cpus']
+        if not _is_number(cpus) or cpus <= 0:
+            raise ValueError(f'{where}: [sandbox] cpus = {cpus!r}; expected '
+                             'a positive number')
+        out.cpus = float(cpus)
+    for key in _SANDBOX_INTS:
+        if key in table:
+            value = table[key]
+            if (isinstance(value, bool) or not isinstance(value, int)
+                    or value <= 0):
+                raise ValueError(f'{where}: [sandbox] {key} = {value!r}; '
+                                 'expected a positive integer')
+            setattr(out, key, int(value))
+
+
+def _read_toml_table(target: Path, table: str) -> Optional[dict]:
+    """The ``[table]`` of the TOML file ``target``; None when the file is
+    absent; ``ValueError`` naming the file when it is unreadable, invalid
+    TOML, holds other top-level tables or ``table`` is not a table."""
+    where = str(target)
+    try:
+        text = target.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise ValueError(f'{where}: cannot read: {e}') from e
+    try:
+        data = tomllib.loads(text)
+    except ValueError as e:                        # TOMLDecodeError
+        raise ValueError(f'{where}: invalid TOML: {e}') from e
+    unknown = sorted(set(data) - {table})
+    if unknown:
+        raise ValueError(f'{where}: unknown tables: ' + ', '.join(unknown)
+                         + f'; expected [{table}]')
+    section = data.get(table, {})
+    if not isinstance(section, dict):
+        raise ValueError(f'{where}: [{table}] must be a table')
+    return section
+
+
+def load_sandbox(section: Optional[dict] = None,
+                 path: Optional[Path] = None) -> SandboxSettings:
+    """Parse and merge the ``[sandbox]`` settings.
+
+    ``section`` is the global table (default
+    ``config.settings_section('sandbox')``); ``path`` the project file
+    (default ``config.SANDBOX_POLICY_PATH``), whose ``[sandbox]`` table
+    overrides the global key by key. ``enabled`` is accepted from the
+    project file only. An absent project file leaves ``enabled`` False.
+    Raises ``ValueError`` naming the offender on an unknown key, an
+    unpinned image, a bad number or a broken project file.
+    """
+    if section is None:
+        section = config.settings_section('sandbox')
+    target = Path(path) if path is not None else config.SANDBOX_POLICY_PATH
+    out = SandboxSettings()
+    _apply_sandbox(out, dict(section), 'settings.toml', allow_enabled=False)
+    project = _read_toml_table(target, 'sandbox')
+    if project is not None:
+        _apply_sandbox(out, project, str(target), allow_enabled=True)
+    return out

@@ -35,6 +35,12 @@ SCAN_ALLOW_PATH = PROJECT_GURU_DIR / 'scan_allow.txt'
 # registry tools a project enables/disables, its test runner and any
 # subprocess-limit overrides. Missing file = everything enabled.
 TOOLS_POLICY_PATH = PROJECT_GURU_DIR / 'tools.toml'
+# Sandbox (guru/repositories/settings.py load_sandbox): a project opts in
+# to sandboxed execution with .guru/sandbox.toml; image records, generated
+# Dockerfiles and the working copies live under ~/.guru/sandbox/<project>/
+# (a path Colima mounts into its VM — a macOS temp dir is not).
+SANDBOX_POLICY_PATH = PROJECT_GURU_DIR / 'sandbox.toml'
+SANDBOX_HOME = GURU_HOME / 'sandbox'
 
 # Access mode (session-level policy). Separate from the allow-lists: it decides
 # whether we prompt, auto-approve, or refuse. read-only refuses writes; ask

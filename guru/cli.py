@@ -5,6 +5,7 @@ buffer, sub-agents in a full-screen viewer). The slash-command helpers here are
 reused by that UI.
 """
 import argparse
+from pathlib import Path
 from typing import Optional
 
 from guru import config, judges, session, ui
@@ -473,6 +474,64 @@ def _tools_command() -> None:
         return
     ui.console.print(_format_tool_events(rows), markup=False,
                      highlight=False)
+
+
+def _sandbox_status(project: Optional[Path] = None) -> str:
+    """Plain-text ``/sandbox status``: runtime availability, the project's
+    sandbox settings/spec, and the recorded image (tag, digest, built_at,
+    whether a build is needed). Never raises: each broken part is one
+    line."""
+    from guru.domain import sandbox as sb
+    from guru.repositories import sandbox_images as images
+    from guru.repositories.settings import load_sandbox
+    from guru.sandbox import colima
+    root = Path(project) if project is not None \
+        else config.PROJECT_GURU_DIR.parent
+    lines = ['sandbox status']
+    lines.append('runtime: docker '
+                 + ('available' if colima.available(root) else
+                    'unavailable (docker info failed; is Colima running?)'))
+    policy_path = config.SANDBOX_POLICY_PATH
+    try:
+        settings = load_sandbox()
+    except ValueError as e:
+        lines.append(f'settings: invalid: {e}')
+        return '\n'.join(lines)
+    lines.append(f"project file: {policy_path} "
+                 f"{'present' if policy_path.is_file() else 'absent'}; "
+                 f"enabled: {'yes' if settings.enabled else 'no'}")
+    try:
+        spec = sb.spec_from(root, settings)
+    except ValueError as e:
+        lines.append(f'spec: none ({e})')
+        return '\n'.join(lines)
+    lines.append(f'spec: {sb.spec_summary(spec)}')
+    lines.append(f'base image: {spec.base_image}')
+    try:
+        dockerfile = sb.dockerfile_for(spec.project, spec.base_image)
+    except ValueError as e:
+        lines.append(f'dockerfile: cannot generate ({e})')
+        return '\n'.join(lines)
+    rec = images.load_record(spec)
+    if rec is None:
+        lines.append('image: not built (records in '
+                     f'{images.record_dir(spec)})')
+    else:
+        lines.append(f'image: {rec.tag} digest {rec.digest} '
+                     f'built {rec.built_at}')
+    lines.append('needs build: '
+                 + ('yes' if images.needs_build(spec, dockerfile) else 'no'))
+    return '\n'.join(lines)
+
+
+def _sandbox_command(args: str = '') -> None:
+    """``/sandbox [status]``: print :func:`_sandbox_status`."""
+    sub = (args or '').strip()
+    if sub not in ('', 'status'):
+        ui.console.print(f"[yellow]Unknown /sandbox command '{sub}'; "
+                         'usage: /sandbox status[/yellow]')
+        return
+    ui.console.print(_sandbox_status(), markup=False, highlight=False)
 
 
 def _handle_slash_search(query: str) -> None:
