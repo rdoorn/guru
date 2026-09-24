@@ -296,6 +296,17 @@ edit_file reports a sha mismatch, the file changed underneath you; read it
 again to refresh the sha, then retry.
 """
 
+# Appended to the [project] block while the project has a provisioned
+# sandbox image: the quality gate is the only write path there, so the
+# generic "you MUST call write_file/edit_file" rule above does not apply.
+SANDBOX_RULE = (
+    "This project runs in a SANDBOX: write_file, edit_file, apply_patch and"
+    " delete_file are disabled here. Edit your task's copy inside the"
+    " container with sandbox_python or sandbox_run, verify with sandbox_run"
+    " (e.g. [\"python\", \"-m\", \"pytest\", \"-q\"]), check sandbox_diff,"
+    " then call sandbox_submit with a one-line intent; a reviewer gates what"
+    " reaches the real tree. Missing packages: request_dependency.")
+
 # Appended to the system prompt of delegation-capable agents (TUI only), to
 # steer heavy tool output out of the main context and into sub-agents.
 DELEGATION_HINT = (

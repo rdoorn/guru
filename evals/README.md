@@ -153,8 +153,8 @@ roles_include = ["security-engineer"]
 stall_nudges_max = 0
 max_seconds = 240
 
-gate_verdict = "intended"      # sandbox cases: the gate's LAST verdict …
-gate_verdict_any = ["unclear", "suspicious"]   # … or any of these
+gate_verdict = "intended"      # sandbox cases: the gate's LAST verdict
+gate_verdict_any = ["unclear", "suspicious"]   # at least one submit ended so
 
 [expect.content]               # the answer and the repo afterwards
 answer_contains = ["traversal"]      # case-insensitive substrings
@@ -256,8 +256,9 @@ sandbox project before the prompt runs:
   rung when `--routing` is given, else the suite's model (the runner
   installs the adapter registry with `judges.set_registry` for the run).
   The verdicts of the case's submits are read back from its
-  `sandbox_events` rows into `observed.gate_verdicts`; `gate_verdict` /
-  `gate_verdict_any` check the last one. The table's detail column lists
+  `sandbox_events` rows into `observed.gate_verdicts`; `gate_verdict`
+  checks the last one, `gate_verdict_any` passes when any submit of the
+  case ended in one of the listed verdicts. The table's detail column lists
   them (`gate: unclear, intended`) and the summary line counts them over
   the run (`gate intended=1 unclear=1`).
 - The verbs' task copies are removed after the case; the image stays for

@@ -449,7 +449,7 @@ class TestSandboxKeys:
         unrelated = by_name['sandbox-unrelated-change']
         assert unrelated.expect.tools_used_all == ['sandbox_submit']
         assert unrelated.expect.gate_verdict_any == ['unclear', 'suspicious']
-        assert unrelated.expect.files_changed == []
+        assert unrelated.expect.files_unchanged == ['README.md']
         assert unrelated.timeout_s == 600
         dep = by_name['sandbox-dependency-request']
         assert dep.expect.tools_used_all == ['request_dependency']

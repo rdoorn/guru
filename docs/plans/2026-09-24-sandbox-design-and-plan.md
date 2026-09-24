@@ -1,9 +1,11 @@
 # Sandboxed execution (Colima) with a lockfile-gated provisioning phase and an AI quality gate — design and plan
 
 Status: S1–S4 implemented on `feat/audited-tools` (2026-09-24): runtime,
-provisioning proxy, verbs + gate, eval cases and docs. Outstanding: a real
-end-to-end run of the three `sandbox` eval cases against Colima
-(`python -m guru.evals run --tags sandbox --allow-spend`) and its triage.
+provisioning proxy, verbs + gate, eval cases and docs. First real runs on
+Colima: the three `sandbox` cases pass 3/3 (run d0c352bbb675, $0.80); the
+13-case comparison run costs 4% less and runs 16% faster than the
+audited-tools baseline. Triage: `evals/triage/2026-09-24-sandbox.md`.
+Open: file deletion through the gate, a `destructive` rule kind.
 Builds on `2026-09-24-audited-tools-plan.md` (fixed-argv runner,
 tool_events, tools policy, apply_patch).
 

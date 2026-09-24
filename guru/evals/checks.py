@@ -175,13 +175,15 @@ def _gate_verdict(e: Expect, o: Observed) -> CheckResult:
 
 
 def _gate_verdict_any(e: Expect, o: Observed) -> CheckResult:
-    last = _last_verdict(o)
-    if not last:
+    """Passes when at least one ``sandbox_submit`` of the case ended in one
+    of the listed verdicts (a controller may split the work over several
+    workers, each submitting on its own)."""
+    if not o.gate_verdicts:
         return CheckResult('gate_verdict_any', False, 'no sandbox_submit '
                                                       'verdict recorded')
-    ok = last in e.gate_verdict_any
+    ok = any(v in e.gate_verdict_any for v in o.gate_verdicts)
     return CheckResult('gate_verdict_any', ok, '' if ok else
-                       f'last gate verdict {last!r} not in '
+                       f'gate verdicts {_fmt(o.gate_verdicts)}, none in '
                        f'{_fmt(e.gate_verdict_any)}')
 
 

@@ -190,13 +190,13 @@ class TestGateVerdict:
         r = one(Expect(gate_verdict_any=['unclear']), obs())
         assert not r.passed and 'no sandbox_submit verdict' in r.detail
 
-    def test_gate_verdict_any(self) -> None:
+    def test_gate_verdict_any_looks_at_every_submit(self) -> None:
         e = Expect(gate_verdict_any=['unclear', 'suspicious'])
         assert one(e, obs(gate_verdicts=['suspicious'])).passed
         assert one(e, obs(gate_verdicts=['intended', 'unclear'])).passed
+        assert one(e, obs(gate_verdicts=['unclear', 'intended'])).passed
         r = one(e, obs(gate_verdicts=['intended']))
-        assert not r.passed
-        assert "'intended' not in ['unclear', 'suspicious']" in r.detail
+        assert not r.passed and 'none in' in r.detail
 
     def test_defaults(self) -> None:
         assert Expect().gate_verdict == ''

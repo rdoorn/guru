@@ -16,7 +16,7 @@ a fixture without being copied into the suite. Exactly one of the two.
 project (it needs ``pyproject.toml`` + ``uv.lock``) before the prompt runs,
 so the ``sandbox_*`` verbs are available; ``gate_verdict`` /
 ``gate_verdict_any`` under ``[expect.behaviour]`` check the quality gate's
-last verdict for the case.
+verdicts for the case (the last one, or any submit's).
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from guru import config, session, skills
-from guru.domain import conversation, files
+from guru.domain import conversation, files, tools
 
 
 class TestMessageToDict:
@@ -529,6 +529,17 @@ class TestProjectBlock:
         block = conversation.project_block()
         assert block.startswith('[project]')
         assert str(tmp_path.resolve()) in block
+        assert 'SANDBOX' not in block
+
+    def test_sandbox_rule_when_image_present(self, tmp_path,
+                                             monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(session, 'git_branch', None)
+        monkeypatch.setattr(tools, '_sandbox_available', lambda: True)
+        block = conversation.project_block()
+        assert config.SANDBOX_RULE in block
+        assert 'edit_file' in config.SANDBOX_RULE
+        assert 'sandbox_submit' in config.SANDBOX_RULE
 
 
 class TestFocusedSummary:
