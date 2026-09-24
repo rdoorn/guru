@@ -35,7 +35,7 @@ from rich.console import Console
 
 from guru import config, log, session, skills, ui
 from guru.agents import AgentManager
-from guru.domain import conversation, files, tools
+from guru.domain import conversation, files, spend, tools
 from guru.orchestrator import Orchestrator
 from guru.tui_io import _app_cols, _BufferWriter, _MainWriter, _status_from
 
@@ -48,18 +48,15 @@ _NEW_AGENT = object()
 _QUIT = object()
 
 
-def run() -> None:
+def run(registry=None, routing=None) -> None:
+    """Run the hybrid TUI. ``registry`` (AdapterRegistry) and ``routing``
+    (RoutingSettings) come from the CLI; without them sub-agent routing is
+    inert. ``routing.controller`` makes the main agent a controller."""
     ui.refresh_git_branch()
     manager = AgentManager()
     main = manager.active
     main.state = session.current()
-    main.state.can_spawn = True
-    if (main.state.messages
-            and main.state.messages[0].get('role') == 'system'):
-        main.state.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
-    for fn in (tools.spawn, tools.check, tools.join):
-        if fn not in main.state.active_tools:
-            main.state.active_tools.append(fn)
+    controller = bool(routing is not None and routing.controller)
 
     state: dict = {
         'loop': None, 'view': 'main', 'quit': False, 'closing': False}
@@ -67,7 +64,7 @@ def run() -> None:
     ask_lock = threading.Lock()
 
     main_writer = _MainWriter(main, state)
-    main.console = Console(
+    main_console = Console(
         # _MainWriter is a duck-typed file-like sink, not a real IO[str].
         file=main_writer,  # type: ignore[arg-type]
         force_terminal=True, color_system='256', width=cols)
@@ -78,6 +75,11 @@ def run() -> None:
         # question is the full, possibly multi-line prompt (write asks include
         # the exact operation). Shown via run_in_terminal so it works in both
         # the [main] prompt and the viewer; serialized so agents don't collide.
+        if spend.on_event_loop():
+            # Blocking here would deadlock the prompt that needs the loop.
+            log.warning('asker called on the loop thread; denying')
+            return False
+
         def _ask() -> bool:
             # Drop modifyOtherKeys/raw mode for the prompt so Ctrl+C raises a
             # real KeyboardInterrupt (deny) and stray keys aren't re-encoded as
@@ -108,6 +110,7 @@ def run() -> None:
 
     tools.set_domain_asker(_access_asker)
     files.set_path_asker(_access_asker)
+    spend.set_spend_asker(_access_asker)    # once per run, same prompt style
 
     # --- per-agent output (sub-agents use buffer consoles) ------------------
 
@@ -168,7 +171,12 @@ def run() -> None:
         def run_on_loop(self, fn):
             return _on_loop(fn)
 
-    orch = _TuiOrchestrator(manager)
+    orch = _TuiOrchestrator(manager, registry=registry, routing=routing)
+    # The main agent is set up by the same helper every other delegation-
+    # capable agent uses (fresh conversation + hint + tool set, controller
+    # mode from [routing]); only its console is the main-buffer writer.
+    orch.configure(main, main.state, can_spawn=True, controller=controller)
+    main.console = main_console
 
     def _submit(agent, text: str) -> None:
         orch.submit(agent, text)
@@ -176,7 +184,7 @@ def run() -> None:
     def _new_agent() -> None:
         base = manager.active.state
         agent = manager.add(f"agent{len(manager.agents)}")
-        orch.configure(agent, base, can_spawn=True)
+        orch.configure(agent, base, can_spawn=True, controller=controller)
         agent.append(f"[{agent.title}] new agent · model {agent.state.model}")
         manager.active_index = len(manager.agents) - 1
 
@@ -464,11 +472,23 @@ def run() -> None:
             import guru.cli as cli
             await _in_terminal(cli._handle_slash_search, text[8:].strip())
             return True
+        if text in ('/good', '/bad') or text.startswith(('/good ', '/bad ')):
+            import guru.cli as cli
+            label, _, note = text[1:].partition(' ')
+            cli._label_command(label, note.strip())
+            return True
+        if text == '/ledger':
+            import guru.cli as cli
+            cli._ledger_command()
+            return True
         if text == '/review' or text.startswith('/review '):
             area = text[7:].strip() or 'the repository'
             tasks = config.review_tasks(area)
             main.append(
                 f"[review] spawning a {len(tasks)}-agent panel on {area}…")
+            # The spend question must not be asked on the loop thread
+            # (spawn_panel runs here): settle it in a worker first.
+            await state['loop'].run_in_executor(None, orch.preconfirm_spend)
             orch.spawn_panel(main, tasks,
                              synthesis=config.review_synthesis(area))
             return True

@@ -1,6 +1,7 @@
 """Tests for guru.domain.conversation (grouping, retention, context)."""
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from guru import config, session, skills
 from guru.domain import conversation, files
@@ -29,6 +30,95 @@ class TestMessageToDict:
 
         assert conversation.message_to_dict(FakeMessage()) == {
             'role': 'assistant', 'content': 'hi'}
+
+    def test_tool_calls_kept_raw_for_resume(self) -> None:
+        """Save/resume needs the provider shape (reactivate_tools reads
+        ``function.name``), so message_to_dict must not normalise it."""
+        tc = [{'function': {'name': 'read_file', 'arguments': {'path': 'x'}}}]
+        msg = {'role': 'assistant', 'content': '', 'tool_calls': tc}
+        assert conversation.message_to_dict(msg)['tool_calls'] == tc
+
+
+class TestToolCallRecords:
+    """Tests for conversation.tool_call_records / transcript_record."""
+
+    def test_dict_shape_gives_name_and_args(self) -> None:
+        tcs = [{'function': {'name': 'search_code',
+                             'arguments': {'pattern': 'rollback',
+                                           'glob': '*.py,README.md,*.sh'}}}]
+        assert conversation.tool_call_records(tcs) == [
+            {'name': 'search_code',
+             'args': {'pattern': 'rollback', 'glob': '*.py,README.md,*.sh'}}]
+
+    def test_object_shape(self) -> None:
+        tcs = [SimpleNamespace(function=SimpleNamespace(
+            name='read_file', arguments={'path': 'a.py'}))]
+        assert conversation.tool_call_records(tcs) == [
+            {'name': 'read_file', 'args': {'path': 'a.py'}}]
+
+    def test_json_string_arguments_are_decoded(self) -> None:
+        tcs = [{'function': {'name': 'read_file',
+                             'arguments': '{"path": "a.py"}'}}]
+        assert conversation.tool_call_records(tcs)[0]['args'] == {
+            'path': 'a.py'}
+
+    def test_undecodable_string_arguments_kept_raw(self) -> None:
+        tcs = [{'function': {'name': 'read_file', 'arguments': '{oops'}}]
+        assert conversation.tool_call_records(tcs)[0]['args'] == {
+            '_raw': '{oops'}
+
+    def test_missing_arguments_gives_empty_dict(self) -> None:
+        tcs = [{'function': {'name': 'list_dir'}}]
+        assert conversation.tool_call_records(tcs) == [
+            {'name': 'list_dir', 'args': {}}]
+
+    def test_long_values_truncated_with_note(self) -> None:
+        big = 'x' * 1200
+        tcs = [{'function': {'name': 'write_file',
+                             'arguments': {'path': 'a.py', 'content': big}}}]
+        rec = conversation.tool_call_records(tcs)[0]
+        assert rec['args']['path'] == 'a.py'
+        assert len(rec['args']['content']) == 500
+        assert rec['args']['content'] == 'x' * 500
+        assert 'content' in rec['note'] and '1200' in rec['note']
+
+    def test_exactly_limit_not_truncated(self) -> None:
+        tcs = [{'function': {'name': 'f', 'arguments': {'v': 'y' * 500}}}]
+        rec = conversation.tool_call_records(tcs)[0]
+        assert rec['args']['v'] == 'y' * 500 and 'note' not in rec
+
+    def test_non_string_values_truncated_via_json(self) -> None:
+        tcs = [{'function': {
+            'name': 'f', 'arguments': {'n': 3, 'items': list(range(400))}}}]
+        rec = conversation.tool_call_records(tcs)[0]
+        assert rec['args']['n'] == 3
+        assert isinstance(rec['args']['items'], str)
+        assert len(rec['args']['items']) == 500 and 'items' in rec['note']
+
+    def test_already_serialised_shapes_pass_through(self) -> None:
+        """Old transcripts held bare names; new ones hold name/args."""
+        tcs = ['read_file', {'name': 'spawn', 'args': {'task': 't'}}]
+        assert conversation.tool_call_records(tcs) == [
+            {'name': 'read_file', 'args': {}},
+            {'name': 'spawn', 'args': {'task': 't'}}]
+
+    def test_empty_or_none(self) -> None:
+        assert conversation.tool_call_records(None) == []
+        assert conversation.tool_call_records([]) == []
+
+    def test_transcript_record_normalises_tool_calls(self) -> None:
+        msg = {'role': 'assistant', 'content': 'x', 'tool_calls': [
+            {'function': {'name': 'read_file', 'arguments': {'path': 'p'}}}]}
+        assert conversation.transcript_record(msg) == {
+            'role': 'assistant', 'content': 'x',
+            'tool_calls': [{'name': 'read_file', 'args': {'path': 'p'}}]}
+
+    def test_transcript_record_plain_messages_unchanged(self) -> None:
+        tool = {'role': 'tool', 'tool_name': 'read_file', 'content': 'd'}
+        assert conversation.transcript_record(tool) == tool
+        assert conversation.transcript_record(
+            {'role': 'user', 'content': 'q'}) == {'role': 'user',
+                                                  'content': 'q'}
 
 
 class TestFirstUserMessage:
@@ -108,6 +198,54 @@ class TestCompactMessages:
         tool_msg = next(m for m in result if m.get('role') == 'tool')
         assert 'evicted' in tool_msg['content']
         assert result[-1]['content'] == 'a2'
+
+
+class TestCompactionCounter:
+    """compact_messages bumps struggle['compactions'] once per compaction."""
+
+    def _messages(self):
+        return [
+            {'role': 'system', 'content': 'SYS'},
+            {'role': 'user', 'content': 'q1'},
+            {'role': 'assistant', 'content': 'a1'},
+            {'role': 'tool', 'tool_name': 'web_fetch', 'content': 'X' * 2000},
+            {'role': 'user', 'content': 'q2'},
+            {'role': 'assistant', 'content': 'a2'},
+        ]
+
+    def _arm(self, monkeypatch, summarise) -> None:
+        class _Adapter:
+            def summarise(self, transcript: str) -> str:
+                return summarise(transcript)
+        monkeypatch.setattr(session, 'adapter', _Adapter())
+        monkeypatch.setattr(config, 'KEEP_RECENT_GROUPS', 1)
+        monkeypatch.setattr(session, 'messages', self._messages())
+
+    def test_no_compaction_under_limit(self, monkeypatch) -> None:
+        self._arm(monkeypatch, lambda t: 'S')
+        monkeypatch.setattr(session, 'num_ctx', 100_000)
+        conversation.compact_messages()
+        assert session.struggle['compactions'] == 0
+
+    def test_eviction_counts_once(self, monkeypatch) -> None:
+        self._arm(monkeypatch, lambda t: 'S')
+        monkeypatch.setattr(session, 'num_ctx', 100)
+        conversation.compact_messages()
+        assert session.struggle['compactions'] == 1
+
+    def test_summary_counts_once(self, monkeypatch) -> None:
+        calls: list = []
+
+        def summarise(t):
+            calls.append(t)
+            return 'S'
+        self._arm(monkeypatch, summarise)
+        monkeypatch.setattr(session, 'num_ctx', 1)
+        conversation.compact_messages(force=True)
+        assert len(calls) == 1
+        assert session.struggle['compactions'] == 1
+        assert 'Summary of earlier conversation' in \
+            session.messages[1]['content']
 
 
 class TestContextBreakdown:
@@ -262,7 +400,8 @@ class TestFileShaLedger:
         conversation.refresh_system_context()
         session.file_shas.clear()
         conversation.refresh_system_context()
-        assert session.messages[0]['content'] == 'BASE'
+        body = session.messages[0]['content']
+        assert body.startswith('BASE') and '[open files]' not in body
 
     def test_refresh_shows_relative_path(self, tmp_path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
@@ -340,6 +479,56 @@ class TestSystemContext:
             session, 'messages', [{'role': 'system', 'content': 'BASE'}])
         conversation.refresh_system_context()      # must not raise
         assert '[role:' not in session.messages[0]['content']
+
+
+class TestProjectBlock:
+    """The '[project]' block: cwd name, absolute path and git branch, so
+    every agent (the controller above all) knows which project a request
+    refers to (triage 2026-09-23-claude-tiers: the controller asked
+    "which repository?" instead of delegating)."""
+
+    def _base(self, monkeypatch, branch) -> None:
+        monkeypatch.setattr(skills, 'REGISTRY', {})
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(session, 'active_role', None)
+        monkeypatch.setattr(session, 'active_skill', None)
+        monkeypatch.setattr(session, 'git_branch', branch)
+        monkeypatch.setattr(
+            session, 'messages', [{'role': 'system', 'content': 'BASE'}])
+
+    def test_names_cwd_and_branch(self, tmp_path, monkeypatch) -> None:
+        proj = tmp_path / 'myproj'
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        self._base(monkeypatch, 'feat/x')
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert body.startswith('BASE')
+        assert '[project]' in body
+        assert 'myproj' in body and str(proj.resolve()) in body
+        assert 'feat/x' in body
+        assert 'requests refer to it' in body
+
+    def test_no_branch_line_without_git(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._base(monkeypatch, None)
+        conversation.refresh_system_context()
+        body = session.messages[0]['content']
+        assert '[project]' in body and '- git branch:' not in body
+
+    def test_rendered_once_across_calls(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._base(monkeypatch, 'main')
+        conversation.refresh_system_context()
+        conversation.refresh_system_context()
+        assert session.messages[0]['content'].count('[project]') == 1
+
+    def test_helper_returns_block(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(session, 'git_branch', None)
+        block = conversation.project_block()
+        assert block.startswith('[project]')
+        assert str(tmp_path.resolve()) in block
 
 
 class TestFocusedSummary:

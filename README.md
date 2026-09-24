@@ -48,6 +48,8 @@ Requires the Ollama app running in the menu bar (for local models).
 | `/resume` | Restore a previously saved conversation (interactive selector) |
 | `/compact` | Shrink the conversation to free up context now |
 | `/search <query>` | Call `web_search` directly and optionally `web_fetch` a result |
+| `/good [note]`, `/bad [note]` | Label the last completed turn (and the sub-agent tasks it spawned) in the ledger's `labels` stream |
+| `/ledger` | Print this run's spend: calls, tokens and cost per model, tasks per model, the three most expensive tasks |
 | `exit` / `quit` | Exit |
 
 ## Roles & skills
@@ -94,6 +96,109 @@ the prompt toolbar.
   still too large, folds the oldest turns into a summary. Recent turns and the
   system prompt are always kept. Trigger it manually with `/compact`.
 
+## Ledger and decisions (shadow and active modes)
+
+guru keeps an append-only ledger under `~/.guru/ledger/`, one JSONL file per
+stream per UTC day (`calls-2026-09-23.jsonl`, `turns-…`, `tasks-…`,
+`decisions-…`, `labels-…`). It records one row per model call (adapter, model, tokens
+including cache reads and writes, seconds, cost), per user turn (request,
+model, tools used, tasks spawned, time, tokens, cost) and per spawned
+sub-agent task (task text, role/skill, status, time, tokens; a task row is
+written at spawn and again when it finishes, with its call count, tokens and
+cost filled in from the sub-agent's session accumulators — cost is null when
+any of its calls hit a model whose price is unknown). Rows are written on
+a background worker and never block a turn; a failed write is logged and the
+ledger switches itself off for the rest of the run.
+
+Cost comes from a bundled Anthropic price table (USD per million tokens),
+overridable per field under `[pricing."<model>"]` in `~/.guru/settings.toml`
+(`input_per_m`, `output_per_m`, `cache_read_per_m`, `cache_write_5m_per_m`,
+`cache_write_1h_per_m`; a model not in the table needs at least `input_per_m`
+and `output_per_m`). Local Ollama models cost zero; when a LiteLLM proxy
+reports a per-response cost, that figure wins over the table; a model the
+table does not know gets a null cost. Disable the whole ledger with
+`[ledger] enabled = false`.
+
+Reading it back: the status bar shows the run's spend after the token
+counters (`$0.0123`, or `$?` once any call could not be priced); `/ledger`
+prints the current run (calls, tokens and cost per model, tasks per model,
+the three most expensive tasks); `/good [note]` and `/bad [note]` label the
+last completed turn and its tasks in the `labels` stream (the ledger itself
+is never edited). `.venv/bin/python bench/ledger_report.py [--dir DIR]`
+aggregates across days as Markdown: calls per model, task latency p50/p95
+per kind and complexity, fallback/retry rates, and judge-vs-heuristic and
+judge-vs-label agreement per decision point.
+
+The review loop has its own CLI, `python -m guru.ledger_cli`
+(`docs/review-loop.md`): `review --point stall [--n 50]` shows the newest
+unlabelled decision rows for a point and takes `y`/`n`/`s`/`q` (the correct
+answer to the judge's question; each answer is a `labels` row keyed
+`<point>:<question>:<input_sha>`), `report [--point stall]` (also
+`make ledger-report`) scores every judge against the heuristic and the
+labels (precision, recall, F1, false-positive rate) and suggests the
+`P(yes)` threshold that maximises F1, and `tasks --unlabelled [--n 20]`
+lists recent unlabelled tasks with route, status, cost and transcript path
+for triage.
+
+The same ledger holds a `decisions` stream: guru's small closed-form
+decisions — is this reply a stall, does this task need a security /
+architecture / reliability reviewer, is a fetched page a prompt-injection
+attempt — can be handed to a fast local judge alongside the built-in
+heuristic. In `shadow` mode judges only *observe*: the heuristic still
+decides, and both answers are logged so the first few hundred can be
+reviewed before any judge is trusted. In `active` mode the points listed
+under `[decisions.active]` take the judge's answer: the judge runs
+synchronously (on its own worker, apart from the shadow batches) with a
+`timeout_ms` budget, a yes/no question is decided by
+`P(yes) >= [decisions.thresholds].<point>` (default 0.5; shadow rows apply
+the same threshold so they preview it), and on timeout, error or a missing
+judge the heuristic decides and the row records why (`used`,
+`fallback_reason`, `queued_ms`). After `breaker_timeouts` consecutive
+timeouts (default 5) a point's judge is skipped for `breaker_cooldown_s`
+(default 60). Points not listed stay in shadow. Off by default; enable in
+`~/.guru/settings.toml`:
+
+```toml
+[decisions]
+mode = "shadow"                 # off | shadow | active
+sidecar_model = "qwen3:4b"      # Ollama model for the "ollama" judge (~3.5 GB resident)
+sidecar_url = "http://localhost:11434"
+timeout_ms = 1500               # active: max wait for a judge per decision
+labels_margin = 0.15            # active labels: judge's top tier must beat the
+                                #   runner-up by this much to override
+[decisions.points]              # decision point -> judge spec
+stall = "ollama"                # small decoder, JSON-constrained answer
+panel = "encoder"               # zero-shot NLI encoder (needs the extra)
+injection = "injection"         # prompt-injection classifier (needs the extra)
+labels = "encoder"              # the controller's kind/complexity labels
+[decisions.active]              # active mode only: which points the judge decides
+stall = true
+labels = true
+[decisions.thresholds]          # P(yes) at or above which a judge says yes
+stall = 0.6
+```
+
+Two points can act on a judge's verdict: `stall` (whether a turn is
+nudged) and `labels`, a margin-gated *tie-breaker* for the complexity label
+a controller puts on a spawned task — the judge's tier routes the task
+only when it differs from the controller's and beats the runner-up by
+`labels_margin`; the task row's `reason` then says
+`labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
+lost on margin leaves a row with `fallback_reason = "margin"` (the kind
+label is only observed). `panel` and `injection` are shadow-only until the
+review loop promotes them. The promotion rule (100+ labelled rows, judge beats the
+heuristic, acceptable false-positive rate) and the labelling procedure are in
+`docs/review-loop.md`.
+
+Judge specs are `ollama` or `ollama:<model>`, `encoder` or
+`encoder:<hf-model>` (default `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`)
+and `injection` or `injection:<hf-model>` (default
+`protectai/deberta-v3-base-prompt-injection-v2`). The encoder and injection
+judges need `uv sync --extra judge` (torch + transformers, about 1 GB);
+without it they are skipped with a log line and the heuristic runs alone.
+Design and measurements: `docs/plans/2026-09-23-routing-framework-design.md`,
+`bench/primitives/README.md`.
+
 ## Multi-agent
 
 guru runs a hybrid multi-agent UI: the main agent lives in the normal terminal
@@ -104,6 +209,119 @@ sub-agents finishes with `join`. Sub-agents read bulk tool output in their own
 context and return only their conclusion, keeping the main context small.
 `Ctrl+N` spawns and views a new agent; `Shift+Right`/`Shift+Left` move between
 viewers.
+
+## Routing (controller and ladder)
+
+Sub-agent tasks can be *routed*: the model that runs a spawned task is picked
+from a ladder of rungs (cheapest first) by the task's labels rather than
+inherited from the parent. The `spawn` tool carries two labels the model
+fills in — `kind` (`debug`, `build`, `refactor`, `review`, `explain`, `docs`,
+`ops`, `other`) and `complexity` (`trivial`, `standard`, `hard`) — and
+`[routing]` in `~/.guru/settings.toml` says what to do with them:
+
+```toml
+[routing]
+mode = "local-and-remote"   # local-only | local-and-remote | remote-only
+controller = true           # main agent only coordinates (see below);
+                            # default: on when any ladder rung is configured
+complexity_router = true    # pick the lowest rung that covers the complexity
+type_router = false         # use the per-kind ladders below (default: no)
+spend_confirm = "ask"       # ask | auto | never
+secret_scan = true          # findings force local + redact remote tool output
+
+[[routing.ladder]]          # the default ladder, lowest rung first:
+adapter = "SBP Litellm"     # Claude tiers via a LiteLLM adapter (the name
+model = "aws/claude-4-5-haiku"   # must match an [[adapter]] in adapters.toml)
+max_complexity = "trivial"  # the hardest task this rung should take
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
+default = true              # used when complexity_router = false
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
+max_complexity = "hard"
+
+[[routing.ladders.review]]  # optional per-kind ladder (only with type_router)
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
+max_complexity = "hard"
+```
+
+Without a `[routing]` table guru behaves exactly as before: children run on
+the parent's adapter and model, nothing is scanned or redacted, and no spend
+question is asked. With one, secret scan and redaction default on. A rung
+naming an adapter that is not configured is dropped with a warning at
+startup; an invalid table logs a warning and the defaults apply. The
+parent's own adapter/model is always *pre-approved*: it is the "no change"
+fallback, it never needs a spend confirmation and neither a scan finding nor
+a declined confirmation takes it away (the parent already runs that model
+and already saw the task text); only `mode = "local-only"` refuses to fall
+back to a remote parent model.
+
+**Working modes.** `local-only` never runs a task on an adapter that sends
+content off-machine (Ollama is local; Anthropic and LiteLLM are remote);
+`remote-only` never runs one locally; `local-and-remote` uses the whole
+ladder. With `complexity_router` on, a task takes the lowest surviving rung
+whose `max_complexity` is at least its complexity; off, the ladder's
+`default` rung. When the chosen ladder is emptied by the filters the task
+falls back to the default ladder, then to the parent's own model
+(pre-approved, see above), then to the first surviving rung of any ladder.
+A spawn is *refused* only when no permitted rung is left after those steps:
+in `remote-only` mode (where the parent model is never a fallback) when the
+filters strip every remote rung — a secret-scan finding, or a declined spend
+confirmation — or in `local-only` mode when the parent itself runs remotely
+and no ladder has a local rung. The spawn tool reports why and a `refused`
+task row is written. Every filter that changed the outcome is listed
+verbatim in the task row's `reason` (and its `route`).
+
+**Controller mode.** `controller = true` turns the main agent into a
+coordinator: it converses, clarifies, decomposes with
+`spawn(task, kind, complexity, role, skill)`, polls with `check`, waits with
+`join` and synthesises — and never executes a task itself. Its tool set is
+exactly `spawn`, `check`, `join`, `use_skill` (no file or web tools). The
+key defaults to on as soon as any ladder rung is configured (a ladder
+without a controller is the configuration that over-read in the
+2026-09-24 real cases); set `controller = false` next to a ladder to keep
+the main agent hands-on, and it is off without a ladder. A controller
+that does the work anyway is measured, not punished: the turn row carries
+`controller_executed = true` when it attempted any other tool or answered
+with more than 600 characters without spawning. A hands-on main agent has
+an over-read guard instead: after `OVER_READ_LIMIT` (8) distinct files
+read in one turn without a spawn it is told, once, to delegate
+(struggle counter `over_read`).
+
+**Spend confirmation.** In `ask` mode the first task that would run on a
+remote (paid) *ladder rung* asks once per run — "Allow remote model spend for this
+run?" — and the answer is remembered; a decline strips remote rungs for the
+rest of the run and the task falls back to the best local rung. `auto`
+never asks; `never` records that no confirmation applies. The headless
+benchmark and the eval runner always decline.
+
+**Secret scan and redaction.** With `secret_scan = true` a regex scanner
+(AWS/GitHub/Slack/Google keys, private-key blocks, JWTs, generic
+`password = …` assignments, plus your own markers from
+`.guru/sensitive_markers.txt`; false positives are silenced with regexes in
+`.guru/scan_allow.txt`) runs over every task text: any finding forces a
+local rung (`findings` on the task row). While a sub-agent runs on a remote
+adapter, every tool result passes through the same scanner and findings are
+replaced with `[REDACTED:<kind>]` before the text leaves the machine; the
+count lands in the task's `struggle.redactions`.
+
+**Retry rule.** A task that ran on a remote rung and ended without an answer
+after a provider error is respawned once on the best local rung (mode forced
+to `local-only` for that pick); the original row closes as `fell_back` and
+the retry carries `retry_of = <original task id>`. A retry that fails too
+is delivered to the parent as an error; there is never a second retry, and
+a cancelled task is not retried.
+
+**GPU fit.** Whenever an `ollama` judge is configured under `[decisions]`
+(and decisions are not `off`), the sidecar model's size x 1.2 is reserved
+out of the measured GPU budget before the main model's context is fitted,
+so the two do not spill each other.
 
 ## Providers
 
@@ -201,6 +419,8 @@ Remote models are queried for their context window; no memory is shown.
   - `model_timeout` — per-model wall-clock ceiling (seconds) for the headless
     benchmark; a model that stalls past it is cancelled and recorded as a
     timeout (default `600`; `0` disables the guard).
+- `[routing]`, `[[routing.ladder]]`, `[[routing.ladders.<kind>]]` — see
+  **Routing (controller and ladder)** above.
 
 **Per-project** — a `.guru/` folder in the current directory, so project
 state travels with the project (created lazily on first write):

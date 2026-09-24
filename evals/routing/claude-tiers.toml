@@ -1,0 +1,33 @@
+# Config 1: Claude is the controller and every worker; the ladder is the
+# three Claude tiers behind the LiteLLM adapter (design decision 10).
+#
+# Run with the controller on the same adapter, e.g.
+#   --model 'SBP Litellm|aws/claude-5-sonnet' --allow-spend
+# The controller only spawns/checks/joins; trivial tasks land on Haiku,
+# standard tasks on Sonnet (the default rung) and hard tasks on Opus. The
+# adapter name below must match the `name` of an [[adapter]] in
+# ~/.guru/adapters.toml exactly.
+
+[routing]
+mode = "local-and-remote"
+controller = true
+complexity_router = true
+type_router = false
+spend_confirm = "auto"
+secret_scan = true
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-4-5-haiku"
+max_complexity = "trivial"
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
+default = true
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
+max_complexity = "hard"

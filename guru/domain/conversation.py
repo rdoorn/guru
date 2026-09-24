@@ -1,7 +1,9 @@
 """Neutral conversation handling: save/resume and compaction (hybrid D).
 
 The neutral message format is the normalized dict
-``{role, content, tool_calls?, tool_name?}``. Adapters translate to/from it,
+``{role, content, tool_calls?, tool_name?, tool_args?}`` (``tool_args``,
+the call's arguments, is kept in memory only for the delegation nudge and
+is not persisted). Adapters translate to/from it,
 so these operations are provider-independent.
 """
 import ast
@@ -10,9 +12,10 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable, Optional
 
 from guru import config, log, session, skills, ui
-from guru.domain import tools
+from guru.domain import ledger, tools
 
 
 def message_to_dict(msg: object) -> dict:
@@ -32,6 +35,76 @@ def message_to_dict(msg: object) -> dict:
     if data.get('tool_calls'):
         out['tool_calls'] = data['tool_calls']
     return out
+
+
+TRANSCRIPT_ARG_CHARS = 500    # per-argument cap in saved transcripts
+
+
+def _call_parts(call: object) -> tuple:
+    """``(name, arguments)`` from any tool-call shape we store or receive:
+    provider dicts/objects with ``function.name``/``function.arguments``,
+    already-serialised ``{'name', 'args'}`` records, or bare names."""
+    if isinstance(call, str):
+        return call, {}
+    if isinstance(call, dict):
+        if 'function' not in call:            # transcript record shape
+            return call.get('name', ''), call.get('args', {})
+        fn = call.get('function')
+    else:
+        fn = getattr(call, 'function', None)
+    if fn is None:
+        return '', {}
+    if isinstance(fn, dict):
+        return fn.get('name', ''), fn.get('arguments')
+    return getattr(fn, 'name', ''), getattr(fn, 'arguments', None)
+
+
+def tool_call_records(tool_calls: Optional[Iterable],
+                      limit: int = TRANSCRIPT_ARG_CHARS) -> list:
+    """Normalise a message's tool calls for a saved transcript.
+
+    Each call becomes ``{'name': str, 'args': dict}``. Argument values longer
+    than ``limit`` characters (non-strings measured as JSON) are cut to
+    ``limit`` and the record gains a ``note`` naming them with their original
+    sizes. Accepts provider dicts, provider objects, JSON-string arguments
+    (LiteLLM), earlier transcript records and bare names, so re-reading an
+    old transcript through it is safe.
+    """
+    out: list = []
+    for call in tool_calls or []:
+        name, raw = _call_parts(call)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw or '{}')
+            except ValueError:
+                raw = {'_raw': raw}
+        if not isinstance(raw, dict):
+            raw = {'_raw': raw} if raw is not None else {}
+        args: dict = {}
+        clipped: list = []
+        for key, value in raw.items():
+            text = value if isinstance(value, str) else \
+                json.dumps(value, ensure_ascii=False, default=str)
+            if len(text) > limit:
+                clipped.append(f'{key} ({len(text)} chars)')
+                value = text[:limit]
+            args[key] = value
+        rec: dict = {'name': name, 'args': args}
+        if clipped:
+            rec['note'] = (f'truncated to {limit} chars: '
+                           + ', '.join(clipped))
+        out.append(rec)
+    return out
+
+
+def transcript_record(msg: object) -> dict:
+    """:func:`message_to_dict` with ``tool_calls`` reduced to
+    :func:`tool_call_records` — the shape saved transcripts use. Not for
+    save/resume, which needs the raw provider ``tool_calls``."""
+    rec = message_to_dict(msg)
+    if rec.get('tool_calls'):
+        rec['tool_calls'] = tool_call_records(rec['tool_calls'])
+    return rec
 
 
 def msg_role(msg: object) -> str:
@@ -181,6 +254,26 @@ def _summarise_groups(groups: list) -> str:
 _DYN_SEP = "\n\n--- active context ---\n"
 
 
+def project_block() -> str:
+    """The '[project]' block: the working directory's name, absolute path
+    and git branch, plus the rule that requests refer to it.
+
+    Rendered for every agent so none of them has to guess which codebase a
+    request means; the controller, which has no file tools, relies on it
+    (triage 2026-09-23-claude-tiers: it asked "which repository?" instead of
+    delegating).
+    """
+    cwd = Path.cwd().resolve()
+    lines = ["[project]", f"- name: {cwd.name}", f"- path: {cwd}"]
+    branch = session.git_branch
+    if branch:
+        lines.append(f"- git branch: {branch}")
+    lines.append(
+        "This working directory is the current project; user requests refer"
+        " to it unless they say otherwise.")
+    return "\n".join(lines)
+
+
 def _ledger_block() -> str:
     """The '[open files]' sha list, or '' when nothing is tracked."""
     ledger = session.file_shas
@@ -204,11 +297,12 @@ def _ledger_block() -> str:
 def refresh_system_context() -> None:
     """Rebuild the dynamic tail of the system prompt (messages[0]) in place.
 
-    Renders, in order, the roles/skills catalog, the active role overlay, the
-    active skill overlay, and the open-files sha ledger -- each a single copy
-    that survives pruning/compaction (message 0 is always kept) and is counted
-    in the 'sys' context bucket. Idempotent: the previous tail is stripped
-    first, so calling it every turn never doubles it.
+    Renders, in order, the project block (cwd + branch), the roles/skills
+    catalog, the active role overlay, the active skill overlay, and the
+    open-files sha ledger -- each a single copy that survives
+    pruning/compaction (message 0 is always kept) and is counted in the
+    'sys' context bucket. Idempotent: the previous tail is stripped first,
+    so calling it every turn never doubles it.
     """
     msgs = session.messages
     if not msgs or not isinstance(msgs[0], dict) \
@@ -216,7 +310,7 @@ def refresh_system_context() -> None:
         return
     base = (msgs[0].get('content') or '').split(_DYN_SEP)[0]
 
-    sections = []
+    sections = [project_block()]
     catalog = skills.catalog_block()
     if catalog:
         sections.append(catalog)
@@ -435,6 +529,7 @@ def compact_messages(force: bool = False) -> None:
     if not force and estimate_tokens(flat) <= limit:
         ui.console.print("[dim]\\[COMPACT] evicted old tool outputs[/dim]")
         session.messages = [system] + flat
+        ledger.bump('compactions')
         return
 
     if old:
@@ -448,5 +543,6 @@ def compact_messages(force: bool = False) -> None:
         ui.console.print(
             "[dim]\\[COMPACT] folded older turns into a summary[/dim]"
         )
+        ledger.bump('compactions')
     else:
         session.messages = [system] + flat

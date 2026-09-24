@@ -423,9 +423,21 @@ def _status_parts() -> tuple:
     ctx_segment = f"🧠 {int(pct * 100)}% {bar}"
     right = (
         f" | ↓ {session.session_in} | ↑ {session.session_out}"
+        f"{_status_cost()}"
         f" | 📁 {Path.cwd().name} | 🌿 {session.git_branch or 'none'}"
     )
     return left, ctx_segment, right, colour
+
+
+def _status_cost() -> str:
+    """' | $0.0123' once the run has spent money; ' | $0.0123+?' when
+    some calls could not be priced (known partial spend plus marker);
+    ' | $?' when nothing is known; '' otherwise (local-only runs stay
+    uncluttered)."""
+    spent = f'${session.cost_usd:.4f}' if session.cost_usd > 0 else ''
+    if not session.cost_known:
+        return f' | {spent}+?' if spent else ' | $?'
+    return f' | {spent}' if spent else ''
 
 
 # The status bar is two pinned lines: a full-width rule, then the status.

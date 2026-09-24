@@ -1,4 +1,4 @@
-.PHONY: bench bench-plot test lint typecheck yarn
+.PHONY: bench bench-plot test lint typecheck yarn ledger-report
 
 VENV ?= .venv/bin
 RESULTS ?= $(shell ls -t bench/results-*.json 2>/dev/null | head -1)
@@ -17,11 +17,14 @@ bench-plot:       ## Plot the latest results (override with RESULTS=...)
 	@test -n "$(RESULTS)" || { echo "no results file; run 'make bench'"; exit 1; }
 	$(VENV)/python -m guru.bench_plot $(RESULTS)
 
+ledger-report:    ## Judge vs heuristic vs labels per decision point (guru.ledger_cli report)
+	$(VENV)/python -m guru.ledger_cli report
+
 test:             ## Run the test suite
 	$(VENV)/python -m pytest -q
 
 lint:             ## Lint with flake8
-	$(VENV)/flake8 guru bench tests
+	$(VENV)/flake8 guru bench tests evals
 
 typecheck:        ## Type-check with mypy (local; there is no CI)
 	$(VENV)/python -m mypy guru

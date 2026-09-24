@@ -8,6 +8,8 @@ the routed ``SessionState`` fields plus the module functions — mirroring
 """
 from typing import Any, Optional
 
+STRUGGLE_KEYS: tuple[str, ...]
+
 
 class SessionState:
     adapter: Any
@@ -28,6 +30,18 @@ class SessionState:
     active_skill: Optional[str]
     cancel_requested: bool
     can_spawn: bool
+    controller: bool
+    agent_id: str
+    task_id: str
+    turn_id: str
+    call_count: int
+    cost_usd: float
+    cost_known: bool
+    unpriced_calls: int
+    struggle: dict[str, int]
+    last_error: str
+    turn_waiting: bool
+    check_polls: int
     def __init__(self) -> None: ...
 
 
@@ -55,3 +69,15 @@ active_role: Optional[str]
 active_skill: Optional[str]
 cancel_requested: bool
 can_spawn: bool
+controller: bool
+agent_id: str
+task_id: str
+turn_id: str
+call_count: int
+cost_usd: float
+cost_known: bool
+unpriced_calls: int
+struggle: dict[str, int]
+last_error: str
+turn_waiting: bool
+check_polls: int

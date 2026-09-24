@@ -201,6 +201,22 @@ def setup(reset: bool = False) -> None:
     REGISTRY.update(load_registry(config.GURU_SKILLS_DIR))
 
 
+def ensure_loaded() -> None:
+    """Load the catalog once for headless entry points (bench, evals).
+
+    No-op when the registry is already populated. Unlike :func:`setup` it
+    never writes into an existing ``~/.guru/skills`` (the user's copies are
+    only read); the defaults are seeded only when the directory does not
+    exist yet, so a fresh machine still gets a catalog.
+    """
+    if REGISTRY:
+        return
+    from guru import config
+    if not config.GURU_SKILLS_DIR.exists():
+        seed_defaults(config.GURU_SKILLS_DIR)
+    REGISTRY.update(load_registry(config.GURU_SKILLS_DIR))
+
+
 def get(name: str) -> "SkillEntry | None":
     return REGISTRY.get(name)
 

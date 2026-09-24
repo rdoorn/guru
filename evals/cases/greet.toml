@@ -1,0 +1,13 @@
+name = "greet"
+fixture = "docs-only"
+prompt = "hi, what can you do?"
+timeout_s = 120
+tags = ["fast", "no-tools"]
+
+[expect.behaviour]
+tools_used_none = ["list_dir", "list_tree", "read_file", "search_code",
+                   "write_file", "edit_file", "delete_file"]
+spawned_max = 0
+
+[expect.content]
+answer_not_contains = ["I'll start by"]

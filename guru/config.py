@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from guru import log
+from guru.domain import routing as _routing
+
 # Global config lives in ~/.guru; project-specific state lives in a .guru/
 # folder inside the current project so it travels with the project.
 GURU_HOME = Path(os.path.expanduser('~/.guru'))
@@ -23,6 +26,11 @@ DOMAINS_ALLOW_PATH = PROJECT_GURU_DIR / 'domains_allow.txt'  # per-project
 READ_DIRS_ALLOW_PATH = PROJECT_GURU_DIR / 'read_dirs_allow.txt'   # read list
 WRITE_DIRS_ALLOW_PATH = PROJECT_GURU_DIR / 'write_dirs_allow.txt'  # write list
 PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
+# Secret scanner (guru/scanners/secrets.py): project code names that must
+# never reach a remote model (one literal per line), and regexes whose
+# matches suppress a finding (known test fixtures, sample keys).
+SENSITIVE_MARKERS_PATH = PROJECT_GURU_DIR / 'sensitive_markers.txt'
+SCAN_ALLOW_PATH = PROJECT_GURU_DIR / 'scan_allow.txt'
 
 # Access mode (session-level policy). Separate from the allow-lists: it decides
 # whether we prompt, auto-approve, or refuse. read-only refuses writes; ask
@@ -33,6 +41,12 @@ MODE_ASK = 'ask-for-changes'
 MODE_AUTO = 'auto'
 MODES = (MODE_READ_ONLY, MODE_ASK, MODE_AUTO)
 MODE = MODE_ASK
+# Escalation policy for auto mode: when True (the default) auto grants and
+# persists any new directory/domain without asking. When False, auto mode
+# still consults the asker for escalations outside the allow-lists, so a
+# sandbox (the eval runner) can deny them while auto-approving everything
+# inside its own allow-lists. Domain-level knob; not a settings key.
+AUTO_GRANT = True
 # Remembers the last-used adapter + model for this project.
 PROJECT_SETTINGS_PATH = PROJECT_GURU_DIR / 'settings.json'
 
@@ -80,6 +94,71 @@ SAMPLING_PER_MODEL: dict = {}    # {model_id: {param: value}}
 # model_timeout (seconds). Set above the slowest legitimate run (a real 24B run
 # can take ~400s); 0 disables the guard.
 BENCH_MODEL_TIMEOUT = 600
+
+# Decision seam (guru/domain/decisions.py). In "shadow" mode the existing
+# heuristics keep deciding; a configured judge answers the same question in
+# the background and both answers are logged. In "active" mode the points
+# listed under [decisions.active] take the judge's answer (bounded by
+# timeout_ms, falling back to the heuristic); every other configured point
+# stays shadow. settings.toml:
+#   [decisions]
+#   mode = "shadow"              # off | shadow | active
+#   sidecar_model = "qwen3:4b"   # Ollama model for the "ollama" judge
+#   sidecar_url = "http://localhost:11434"
+#   timeout_ms = 1500            # active: max wait for a judge per decision
+#   breaker_timeouts = 5         # active: consecutive timeouts that open the
+#   breaker_cooldown_s = 60      #   per-point breaker, and for how long
+#   labels_margin = 0.15         # active labels: the judge's top tier must
+#                                #   beat its runner-up by this much to
+#                                #   override the controller's complexity
+#   [decisions.points]           # decision point -> judge spec
+#   stall = "ollama"             # ollama | ollama:<model> | encoder |
+#   panel = "encoder"            # encoder:<hf-model> | injection
+#   injection = "injection"
+#   [decisions.active]           # active mode: which points the judge decides
+#   stall = true
+#   labels = true                # complexity tie-breaker (margin-gated)
+#   [decisions.thresholds]       # noul: judge says yes when P(yes) >= this
+#   stall = 0.6                  # (default 0.5)
+DECISIONS_MODES = ('off', 'shadow', 'active')
+JUDGING_MODES = ('shadow', 'active')      # modes in which judges run at all
+DECISIONS_MODE = 'off'
+DECISIONS_SIDECAR_MODEL = 'qwen3:4b'
+DECISIONS_SIDECAR_URL = 'http://localhost:11434'
+DECISIONS_POINTS: dict = {}
+DECISIONS_ACTIVE: dict = {}
+DECISIONS_THRESHOLDS: dict = {}
+DECISIONS_TIMEOUT_MS = 1500
+DECISIONS_BREAKER_TIMEOUTS = 5
+DECISIONS_BREAKER_COOLDOWN_S = 60.0
+DECISIONS_LABELS_MARGIN = 0.15
+
+# Routing (guru/domain/routing.py, guru/repositories/settings.py): the typed
+# [routing] table is loaded by the CLI at startup. SECRET_SCAN mirrors its
+# secret_scan flag for the tool layer, which redacts tool results bound to a
+# remote adapter (guru.domain.policy) when it is on. Off until a [routing]
+# table is configured (guru behaves exactly as before without one).
+SECRET_SCAN = False
+
+# Ledger (guru/domain/ledger.py): append-only JSONL streams of every model
+# call, turn and sub-agent task under ~/.guru/ledger/. [ledger] enabled=false
+# turns it off. [pricing."<model>"] overrides the bundled price table
+# (input_per_m, output_per_m, cache_write_5m_per_m, cache_write_1h_per_m,
+# cache_read_per_m; USD per million tokens).
+LEDGER_DIR = GURU_HOME / 'ledger'
+LEDGER_ENABLED = True
+PRICING_OVERRIDES: dict = {}
+
+# Eval suite (guru/evals): the default ``Adapter|model`` spec ('' = guru's
+# default model, as the CLI would pick) and the context window the model is
+# pinned to for a run (0 = the GPU auto-fit; 8192 keeps a 24 GB Mac from
+# loading an 8B at 40k and crawling). settings.toml:
+#   [evals]
+#   model = "Ollama|qwen3:14b"
+#   num_ctx = 8192
+# ``python -m guru.evals run --model/--num-ctx`` override both.
+EVALS_MODEL = ''
+EVALS_NUM_CTX = 8192
 
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
@@ -207,6 +286,38 @@ DELEGATION_HINT = (
     " Prefer delegating a domain panel over reading many files yourself."
 )
 
+# Appended instead of DELEGATION_HINT when [routing] controller = true: the
+# main agent only converses and coordinates; every task runs in a routed
+# sub-agent (design doc §2).
+CONTROLLER_HINT = (
+    "You are a CONTROLLER. You converse with the user, ask clarifying"
+    " questions when the request is ambiguous, and DECOMPOSE every piece of"
+    " actual work into sub-agent tasks — you never execute a task yourself."
+    " Your only tools are spawn, check, join and use_skill; never call file,"
+    " code or web tools (you do not have them).\n"
+    "The working directory in the [project] block of the active context"
+    " (name, absolute path, git branch) is the current project; the user's"
+    " requests refer to it unless they say otherwise. 'This repository',"
+    " 'the codebase', 'the tests', 'the README' all mean that project."
+    " Never ask which repository, path or codebase is meant: delegate"
+    " immediately with a self-contained task that names the project path,"
+    " and let the sub-agent look around (it has the file tools you lack).\n"
+    "For each task call spawn(task, kind, complexity, role, skill): write a"
+    " clear, self-contained task; label kind as one of debug, build,"
+    " refactor, review, explain, docs, ops, other and complexity as one of"
+    " trivial, standard, hard (the labels pick the model that runs it);"
+    " add the role (persona) and skill (method) from the catalog that fit."
+    " Complexity: " + '; '.join(
+        f'{tier} = {desc}'
+        for tier, desc in _routing.COMPLEXITY_DESCRIPTIONS.items())
+    + ". Use all three tiers — a task that a"
+    " small model can do on trivial, one that needs care on hard.\n"
+    "Spawn independent tasks in parallel, use check to poll and join to be"
+    " resumed when a group finishes, then SYNTHESISE the results into one"
+    " answer for the user. Reply directly, briefly, for greetings, questions"
+    " about yourself, or clarifications that need no work."
+)
+
 # Deterministic code-review panel (the /review command) and the target of the
 # delegation steering: each entry is (role, skill, focus) — one specialist
 # sub-agent to spawn in parallel. Kept small on purpose; architect/SRE are
@@ -219,10 +330,18 @@ REVIEW_PANEL = [
 ]
 
 # Delegation nudge: if a delegation-capable MAIN agent answers a broad task
-# (>= this many file reads) having spawned no sub-agent, nudge it once to
-# decompose into a parallel domain panel. Set 0 to disable the nudge.
+# (>= this many DISTINCT paths read with the read tools, and a request
+# that is not a single-file edit) having spawned no sub-agent, nudge it
+# once to decompose into a parallel domain panel. Never for a controller.
+# Set 0 to disable the nudge.
 DELEGATION_NUDGE_MIN_READS = 3
 DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
+# Over-read guard (turn._drive): a delegation-capable MAIN agent that reads
+# this many DISTINCT paths in one turn without spawning is nudged to
+# delegate right away, mid-turn, once per turn (triage 2026-09-24: plain
+# Sonnet read 87 files before delegating). Never for a controller (it has
+# no read tools). Set 0 to disable.
+OVER_READ_LIMIT = 8
 
 
 def review_tasks(area: str = 'the repository') -> list:
@@ -394,10 +513,17 @@ def load_context_settings() -> dict:
 
 
 def _apply_settings() -> None:
-    """Apply settings.toml overrides (retention, pre-activation, sampling)."""
+    """Apply settings.toml overrides (retention, tools, sampling, bench,
+    decisions, ledger, pricing, evals)."""
     global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
+    global EVALS_MODEL, EVALS_NUM_CTX
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
     global BENCH_MODEL_TIMEOUT, FLAT_TOOLS
+    global DECISIONS_MODE, DECISIONS_SIDECAR_MODEL, DECISIONS_SIDECAR_URL
+    global DECISIONS_POINTS, DECISIONS_ACTIVE, DECISIONS_THRESHOLDS
+    global DECISIONS_TIMEOUT_MS, DECISIONS_BREAKER_TIMEOUTS
+    global DECISIONS_BREAKER_COOLDOWN_S, DECISIONS_LABELS_MARGIN
+    global LEDGER_ENABLED, PRICING_OVERRIDES
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -423,6 +549,59 @@ def _apply_settings() -> None:
             bench.get('model_timeout', BENCH_MODEL_TIMEOUT))
     except (TypeError, ValueError):
         pass
+    dec = settings_section('decisions')
+    mode = str(dec.get('mode', DECISIONS_MODE))
+    if mode not in DECISIONS_MODES:
+        log.info('ignoring unknown [decisions] mode %r; expected one of %s',
+                 mode, ', '.join(DECISIONS_MODES))
+    DECISIONS_MODE = mode if mode in DECISIONS_MODES else 'off'
+    DECISIONS_SIDECAR_MODEL = str(
+        dec.get('sidecar_model', DECISIONS_SIDECAR_MODEL))
+    DECISIONS_SIDECAR_URL = str(dec.get('sidecar_url', DECISIONS_SIDECAR_URL))
+    points = dec.get('points')
+    DECISIONS_POINTS = ({str(k): str(v) for k, v in points.items()}
+                        if isinstance(points, dict) else {})
+    active = dec.get('active')
+    DECISIONS_ACTIVE = ({str(k): v for k, v in active.items()
+                         if isinstance(v, bool)}
+                        if isinstance(active, dict) else {})
+    thresholds = dec.get('thresholds')
+    DECISIONS_THRESHOLDS = (
+        {str(k): float(v) for k, v in thresholds.items()
+         if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        if isinstance(thresholds, dict) else {})
+    try:
+        DECISIONS_TIMEOUT_MS = int(dec.get('timeout_ms', DECISIONS_TIMEOUT_MS))
+    except (TypeError, ValueError):
+        pass
+    try:
+        DECISIONS_BREAKER_TIMEOUTS = int(
+            dec.get('breaker_timeouts', DECISIONS_BREAKER_TIMEOUTS))
+        DECISIONS_BREAKER_COOLDOWN_S = float(
+            dec.get('breaker_cooldown_s', DECISIONS_BREAKER_COOLDOWN_S))
+    except (TypeError, ValueError):
+        pass
+    margin = dec.get('labels_margin', DECISIONS_LABELS_MARGIN)
+    if isinstance(margin, (int, float)) and not isinstance(margin, bool) \
+            and margin >= 0:
+        DECISIONS_LABELS_MARGIN = float(margin)
+    else:
+        log.info('ignoring [decisions] labels_margin %r; expected a '
+                 'non-negative number', margin)
+    ev = settings_section('evals')
+    model = ev.get('model', EVALS_MODEL)
+    if isinstance(model, str):
+        EVALS_MODEL = model.strip()
+    num_ctx = ev.get('num_ctx', EVALS_NUM_CTX)
+    if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) \
+            and num_ctx >= 0:
+        EVALS_NUM_CTX = num_ctx
+    LEDGER_ENABLED = bool(settings_section('ledger').get('enabled', True))
+    PRICING_OVERRIDES = {
+        str(k): {str(f): float(v) for f, v in tbl.items()
+                 if isinstance(v, (int, float))}
+        for k, tbl in settings_section('pricing').items()
+        if isinstance(tbl, dict)}
 
 
 def _toml_value(value: object) -> str:

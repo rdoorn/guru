@@ -1,0 +1,94 @@
+{
+ "per_model": {
+  "qwen3:4b": {
+   "cold_load_s": 2.46,
+   "resident": {
+    "qwen3:4b": 3.5
+   },
+   "trivial": {
+    "wall_s": 0.61,
+    "load_s": 0.01,
+    "prompt_tokens": 24,
+    "prompt_s": 0.08,
+    "gen_tokens": 32,
+    "gen_s": 0.51,
+    "tok_per_s": 62.6,
+    "answer": "Okay, so I need to translate 'good morning' into Dutch. Let "
+   },
+   "medium": {
+    "wall_s": 2.96,
+    "load_s": 0.0,
+    "prompt_tokens": 35,
+    "prompt_s": 0.07,
+    "gen_tokens": 200,
+    "gen_s": 2.86,
+    "tok_per_s": 70.0,
+    "answer": "We are to write a regex that matches ISO-8601 dates in the f"
+   }
+  },
+  "huihui_ai/qwen3-abliterated:8b": {
+   "cold_load_s": 2.97,
+   "resident": {
+    "huihui_ai/qwen3-abliterated:8b": 5.9
+   },
+   "trivial": {
+    "wall_s": 0.21,
+    "load_s": 0.0,
+    "prompt_tokens": 30,
+    "prompt_s": 0.1,
+    "gen_tokens": 5,
+    "gen_s": 0.1,
+    "tok_per_s": 51.7,
+    "answer": "Goedemorgen"
+   },
+   "medium": {
+    "wall_s": 3.89,
+    "load_s": 0.0,
+    "prompt_tokens": 41,
+    "prompt_s": 0.18,
+    "gen_tokens": 159,
+    "gen_s": 3.69,
+    "tok_per_s": 43.1,
+    "answer": "Here is a Python regex pattern that matches ISO-8601 dates i"
+   }
+  },
+  "qwen3:14b": {
+   "cold_load_s": 5.34,
+   "resident": {
+    "qwen3:14b": 9.6
+   },
+   "trivial": {
+    "wall_s": 0.37,
+    "load_s": 0.01,
+    "prompt_tokens": 30,
+    "prompt_s": 0.19,
+    "gen_tokens": 5,
+    "gen_s": 0.17,
+    "tok_per_s": 28.9,
+    "answer": "Goedemorgen"
+   },
+   "medium": {
+    "wall_s": 5.4,
+    "load_s": 0.0,
+    "prompt_tokens": 41,
+    "prompt_s": 0.34,
+    "gen_tokens": 119,
+    "gen_s": 5.04,
+    "tok_per_s": 23.6,
+    "answer": "Here's a Python regex that matches ISO-8601 dates in the for"
+   }
+  }
+ },
+ "coexistence": {
+  "small_load_next_to_big_s": 2.4,
+  "resident_after": {
+   "qwen3:4b": 3.6,
+   "huihui_ai/qwen3-abliterated:8b": 6.0
+  },
+  "big_again_s": 0.05,
+  "resident_final": {
+   "huihui_ai/qwen3-abliterated:8b": 6.0,
+   "qwen3:4b": 3.6
+  }
+ }
+}

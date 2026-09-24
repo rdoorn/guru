@@ -15,16 +15,18 @@ Config (adapters.toml):
     # models = ["azure/gpt-4.1", "anthropic/claude-..."]  # optional allowlist
 """
 import json
+import math
 import os
+import time
 
 import requests
 
 from guru import log, session, ui
 from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
-from guru.domain import tools
+from guru.domain import ledger, pricing, tools
 
-_MAX_TOKENS = 4096
+_MAX_TOKENS = 16384   # proxies may enforce a thinking budget above 8k
 _DEFAULT_CONTEXT = 128000
 # LiteLLM `mode` values that are not chat models — hidden from /models.
 _NON_CHAT_MODES = {
@@ -186,6 +188,25 @@ class LiteLLMAdapter(Adapter):
             model_id, _DEFAULT_CONTEXT)
         session.ctx_ceiling = session.num_ctx
 
+    # --- ledger --------------------------------------------------------------
+
+    def _record_call(self, phase: str, resp, seconds: float,
+                     cost_header=None) -> None:
+        """Write one CallRecord. ``cost_header`` is the proxy's per-response
+        cost (from :func:`_complete`); it wins over the price table. Never
+        raises into the turn."""
+        try:
+            usage = getattr(resp, 'usage', None)
+            ledger.record_call(
+                adapter=self.name, model=session.model,
+                usage=pricing.Usage(
+                    input_tokens=getattr(usage, 'prompt_tokens', 0) or 0,
+                    output_tokens=getattr(
+                        usage, 'completion_tokens', 0) or 0),
+                seconds=seconds, phase=phase, cost_header=cost_header)
+        except Exception:                                # noqa: BLE001
+            log.exc('litellm call record failed')
+
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
@@ -196,14 +217,17 @@ class LiteLLMAdapter(Adapter):
         def step():
             """One chat-completions round; returns (text, [(name, args, id)])
             or None on error (printed) — the shared loop handles cancel."""
+            t0 = time.perf_counter()
             try:
-                resp = client.chat.completions.create(
+                resp, cost = _complete(
+                    client,
                     model=session.model,
                     messages=native,
                     tools=oa_tools or None,
                     max_tokens=_MAX_TOKENS,
                 )
             except Exception as e:
+                _note_error(e)
                 ui.console.print(f"[red]LiteLLM error: {e}[/red]")
                 return None
 
@@ -214,6 +238,8 @@ class LiteLLMAdapter(Adapter):
                     getattr(usage, 'completion_tokens', 0) or 0)
                 session.ctx_used = (
                     getattr(usage, 'prompt_tokens', 0) or session.ctx_used)
+            self._record_call(
+                'step', resp, time.perf_counter() - t0, cost)
 
             msg = resp.choices[0].message
             text = msg.content or ''
@@ -263,7 +289,8 @@ class LiteLLMAdapter(Adapter):
                     'role': 'tool', 'tool_call_id': call_id,
                     'content': content})
                 session.messages.append({
-                    'role': 'tool', 'tool_name': name, 'content': content})
+                    'role': 'tool', 'tool_name': name, 'tool_args': args,
+                    'content': content})
 
         def add_user(text):
             native.append({'role': 'user', 'content': text})
@@ -275,7 +302,9 @@ class LiteLLMAdapter(Adapter):
 
     def summarise(self, transcript: str) -> str:
         try:
-            resp = self._client().chat.completions.create(
+            t0 = time.perf_counter()
+            resp, cost = _complete(
+                self._client(),
                 model=session.model,
                 max_tokens=1024,
                 messages=[
@@ -291,7 +320,42 @@ class LiteLLMAdapter(Adapter):
                     {'role': 'user', 'content': transcript},
                 ],
             )
+            self._record_call(
+                'summarise', resp, time.perf_counter() - t0, cost)
             return (resp.choices[0].message.content or '').strip() \
                 or '(summary unavailable)'
         except Exception as e:
+            _note_error(e)
             return f'(summary failed: {e})'
+
+
+_COST_HEADER = 'x-litellm-response-cost'
+
+
+def _complete(client, **kwargs) -> tuple:
+    """Run one chat completion; return ``(response, cost_or_None)``.
+
+    Goes through ``with_raw_response`` so the proxy's HTTP headers are
+    visible: a LiteLLM proxy reports the per-call price in
+    ``x-litellm-response-cost``. The ``openai`` client never populates the
+    litellm SDK's ``_hidden_params``, so the header is the only source.
+    Exceptions from the call propagate to the caller unchanged.
+    """
+    raw = client.chat.completions.with_raw_response.create(**kwargs)
+    return raw.parse(), _header_cost(getattr(raw, 'headers', None))
+
+
+def _header_cost(headers):
+    """Parse the cost header to a float; None when absent or malformed."""
+    try:
+        value = headers.get(_COST_HEADER) if headers is not None else None
+        cost = float(value) if value not in (None, '') else None
+        return cost if cost is not None and math.isfinite(cost) else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _note_error(e: Exception) -> None:
+    """Count a provider failure on the bound session and keep its text."""
+    ledger.bump('provider_errors')
+    session.last_error = repr(e)[:200]

@@ -6,11 +6,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from guru import config, session
+from guru import config, session, skills
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
-from guru.domain import conversation, files, tools
+from guru.domain import conversation, files, spend, tools
 from guru.orchestrator import Orchestrator
 
 PROMPT = ("i want you to inspect current code in this repository, and tell me"
@@ -99,7 +99,8 @@ def serialize_transcript(agents) -> list:
     """Flatten agents' message histories to JSON-safe records for debugging a
     run (why an answer was empty, which tools ran in what order). Normalises
     both dict messages and provider Message objects to role/content, keeping
-    tool names and the names of any tool calls."""
+    tool names and each tool call as ``{'name', 'args'}`` (argument values
+    capped at ``conversation.TRANSCRIPT_ARG_CHARS``)."""
     out = []
     for a in agents:
         msgs = []
@@ -111,28 +112,27 @@ def serialize_transcript(agents) -> list:
             tcs = (m.get('tool_calls') if isinstance(m, dict)
                    else getattr(m, 'tool_calls', None))
             if tcs:
-                names = []
-                for tc in tcs:
-                    fn = (tc.get('function') if isinstance(tc, dict)
-                          else getattr(tc, 'function', None))
-                    names.append(
-                        (fn.get('name') if isinstance(fn, dict)
-                         else getattr(fn, 'name', '')) if fn else '')
-                rec['tool_calls'] = names
+                rec['tool_calls'] = conversation.tool_call_records(tcs)
             msgs.append(rec)
         out.append(
             {'title': a.title, 'model': a.state.model, 'messages': msgs})
     return out
 
 
-class _Bench(Orchestrator):
+class BenchRun(Orchestrator):
     """Headless coordinator: the shared spawn/check/join orchestrator with the
     default quiet console and no per-turn retention/timing, so sub-agents
-    actually run and their raw behaviour can be measured."""
+    actually run and their raw behaviour can be measured. Also the engine of
+    the eval runner (``guru.evals.runner``).
 
-    def __init__(self, base) -> None:
-        super().__init__()
+    ``registry`` (AdapterRegistry) and ``routing`` (RoutingSettings) make
+    sub-agent routing active exactly as in the TUI; without them it is
+    inert. ``routing.controller`` runs the main agent as a controller."""
+
+    def __init__(self, base, registry=None, routing=None) -> None:
+        super().__init__(registry=registry, routing=routing)
         self.base = base
+        self.controller = bool(routing is not None and routing.controller)
 
     async def _abort(self, grace: float = 30.0) -> None:
         """Cooperatively stop a stalled run: flag cancel on every agent (the
@@ -156,7 +156,8 @@ class _Bench(Orchestrator):
             else None
         try:
             main = self.manager.active
-            self.configure(main, self.base, can_spawn=True)
+            self.configure(main, self.base, can_spawn=True,
+                           controller=self.controller)
             main.queue.append(prompt)
             self.launch(main)
             while any(a.busy or a.queue for a in self.manager.agents):
@@ -169,13 +170,16 @@ class _Bench(Orchestrator):
         return list(self.manager.agents)
 
 
+_Bench = BenchRun          # historical name
+
+
 async def run_once(base_state) -> list:
     """Run PROMPT through a fresh main agent (+ any sub-agents it spawns) on
     base_state's adapter/model/ctx. Returns all agents that ran (main first).
 
     A per-model wall-clock ceiling (config.BENCH_MODEL_TIMEOUT) cooperatively
     cancels a stalled run so one slow model can't hang the suite."""
-    return await _Bench(base_state).run(
+    return await BenchRun(base_state).run(
         PROMPT, timeout=config.BENCH_MODEL_TIMEOUT)
 
 
@@ -218,6 +222,7 @@ def run_benchmark(models, out_dir=BENCH_DIR):
     transcript-<timestamp>.json (full message histories, for debugging why an
     answer was empty). Both are rewritten after every model, so a Ctrl+C
     mid-run keeps what was gathered. Returns the results file path."""
+    skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
     built = _build_adapters()
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -240,6 +245,7 @@ def run_benchmark(models, out_dir=BENCH_DIR):
     config.ALLOWED_READ_DIRS.add(str(Path.cwd().resolve()))
     tools.set_domain_asker(lambda q: False)
     files.set_path_asker(lambda q: False)
+    spend.set_spend_asker(lambda q: False)      # never pays for a benchmark
 
     try:
         for adapter_name, model in sort_models(models):
@@ -279,6 +285,7 @@ def run_benchmark(models, out_dir=BENCH_DIR):
     finally:
         tools.set_domain_asker(None)
         files.set_path_asker(None)
+        spend.set_spend_asker(None)
     return path
 
 

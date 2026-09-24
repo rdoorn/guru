@@ -15,11 +15,12 @@ import os
 import pathlib
 import shutil
 import subprocess
+import time
 
 from guru import log, session, ui
 from guru.adapters import turn
 from guru.adapters.base import Adapter, ModelInfo
-from guru.domain import tools
+from guru.domain import ledger, pricing, tools
 
 # Non-streaming per tool-call round (parity with the Ollama adapter). Kept at
 # the SDK's non-streaming ceiling to avoid the large-output timeout guard.
@@ -244,6 +245,26 @@ class AnthropicAdapter(Adapter):
             log.exc('anthropic context retrieve failed')
             return _DEFAULT_CONTEXT
 
+    # --- ledger --------------------------------------------------------------
+
+    def _record_call(self, phase: str, resp, seconds: float) -> None:
+        """Write one CallRecord from a Messages API response's usage.
+        Never raises into the turn."""
+        try:
+            usage = getattr(resp, 'usage', None)
+            ledger.record_call(
+                adapter=self.name, model=session.model,
+                usage=pricing.Usage(
+                    input_tokens=getattr(usage, 'input_tokens', 0) or 0,
+                    output_tokens=getattr(usage, 'output_tokens', 0) or 0,
+                    cache_read_tokens=getattr(
+                        usage, 'cache_read_input_tokens', 0) or 0,
+                    cache_write_tokens=getattr(
+                        usage, 'cache_creation_input_tokens', 0) or 0),
+                seconds=seconds, phase=phase)
+        except Exception:                                # noqa: BLE001
+            log.exc('anthropic call record failed')
+
     # --- turn loop -----------------------------------------------------------
 
     def run_turn(self) -> None:
@@ -269,17 +290,22 @@ class AnthropicAdapter(Adapter):
             if self.thinking:
                 kwargs['thinking'] = {
                     'type': 'adaptive', 'display': 'summarized'}
+            t0 = time.perf_counter()
             try:
                 resp = client.messages.create(**kwargs)
             except Exception as e:
+                _note_error(e)
                 ui.console.print(f"[red]Anthropic error: {e}[/red]")
                 return None
+            if getattr(resp, 'stop_reason', None) == 'refusal':
+                ledger.bump('refusals')
 
             usage = resp.usage
             session.session_in += getattr(usage, 'input_tokens', 0) or 0
             session.session_out += getattr(usage, 'output_tokens', 0) or 0
             session.ctx_used = (
                 getattr(usage, 'input_tokens', 0) or session.ctx_used)
+            self._record_call('step', resp, time.perf_counter() - t0)
 
             text_parts: list = []
             tool_uses: list = []
@@ -319,7 +345,8 @@ class AnthropicAdapter(Adapter):
                     'content': content,
                 })
                 session.messages.append({
-                    'role': 'tool', 'tool_name': name, 'content': content})
+                    'role': 'tool', 'tool_name': name, 'tool_args': args,
+                    'content': content})
             native.append({'role': 'user', 'content': results})
 
         def add_user(text):
@@ -332,6 +359,7 @@ class AnthropicAdapter(Adapter):
 
     def summarise(self, transcript: str) -> str:
         try:
+            t0 = time.perf_counter()
             resp = self._client().messages.create(
                 model=session.model,
                 max_tokens=1024,
@@ -342,8 +370,16 @@ class AnthropicAdapter(Adapter):
                 ),
                 messages=[{'role': 'user', 'content': transcript}],
             )
+            self._record_call('summarise', resp, time.perf_counter() - t0)
             text = next(
                 (b.text for b in resp.content if b.type == 'text'), '')
             return text.strip() or '(summary unavailable)'
         except Exception as e:
+            _note_error(e)
             return f'(summary failed: {e})'
+
+
+def _note_error(e: Exception) -> None:
+    """Count a provider failure on the bound session and keep its text."""
+    ledger.bump('provider_errors')
+    session.last_error = repr(e)[:200]

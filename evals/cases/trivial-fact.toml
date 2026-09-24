@@ -1,0 +1,12 @@
+name = "trivial-fact"
+fixture = "docs-only"
+prompt = "What does 'ls -la' do?"
+timeout_s = 120
+tags = ["fast", "no-tools"]
+
+[expect.behaviour]
+tools_used_none = ["list_dir", "list_tree", "read_file", "search_code",
+                   "write_file", "edit_file", "delete_file", "web_search",
+                   "web_fetch", "fetch_github_releases", "spawn",
+                   "search_tools"]
+max_seconds = 60

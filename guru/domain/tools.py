@@ -8,8 +8,12 @@ import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 
-from guru import config, session, skills, ui
-from guru.domain import files
+from guru import config, log, session, skills, ui
+from guru.domain import decisions, files, ledger, policy, routing
+
+# The tools a controller (``[routing] controller = true``) keeps: it
+# coordinates and never executes (design doc §2).
+CONTROLLER_TOOLS = frozenset(('spawn', 'check', 'join', 'use_skill'))
 
 _STOP_WORDS = {
     'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for',
@@ -30,8 +34,9 @@ def set_domain_asker(fn) -> None:
     _domain_asker = fn
 
 
-# Pluggable sub-agent spawner — installed by the TUI. Signature: (task) -> str.
-# Absent in the REPL, where there are no viewports to delegate into.
+# Pluggable sub-agent spawner — installed by the TUI. Signature:
+# (task, role, skill, kind, complexity) -> str. Absent in the REPL, where
+# there are no viewports to delegate into.
 _spawn_handler = None
 
 
@@ -41,36 +46,46 @@ def set_spawn_handler(fn) -> None:
     _spawn_handler = fn
 
 
-def spawn(task: str, role: str = '', skill: str = '') -> str:
+def spawn(task: str, role: str = '', skill: str = '', kind: str = 'other',
+          complexity: str = 'standard') -> str:
     """
     Delegate a self-contained task to a new sub-agent that runs in parallel.
 
-    Optionally give it a ``role`` (persona) and/or ``skill`` (method) from the
-    catalog -- e.g. role='security-engineer', skill='code-review'. The
-    sub-agent works in its own viewport and context and returns only its
-    conclusion; it cannot spawn further agents.
+    Label the task: ``kind`` is one of debug, build, refactor, review,
+    explain, docs, ops, other and ``complexity`` one of trivial, standard,
+    hard -- the labels pick the model that runs it. Optionally give it a
+    ``role`` (persona) and/or ``skill`` (method) from the catalog -- e.g.
+    role='security-engineer', skill='code-review'. The sub-agent works in its
+    own viewport and context and returns only its conclusion; it cannot spawn
+    further agents.
     """
     if _spawn_handler is None:
         return (
             "Spawning sub-agents is not available in this mode."
             " Handle this task yourself instead.")
-    return _spawn_handler(task, role, skill)
+    return _spawn_handler(task, role, skill, kind, complexity)
 
 
 _SPAWN_SPEC = {
     'name': 'spawn',
     'description': (
         'Delegate a self-contained task to a new sub-agent that runs in'
-        ' parallel in its own viewport and context. Optionally set role'
-        ' (persona) and skill (method) from the catalog. The sub-agent cannot'
-        ' spawn further agents. Returns immediately -- its result is delivered'
-        ' back to you automatically when it finishes.'),
+        ' parallel in its own viewport and context. Label the task with kind'
+        ' and complexity (they pick the model that runs it). Optionally set'
+        ' role (persona) and skill (method) from the catalog. The sub-agent'
+        ' cannot spawn further agents. Returns immediately -- its result is'
+        ' delivered back to you automatically when it finishes.'),
     'parameters': {
         'task': 'A clear, self-contained instruction for the sub-agent',
+        'kind': ('What kind of task this is, one of: '
+                 + ', '.join(routing.KINDS) + ' (default other)'),
+        'complexity': ('How hard the task is, one of: '
+                       + ', '.join(routing.COMPLEXITY)
+                       + ' (default standard)'),
         'role': 'Optional persona name from the catalog (or empty)',
         'skill': 'Optional method name from the catalog (or empty)',
     },
-    'optional': ['role', 'skill'],
+    'optional': ['kind', 'complexity', 'role', 'skill'],
 }
 
 
@@ -97,6 +112,7 @@ def check(target: str) -> str:
     Check the status and any finished results of your sub-agents, without
     blocking. Pass a sub-agent name (e.g. "agent2") or "all". Returns
     immediately, so you can keep working or delegate more while others run.
+    Do not poll in a loop: when everything is still running, call join.
     """
     if _check_handler is None:
         return "Checking sub-agents is not available in --classic (REPL) mode."
@@ -120,7 +136,8 @@ _CHECK_SPEC = {
     'description': (
         'Check the status and any finished results of your sub-agents without'
         ' blocking. Pass a sub-agent name (e.g. "agent2") or "all". Returns'
-        ' immediately.'
+        ' immediately. Do not poll in a loop: when everything is still'
+        ' running, call join instead.'
     ),
     'parameters': {
         'target': 'A sub-agent name, or "all" for every one',
@@ -181,12 +198,13 @@ def ensure_domain_allowed(domain: str) -> bool:
     """Return True if the domain is allowed, prompting per the access mode.
 
     Web fetches/searches are reads, so this uses the read domain list. auto
-    mode approves silently; ask prompts; approvals are persisted.
+    mode approves silently (unless ``config.AUTO_GRANT`` is off, then it
+    asks); ask prompts; approvals are persisted.
     """
     domain = domain.lower()
     if domain in config.ALLOWED_DOMAINS:
         return True
-    if config.MODE == config.MODE_AUTO:
+    if config.MODE == config.MODE_AUTO and config.AUTO_GRANT:
         config.ALLOWED_DOMAINS.add(domain)
         config.persist_domain(domain)
         return True
@@ -267,6 +285,9 @@ def web_fetch(url: str) -> str:
         element.decompose()
 
     text = soup.get_text(separator="\n", strip=True)
+    # Shadow-mode injection screen: a judge scores the fetched text; the
+    # page is returned unchanged (see guru.domain.decisions).
+    decisions.shadow('injection', [decisions.injection_question(text, url)])
     # Don't dump enormous pages into the model.
     return text[:15000]
 
@@ -413,7 +434,8 @@ TOOL_REGISTRY: dict = {
             "Search file contents for a string or regex under a directory"
             " (like grep), returning 'relpath:line: text' rows. Case-"
             "insensitive unless your pattern has an uppercase letter. Pass"
-            " glob (e.g. '*.py') to limit which files are searched. Use to"
+            " glob to limit which files are searched: one or more globs,"
+            " comma-separated (e.g. '*.py,*.md'). Use to"
             " find where something is defined or used before concluding code"
             " is missing. Skips noise dirs. Restricted to allowed directories."
         ),
@@ -425,7 +447,9 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "pattern": "String or regex to search for (e.g. 'def my_func')",
             "path": "Directory or file to search (default: current directory)",
-            "glob": "Optional filename glob to limit files, e.g. '*.py'",
+            "glob": (
+                "Optional filename glob(s) to limit files: one or more globs,"
+                " comma-separated (e.g. '*.py,*.md')"),
         },
         "optional": ["path", "glob"],
     },
@@ -573,15 +597,20 @@ def active_specs() -> list:
     to their native tool schema. search_tools is always present; discovered
     registry tools are added as they are activated.
     """
-    return specs_for(session.active_tool_names, session.can_spawn)
+    return specs_for(session.active_tool_names, session.can_spawn,
+                     session.controller)
 
 
-def specs_for(active_tool_names, can_spawn: bool) -> list:
+def specs_for(active_tool_names, can_spawn: bool,
+              controller: bool = False) -> list:
     """Provider-neutral specs for a given tool set (no session routing).
 
     Lets callers (e.g. the context breakdown) price a specific agent's tool
-    schemas without binding that agent's session context.
+    schemas without binding that agent's session context. A controller gets
+    only spawn/check/join/use_skill, whatever ``active_tool_names`` holds.
     """
+    if controller:
+        return [_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC, _USE_SKILL_SPEC]
     specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC]
     if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
@@ -613,10 +642,13 @@ def _core_tool_fns() -> list:
     return out
 
 
-def initial_tools(can_spawn: bool) -> tuple:
+def initial_tools(can_spawn: bool, controller: bool = False) -> tuple:
     """The active tool list + activated-name set an agent starts a turn with:
     the always-on tools (search_tools, use_skill, and spawn/check/join when
-    delegation-capable) plus the pre-activated core toolset."""
+    delegation-capable) plus the pre-activated core toolset. A controller
+    gets exactly spawn/check/join/use_skill and no core tools."""
+    if controller:
+        return [spawn, check, join, use_skill], set()
     base = [search_tools, use_skill]
     if can_spawn:
         base.extend([spawn, check, join])
@@ -635,7 +667,7 @@ def reset_active_tools() -> None:
     callables, sees them); the pre-activated core toolset is added so common
     file tools can be called without a search_tools hop.
     """
-    base, names = initial_tools(session.can_spawn)
+    base, names = initial_tools(session.can_spawn, session.controller)
     session.active_tools[:] = base
     session.active_tool_names.clear()
     session.active_tool_names.update(names)
@@ -647,6 +679,30 @@ def activate(name: str) -> None:
         session.active_tool_names.add(name)
         session.active_tools.append(TOOL_REGISTRY[name]['fn'])
         ui.console.print(f"[green]\\[ACTIVATED][/green] {name}")
+
+
+def _redact_for_remote(name: str, result: str) -> str:
+    """Redact secrets from a tool result bound for a remote provider.
+
+    Applies only when the bound session's adapter is remote and the secret
+    scan is on (``config.SECRET_SCAN``); findings are replaced with typed
+    markers (design doc §2 step 6), counted into ``struggle['redactions']``
+    and logged. Local adapters see the raw result.
+    """
+    if not config.SECRET_SCAN or not getattr(session.adapter, 'remote', False):
+        return result
+    findings = policy.scan(result)
+    if not findings:
+        return result
+    ledger.bump('redactions', len(findings))
+    kinds = sorted({f.kind for f in findings})
+    log.info('redacted %d finding(s) (%s) from %s result for remote '
+             'adapter %s', len(findings), ', '.join(kinds), name,
+             getattr(session.adapter, 'name', '?'))
+    ui.console.print(
+        f"[yellow]\\[REDACTED][/yellow] {len(findings)} sensitive span(s)"
+        f" ({', '.join(kinds)}) removed before sending to a remote model")
+    return policy.redact(result, findings)
 
 
 def execute_tool(name: str, arguments: dict) -> str:
@@ -662,7 +718,12 @@ def execute_tool(name: str, arguments: dict) -> str:
         ui.note_tool(name, str(arguments.get('path', '')))
     elif name != 'delete_file':
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
-    if name == "search_tools":
+    if session.controller and name not in CONTROLLER_TOOLS:
+        # A controller coordinates only; CONTROLLER_HINT promises it has no
+        # other tools, so keep that true (the attempt is still measured by
+        # turn.controller_executed).
+        result = f"Unknown tool: {name}"
+    elif name == "search_tools":
         result = search_tools(**arguments)
         for tn in _match_tools(arguments.get("query", "")):
             activate(tn)
@@ -681,6 +742,13 @@ def execute_tool(name: str, arguments: dict) -> str:
             result = f"Tool error: {e}"
     else:
         result = f"Unknown tool: {name}"
+    result = _redact_for_remote(name, result)
+    # Struggle counters: a tool that raised, or an edit_file refused because
+    # the model passed a stale sha (message text owned by files.edit_file).
+    if result.startswith('Tool error:'):
+        ledger.bump('tool_errors')
+    elif name == 'edit_file' and result.startswith('sha mismatch:'):
+        ledger.bump('sha_mismatches')
     # Show the output's size — the context cost of this tool result.
     ui.note_tool_result(len(result))
     return result

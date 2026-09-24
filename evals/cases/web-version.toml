@@ -1,0 +1,12 @@
+name = "web-version"
+fixture = "docs-only"
+prompt = "What is the latest release of ollama/ollama?"
+timeout_s = 180
+tags = ["network"]
+
+[expect.behaviour]
+tools_used_any = ["fetch_github_releases"]
+tools_used_none = ["web_search"]
+
+[expect.rubric]
+text = "Reports a version tag from the GitHub releases (network access to api.github.com must be allowed for this run; a denial is not a guru bug)."

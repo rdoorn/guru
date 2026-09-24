@@ -1,6 +1,8 @@
 """Tests for the tool registry, activation, and delegation tools."""
+import pytest
+
 from guru import config, session, ui
-from guru.domain import tools
+from guru.domain import files, tools
 
 
 class TestMatchTools:
@@ -58,7 +60,7 @@ class TestToolSizeFormat:
         sizes = []
         monkeypatch.setattr(ui, 'note_tool_result', sizes.append)
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
-        tools.set_spawn_handler(lambda t, r, s: 'RESULT-9')
+        tools.set_spawn_handler(lambda t, r, s, k, c: 'RESULT-9')
         try:
             out = tools.execute_tool('spawn', {'task': 't'})
         finally:
@@ -78,7 +80,7 @@ class TestSpawnTool:
     def test_spawn_with_handler_delegates(self) -> None:
         seen: list = []
         tools.set_spawn_handler(
-            lambda t, r, s: seen.append(t) or f'ok:{t}')
+            lambda t, r, s, k, c: seen.append(t) or f'ok:{t}')
         try:
             assert tools.spawn('research topic') == 'ok:research topic'
             assert seen == ['research topic']
@@ -87,7 +89,8 @@ class TestSpawnTool:
 
     def test_execute_tool_routes_spawn(self) -> None:
         seen: list = []
-        tools.set_spawn_handler(lambda t, r, s: seen.append(t) or 'done')
+        tools.set_spawn_handler(
+            lambda t, r, s, k, c: seen.append(t) or 'done')
         try:
             assert tools.execute_tool('spawn', {'task': 'go'}) == 'done'
             assert seen == ['go']
@@ -190,3 +193,204 @@ class TestInitialTools:
         base, names = tools.initial_tools(can_spawn=False)
         assert names == set(tools.TOOL_REGISTRY)     # every registry tool
         assert len(names) > len(['read_file', 'search_code'])
+
+
+class TestStruggleCounters:
+    """execute_tool counts tool errors and edit_file sha mismatches."""
+
+    def _arm(self, monkeypatch) -> None:
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+
+    def test_tool_error_counted(self, monkeypatch) -> None:
+        self._arm(monkeypatch)
+
+        def boom(**kw):
+            raise ValueError('bad args')
+        monkeypatch.setitem(tools.TOOL_REGISTRY, 'boom', {'fn': boom})
+        out = tools.execute_tool('boom', {})
+        assert out.startswith('Tool error:')
+        assert session.struggle['tool_errors'] == 1
+        assert session.struggle['sha_mismatches'] == 0
+
+    def test_successful_tool_not_counted(self, monkeypatch) -> None:
+        self._arm(monkeypatch)
+        monkeypatch.setitem(tools.TOOL_REGISTRY, 'ok', {'fn': lambda: 'fine'})
+        assert tools.execute_tool('ok', {}) == 'fine'
+        assert session.struggle['tool_errors'] == 0
+
+    def test_sha_mismatch_counted(self, tmp_path, monkeypatch) -> None:
+        self._arm(monkeypatch)
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(session, 'file_shas', {})
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS',
+                            {str(tmp_path.resolve())})
+        monkeypatch.setattr(config, 'persist_write_dir', lambda d: None)
+        p = tmp_path / 'c.py'
+        p.write_text('hello\n', encoding='utf-8')
+        out = tools.execute_tool('edit_file', {
+            'path': str(p), 'old': 'hello', 'new': 'bye', 'sha': 'stale'})
+        assert out.startswith('sha mismatch:')
+        assert session.struggle['sha_mismatches'] == 1
+        assert session.struggle['tool_errors'] == 0
+        good = files._sha('hello\n')
+        out = tools.execute_tool('edit_file', {
+            'path': str(p), 'old': 'hello', 'new': 'bye', 'sha': good})
+        assert out.startswith('Edited')
+        assert session.struggle['sha_mismatches'] == 1
+
+
+class TestDomainAutoGrant:
+    """ensure_domain_allowed honours config.AUTO_GRANT in auto mode."""
+
+    def test_auto_grant_false_denies_and_does_not_persist(
+            self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_AUTO)
+        monkeypatch.setattr(config, 'AUTO_GRANT', False)
+        monkeypatch.setattr(config, 'ALLOWED_DOMAINS', set())
+        saved: list = []
+        monkeypatch.setattr(config, 'persist_domain', saved.append)
+        asked: list = []
+
+        def deny(q):
+            asked.append(q)
+            return False
+        tools.set_domain_asker(deny)
+        try:
+            assert tools.ensure_domain_allowed('Example.com') is False
+        finally:
+            tools.set_domain_asker(None)
+        assert asked and 'example.com' in asked[0]
+        assert config.ALLOWED_DOMAINS == set() and saved == []
+
+    def test_auto_grant_true_grants_and_persists(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_AUTO)
+        monkeypatch.setattr(config, 'AUTO_GRANT', True)
+        monkeypatch.setattr(config, 'ALLOWED_DOMAINS', set())
+        saved: list = []
+        monkeypatch.setattr(config, 'persist_domain', saved.append)
+
+        def boom(q):
+            raise AssertionError('should not prompt')
+        tools.set_domain_asker(boom)
+        try:
+            assert tools.ensure_domain_allowed('example.com') is True
+        finally:
+            tools.set_domain_asker(None)
+        assert config.ALLOWED_DOMAINS == {'example.com'}
+        assert saved == ['example.com']
+
+
+class TestControllerTools:
+    """Controller mode (Task 4.5): only spawn/check/join/use_skill."""
+
+    def test_initial_tools_controller(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
+        base, names = tools.initial_tools(can_spawn=True, controller=True)
+        assert base == [tools.spawn, tools.check, tools.join,
+                        tools.use_skill]
+        assert names == set()
+
+    def test_initial_tools_non_controller_unchanged(self, monkeypatch):
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
+        base, names = tools.initial_tools(can_spawn=True)
+        assert tools.search_tools in base and names == {'read_file'}
+
+    def test_specs_for_controller(self) -> None:
+        names = [s['name'] for s in
+                 tools.specs_for({'read_file', 'web_fetch'}, True,
+                                 controller=True)]
+        assert names == ['spawn', 'check', 'join', 'use_skill']
+
+    def test_active_specs_honours_session_controller(self, monkeypatch):
+        monkeypatch.setattr(session, 'active_tool_names', {'read_file'})
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', True)
+        names = [s['name'] for s in tools.active_specs()]
+        assert names == ['spawn', 'check', 'join', 'use_skill']
+        monkeypatch.setattr(session, 'controller', False)
+        names = [s['name'] for s in tools.active_specs()]
+        assert 'search_tools' in names and 'read_file' in names
+
+    def test_reset_active_tools_honours_controller(self, monkeypatch):
+        monkeypatch.setattr(session, 'active_tools', [])
+        monkeypatch.setattr(session, 'active_tool_names', set())
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', True)
+        tools.reset_active_tools()
+        assert session.active_tools == [tools.spawn, tools.check, tools.join,
+                                        tools.use_skill]
+        assert session.active_tool_names == set()
+
+    def test_execute_tool_hides_other_tools_from_a_controller(
+            self, monkeypatch) -> None:
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', True)
+        monkeypatch.setattr(session, 'active_tool_names', set())
+        assert tools.execute_tool('read_file', {'path': 'x'}) == \
+            'Unknown tool: read_file'
+        assert tools.execute_tool('search_tools', {'query': 'web'}) == \
+            'Unknown tool: search_tools'
+        assert session.active_tool_names == set()       # nothing activated
+        monkeypatch.setattr(tools, 'use_skill', lambda name: f'ok:{name}')
+        assert tools.execute_tool('use_skill', {'name': 's'}) == 'ok:s'
+
+    def test_spawn_spec_has_optional_labels(self) -> None:
+        spec = tools._SPAWN_SPEC
+        assert {'kind', 'complexity'} <= set(spec['parameters'])
+        assert {'kind', 'complexity'} <= set(spec['optional'])
+        assert 'debug' in spec['parameters']['kind']
+        assert 'hard' in spec['parameters']['complexity']
+
+
+class _Marker:
+    """Scanner that flags every ``SECRET``."""
+
+    def scan(self, text: str) -> list:
+        from guru.domain.policy import Finding
+        return [Finding('marker', i, i + 6, 'SECRET')
+                for i in range(len(text)) if text.startswith('SECRET', i)]
+
+
+class TestRemoteRedaction:
+    """execute_tool redacts results bound for a remote adapter (Task 4.6)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        from types import SimpleNamespace
+        from guru.domain import policy
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(tools, 'use_skill',
+                            lambda name: f'token SECRET for {name}')
+        monkeypatch.setattr(config, 'SECRET_SCAN', True)
+        monkeypatch.setattr(session, 'adapter',
+                            SimpleNamespace(name='Remote', remote=True))
+        policy.set_scanner(_Marker())
+        yield
+        policy.set_scanner(None)
+
+    def test_remote_result_is_redacted_and_counted(self) -> None:
+        out = tools.execute_tool('use_skill', {'name': 'x'})
+        assert out == 'token [REDACTED:marker] for x'
+        assert session.struggle['redactions'] == 1
+
+    def test_local_adapter_sees_raw_result(self, monkeypatch) -> None:
+        from types import SimpleNamespace
+        monkeypatch.setattr(session, 'adapter',
+                            SimpleNamespace(name='Ollama', remote=False))
+        out = tools.execute_tool('use_skill', {'name': 'x'})
+        assert out == 'token SECRET for x'
+        assert session.struggle['redactions'] == 0
+
+    def test_scan_off_sees_raw_result(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'SECRET_SCAN', False)
+        out = tools.execute_tool('use_skill', {'name': 'x'})
+        assert out == 'token SECRET for x'
+        assert session.struggle['redactions'] == 0
+
+    def test_clean_result_untouched(self, monkeypatch) -> None:
+        monkeypatch.setattr(tools, 'use_skill', lambda name: 'all clear')
+        assert tools.execute_tool('use_skill', {'name': 'x'}) == 'all clear'
+        assert session.struggle['redactions'] == 0

@@ -15,6 +15,16 @@ dependencies = [
     "rich>=15.0.0",
 ]
 
+[project.optional-dependencies]
+# Encoder judges (guru/judges/encoder.py). Heavy (~1 GB of wheels):
+#   uv sync --extra judge
+judge = [
+    "torch>=2.5",
+    "transformers>=4.45",
+    "sentencepiece>=0.2",
+    "protobuf>=5",
+]
+
 [tool.uv]
 exclude-newer = "2026-08-06T00:00:00Z"
 
@@ -36,3 +46,4 @@ disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]      # evals/fixtures/* carry their own (one failing) tests

@@ -5,18 +5,25 @@ buffer, sub-agents in a full-screen viewer). The slash-command helpers here are
 reused by that UI.
 """
 import argparse
+from typing import Optional
 
-from guru import config, session, ui
+from guru import config, judges, session, ui
 from guru.adapters.base import Adapter
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
-from guru.domain import tools
+from guru.domain import ledger, policy, tools
+from guru.repositories import settings as routing_settings
+from guru.repositories.adapters import AdapterRegistry, registry_from
+from guru.repositories.jsonl_ledger import JsonlLedger
+from guru.scanners.secrets import load_project_scanner
 
 # Configured provider adapters and their raw config dicts, kept parallel so
 # /adapters can persist enable flags back to ~/.guru/adapters.toml.
 ADAPTERS: list = []
 ADAPTER_CONFIGS: list = []
+# Name -> Adapter view of ADAPTERS for the routing layer (rebuilt with it).
+REGISTRY = AdapterRegistry()
 
 DEFAULT_MODEL = "qwen3-abliterated-32k:latest"
 
@@ -66,6 +73,34 @@ def _build_adapters() -> list:
     if not built:
         built.append(OllamaAdapter())
     return built
+
+
+def build_registry(adapters: list) -> AdapterRegistry:
+    """The AdapterRegistry over ``adapters`` (all of them, enabled or not,
+    so a ladder rung on a disabled adapter is reported rather than unknown).
+    """
+    return registry_from(adapters)
+
+
+def load_routing() -> routing_settings.RoutingSettings:
+    """The validated ``[routing]`` table, wired into the process.
+
+    An invalid table warns and yields the defaults. Only when a table is
+    ``present`` does ``config.SECRET_SCAN`` mirror ``secret_scan`` and the
+    project secret scanner get bound; without one both stay off, so guru
+    behaves exactly as before the routing framework.
+    """
+    from guru import log
+    try:
+        routing = routing_settings.load_routing()
+    except ValueError as e:
+        log.warning('%s; using routing defaults', e)
+        ui.console.print(f"[yellow]{e}; using routing defaults.[/yellow]")
+        routing = routing_settings.RoutingSettings()
+    scan = routing.present and routing.secret_scan
+    config.SECRET_SCAN = scan
+    policy.set_scanner(load_project_scanner() if scan else None)
+    return routing
 
 
 def _enabled_adapters() -> list:
@@ -215,7 +250,7 @@ def _adapters_command() -> None:
     adapters.toml, adapters are rebuilt, and each enabled adapter is verified
     — which triggers the one-time OAuth login for enterprise adapters.
     """
-    global ADAPTERS
+    global ADAPTERS, REGISTRY
     if not ADAPTER_CONFIGS:
         ui.console.print("[yellow]No adapters configured.[/yellow]")
         return
@@ -235,6 +270,7 @@ def _adapters_command() -> None:
     ui.console.print(f"[green]Saved[/green] {config.ADAPTERS_PATH}")
 
     ADAPTERS = _build_adapters()
+    REGISTRY = build_registry(ADAPTERS)
     for adapter in ADAPTERS:
         if not adapter.enabled:
             continue
@@ -285,6 +321,92 @@ def _context_command() -> None:
         f"[green]Context[/green] set to {session.num_ctx:,}"
         f" (applies on the next turn)."
     )
+
+
+def _label_command(label: str, note: str = '') -> None:
+    """``/good [note]`` and ``/bad [note]``: label the last completed turn.
+
+    Labels ``session.turn_id`` of the bound (main) session — the id of the
+    turn that last ran, since ``run_loop`` assigns it at turn start and
+    leaves it in place — plus every task row of this run with that
+    ``turn_id`` when the repository can read rows back. Labeller ``user``.
+    """
+    repo = ledger.repository()
+    if repo is None or not config.LEDGER_ENABLED:
+        ui.console.print('[yellow]No ledger repository; nothing labelled.'
+                         '[/yellow]')
+        return
+    turn_id = session.turn_id
+    if not turn_id:
+        ui.console.print('[yellow]No completed turn to label yet.[/yellow]')
+        return
+    targets = [turn_id]
+    rows_fn = getattr(repo, 'rows', None)
+    if callable(rows_fn):
+        ledger.flush()               # finish rows are fire-and-forget
+        seen: dict = {}
+        for r in rows_fn('tasks', run_id=ledger.RUN_ID):
+            if r.get('turn_id') == turn_id and r.get('task_id'):
+                seen[r['task_id']] = True
+        targets += list(seen)
+    for target in targets:
+        ledger.record_label(target, 'user', label, note)
+    colour = 'green' if label == 'good' else 'red'
+    ui.console.print(
+        f"[{colour}]{label}[/{colour}] -> turn {turn_id}"
+        f" (+{len(targets) - 1} tasks)"
+        + (f": {note}" if note else ''))
+
+
+def _format_run_summary(summary: dict) -> str:
+    """Plain-text rendering of :func:`ledger.run_summary` for ``/ledger``."""
+    def money(v: Optional[float]) -> str:
+        return '$?' if v is None else f'${v:.4f}'
+
+    lines = [f"run {summary['run_id']}", '', 'calls per model']
+    if not summary['models']:
+        lines.append('  (none)')
+    for key, m in sorted(summary['models'].items(),
+                         key=lambda kv: -kv[1]['calls']):
+        lines.append(f"  {key:<40} {m['calls']:>4} calls"
+                     f"  in {m['tokens_in']:>8}  out {m['tokens_out']:>8}"
+                     f"  cache r/w {m['cache_read']}/{m['cache_write']}"
+                     f"  {money(m['cost_usd'])}")
+    lines += ['', 'tasks per model']
+    if not summary['tasks']:
+        lines.append('  (none)')
+    for key, n in sorted(summary['tasks'].items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {key:<40} {n:>4}")
+    lines += ['', 'most expensive tasks']
+    if not summary['top_tasks']:
+        lines.append('  (none)')
+    for t in summary['top_tasks']:
+        who = t['role'] or t['kind'] or 'task'
+        secs = '?' if t['seconds'] is None else f"{t['seconds']:.1f}s"
+        lines.append(f"  {money(t['cost_usd']):>9} {secs:>7}  {who}"
+                     f" [{t['adapter']}|{t['model']}] {t['status']}"
+                     f"  {t['task']}")
+    tot = summary['totals']
+    lines += ['', f"total: {tot['calls']} calls, in {tot['tokens_in']},"
+                  f" out {tot['tokens_out']}, cache r/w {tot['cache_read']}"
+                  f"/{tot['cache_write']}, {tot['tasks']} tasks,"
+                  f" {money(tot['cost_usd'])}"]
+    return '\n'.join(lines)
+
+
+def _ledger_command() -> None:
+    """``/ledger``: print this run's spend from the installed repository."""
+    repo = ledger.repository()
+    rows_fn = getattr(repo, 'rows', None)
+    if repo is None or not callable(rows_fn) or not config.LEDGER_ENABLED:
+        ui.console.print('[yellow]No readable ledger repository.[/yellow]')
+        return
+    ledger.flush()                       # queued rows land before we read
+    summary = ledger.run_summary(rows_fn('calls', run_id=ledger.RUN_ID),
+                                 rows_fn('tasks', run_id=ledger.RUN_ID),
+                                 ledger.RUN_ID)
+    ui.console.print(_format_run_summary(summary), markup=False,
+                     highlight=False)
 
 
 def _handle_slash_search(query: str) -> None:
@@ -347,9 +469,16 @@ def main() -> None:
     from guru import skills
     skills.setup(reset=args.reset_skills)
 
+    ledger.set_repository(JsonlLedger(config.LEDGER_DIR))
+
     session.num_ctx_override = args.num_ctx
-    global ADAPTERS
+    global ADAPTERS, REGISTRY
     ADAPTERS = _build_adapters()
+    REGISTRY = build_registry(ADAPTERS)
+    routing = load_routing()
+    installed = judges.install()
+    if installed:
+        log.info('shadow judges: %s', installed)
     # Restore the last-used adapter+model (and log in); else pick a default.
     if not _restore_last(args.model):
         _startup_select(args.model or DEFAULT_MODEL)
@@ -359,7 +488,7 @@ def main() -> None:
     tools.reset_active_tools()
 
     from guru import tui
-    tui.run()
+    tui.run(registry=REGISTRY, routing=routing)
     # Remember the context the (final) model ran at, so the next launch loads
     # it directly instead of recomputing the GPU fit.
     config.save_model_ctx(session.model, session.num_ctx)

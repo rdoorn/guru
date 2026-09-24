@@ -1,0 +1,12 @@
+name = "find-symbol"
+fixture = "flaskish"
+prompt = "Where is save_upload defined and who calls it?"
+timeout_s = 120
+tags = ["search", "fast"]
+
+[expect.behaviour]
+tools_used_any = ["search_code", "read_file"]
+
+[expect.content]
+answer_contains = ["upload.py", "handlers.py"]
+files_changed = []

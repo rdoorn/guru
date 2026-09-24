@@ -40,3 +40,13 @@ def setup() -> None:
 def exc(msg: str) -> None:
     """Log the current exception with traceback at debug level."""
     log.debug(msg, exc_info=True)
+
+
+def info(msg: str, *args: object) -> None:
+    """Log an informational message (thin wrapper over ``log.info``)."""
+    log.info(msg, *args)
+
+
+def warning(msg: str, *args: object) -> None:
+    """Log a warning (thin wrapper over ``log.warning``)."""
+    log.warning(msg, *args)

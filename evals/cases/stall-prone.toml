@@ -1,0 +1,14 @@
+name = "stall-prone"
+fixture = "flaskish"
+prompt = "Tell me what you will do to review this repo, then do it"
+tags = ["delegation", "stall"]
+
+[expect.behaviour]
+stall_nudges_max = 1
+spawned_min = 1
+
+[expect.content]
+files_changed = []
+
+[expect.rubric]
+text = "The plan is followed by actual tool calls in the same turn; the final answer contains findings, not only the plan."

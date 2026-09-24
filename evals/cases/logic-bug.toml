@@ -1,0 +1,12 @@
+name = "logic-bug"
+fixture = "flaskish"
+prompt = "is_expired looks wrong; explain the bug"
+timeout_s = 120
+tags = ["review", "fast"]
+
+[expect.content]
+answer_regex = ["swapped|reversed|inverted|backwards|expires_at\\s*[<>]"]
+files_changed = []
+
+[expect.rubric]
+text = "Explains that app/session.py::is_expired returns now < expires_at (True for valid tokens, False for expired ones) and that the operands are swapped; the fix is expires_at < now or now >= expires_at."
