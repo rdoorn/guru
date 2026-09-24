@@ -154,10 +154,83 @@ class TestApplyPatch:
     def test_new_file_outside_project_refused(self, project,
                                               tmp_path) -> None:
         outside = tmp_path.parent / 'elsewhere_new.txt'
+        asked: list = []
+        files.set_path_asker(lambda q: asked.append(q) or False)
         out = patch.apply_patch(f'--- /dev/null\n+++ {outside}\n'
                                 '@@ -0,0 +1 @@\n+x\n')
-        assert out.startswith('Patch rejected') and 'outside' in out
-        assert not outside.exists()
+        # The read gate fires first (and is denied); the project check is
+        # the defence behind it.
+        assert 'denied' in out and not outside.exists()
+        assert asked and 'READ' in asked[0]
+        assert patch._inside_project(outside) is False
+        assert patch._inside_project(project / 'x') is True
+
+    def test_read_gate_before_any_read_no_oracle(self, project,
+                                                 tmp_path) -> None:
+        secret = tmp_path.parent / f'{project.name}_secret.txt'
+        secret.write_text('token\n')
+        asked: list = []
+        files.set_path_asker(lambda q: asked.append(q) or False)
+        # Matching and non-matching context give the SAME answer.
+        outs = {patch.apply_patch(f'--- {secret}\n+++ {secret}\n'
+                                  f'@@ -1 +1 @@\n-{ctx}\n+x\n')
+                for ctx in ('token', 'nope')}
+        assert outs == {f"Access to '{secret}' was denied by the user."}
+        assert len(asked) == 2 and secret.read_text() == 'token\n'
+
+    def test_noise_dir_target_refused(self, project) -> None:
+        hooks = project / '.git' / 'hooks'
+        hooks.mkdir(parents=True)
+        out = patch.apply_patch('--- /dev/null\n+++ b/.git/hooks/pre-commit\n'
+                                '@@ -0,0 +1 @@\n+#!/bin/sh\n')
+        assert out.startswith('Refused:') and "'.git'" in out
+        assert not (hooks / 'pre-commit').exists()
+        (project / '.git' / 'config').write_text('[core]\n')
+        out = patch.apply_patch('--- a/.git/config\n+++ b/.git/config\n'
+                                '@@ -1 +1,2 @@\n [core]\n+fsmonitor = evil\n')
+        assert out.startswith('Refused:')
+        assert (project / '.git' / 'config').read_text() == '[core]\n'
+
+    def test_repeated_path_refused(self, project) -> None:
+        diff = ('--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a1\n+A1\n'
+                '--- a/a.txt\n+++ b/a.txt\n@@ -3 +3 @@\n-a3\n+A3\n')
+        with pytest.raises(patch.PatchError, match='appears twice'):
+            patch.parse(diff)
+        out = patch.apply_patch(diff)
+        assert out.startswith('Patch rejected') and 'twice' in out
+        assert (project / 'a.txt').read_text() == A_OLD
+
+    def test_header_guard_inside_an_open_hunk(self) -> None:
+        # A removed line that begins with '-- ' (so the raw line starts with
+        # '--- ') is hunk body while the hunk still has lines to consume.
+        [fp] = patch.parse('--- a/r\n+++ b/r\n@@ -1,2 +1,2 @@\n'
+                           '--- old comment\n+++ new comment\n x\n')
+        assert fp.hunks[0].lines == [('-', '-- old comment'),
+                                     ('+', '++ new comment'), (' ', 'x')]
+        assert patch.apply_hunks('-- old comment\nx\n', fp.hunks) == (
+            '++ new comment\nx\n')
+
+    def test_write_failure_rolls_back_earlier_files(self, project,
+                                                    monkeypatch) -> None:
+        from pathlib import Path
+        real = Path.write_text
+        calls: list = []
+
+        def flaky(self, text, *a, **kw):
+            calls.append(self.name)
+            if self.name == 'b.txt' and len(calls) == 2:
+                raise OSError('disk full')
+            return real(self, text, *a, **kw)
+        monkeypatch.setattr(Path, 'write_text', flaky)
+        diff = TWO_FILES + ('--- /dev/null\n+++ b/c.txt\n@@ -0,0 +1 @@\n'
+                            '+c\n')
+        out = patch.apply_patch(diff)
+        assert out.startswith('FAILED: nothing applied')
+        assert 'disk full' in out and '1 earlier file(s) restored' in out
+        assert (project / 'a.txt').read_text() == A_OLD
+        assert (project / 'b.txt').read_text() == B_OLD
+        assert not (project / 'c.txt').exists()
+        assert session.file_shas == {}
 
     def test_rename_and_delete_refused(self, project) -> None:
         out = patch.apply_patch('--- a/a.txt\n+++ b/c.txt\n@@ -1 +1 @@\n'
@@ -182,6 +255,8 @@ class TestApplyPatch:
         other = project.parent / f'{project.name}_other'
         other.mkdir()
         (other / 'b.txt').write_text(B_OLD)
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS',
+                            {str(project), str(other)})
         monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
         asked: list = []
 

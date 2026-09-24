@@ -87,10 +87,56 @@ class TestRunTests:
         (project / 'test_a.py').write_text(FAILING)
         out = quality.run_tests('test_a.py::test_ok')
         assert out.startswith('1 passed in')
-        assert seen[-1][0][-1] == 'test_a.py::test_ok'
+        assert seen[-1][0][-2:] == ['--', 'test_a.py::test_ok']
         out = quality.run_tests('test_a.py', k='ok')
         assert out.startswith('1 passed, 1 deselected in')
-        assert seen[-1][0][-3:] == ['test_a.py', '-k', 'ok']
+        assert seen[-1][0][-4:] == ['-k', 'ok', '--', 'test_a.py']
+
+    def test_option_like_targets_never_reach_the_child(self, project,
+                                                       monkeypatch) -> None:
+        seen = _argv_spy(monkeypatch)
+        sub = project / 'sub'
+        sub.mkdir()
+        (sub / '--pdb.py').write_text(PASSING)
+        # A file literally named like an option, in a subdirectory: it goes
+        # after '--' and pytest collects it as a path, not an option.
+        out = quality.run_tests('sub/--pdb.py')
+        assert out.startswith('1 passed in'), out
+        assert seen[-1][0][-2:] == ['--', 'sub/--pdb.py']
+        # A bare option-looking target is refused before any child runs.
+        n = len(seen)
+        for bad in ('--pdb', '-x', ' --collect-only'):
+            out = quality.run_tests(bad)
+            assert out.startswith('Refused:') and 'option' in out
+        (project / '--pdb').write_text(PASSING)
+        out = quality.run_tests('./--pdb')
+        assert out.startswith('Refused:') and 'option' in out
+        out = quality.run_tests('sub/--pdb.py', k='-x')
+        assert out.startswith('Refused:') and 'option' in out
+        assert len(seen) == n
+
+    def test_detail_prefers_the_exact_title(self) -> None:
+        stdout = (
+            '=================================== FAILURES '
+            '===================================\n'
+            '_______________________________ TestA.test_go '
+            '_______________________________\n'
+            'E       assert A\n'
+            '_______________________________ TestB.test_go '
+            '_______________________________\n'
+            'E       assert B\n'
+            '=========================== short test summary info '
+            '============================\n'
+            'FAILED t.py::TestA::test_go - assert A\n'
+            'FAILED t.py::TestB::test_go - assert B\n'
+            '2 failed in 0.01s\n')
+        res = procs.ProcResult(['x'], 1, stdout, '', 0.1)
+        out = quality._pytest_digest(res, 't.py::TestB::test_go')
+        assert 'assert B' in out and 'assert A' not in out
+        out = quality._pytest_digest(res, 't.py::TestA::test_go')
+        assert 'assert A' in out and 'assert B' not in out
+        out = quality._pytest_digest(res, 'test_go')       # bare name: first
+        assert 'assert A' in out
 
     def test_timeout_message(self, project, monkeypatch) -> None:
         tools.set_policy(tools.ToolsPolicy(limits={'timeout_s': 1}))
@@ -116,7 +162,7 @@ class TestRunTests:
             '    def test_ok(self):\n        self.assertEqual(1, 1)\n\n'
             '    def test_bad(self):\n        self.assertEqual(1, 2)\n')
         out = quality.run_tests('test_u.py')
-        assert seen[0][0] == [sys.executable, '-m', 'unittest', '-q',
+        assert seen[0][0] == [sys.executable, '-m', 'unittest', '-q', '--',
                               'test_u.py']
         assert 'Ran 2 tests' in out and 'FAILED (failures=1)' in out
         assert 'test_u.T.test_bad' in out and 'AssertionError: 1 != 2' in out
@@ -138,6 +184,22 @@ class TestRunTests:
         assert out[0] == '12 failed in 0.10s'
         assert out[1] == '  t.py::test_0 — assert False'
         assert '… 2 more failures' in out[11]
+
+
+class TestPolicySeam:
+    def test_quality_reads_toolpolicy_not_tools(self) -> None:
+        from guru.domain import gitread, toolpolicy
+        assert 'tools' not in vars(quality) and 'tools' not in vars(gitread)
+        assert quality.toolpolicy is toolpolicy
+        assert tools.set_policy is toolpolicy.set_policy
+        assert tools.is_enabled is toolpolicy.is_enabled
+        assert tools.active_policy is toolpolicy.active_policy
+        assert tools.ToolsPolicy is toolpolicy.ToolsPolicy
+        assert tools.ALWAYS_ON_TOOLS is toolpolicy.ALWAYS_ON_TOOLS
+        from guru.repositories import settings
+        assert settings.ToolsPolicy is toolpolicy.ToolsPolicy
+        tools.set_policy(tools.ToolsPolicy(limits={'timeout_s': 5}))
+        assert quality._limits().timeout_s == 5
 
 
 class TestCheckSyntax:
@@ -181,8 +243,17 @@ class TestLint:
         argv = seen[-1][0]
         assert argv[:3] == [sys.executable, '-m', 'flake8']
         assert argv[3].startswith('--extend-exclude=') and '.venv' in argv[3]
-        assert argv[4] == 'a.py'
+        assert argv[4:] == ['--', 'a.py']
         assert not any('mypy' in a for a, _ in seen)
+
+    def test_option_like_path_is_refused(self, project, monkeypatch) -> None:
+        seen = _argv_spy(monkeypatch)
+        out = quality.lint('--config=evil.cfg')
+        assert out.startswith('Refused:') and 'option' in out
+        (project / '--config=evil.cfg').write_text('x = 1\n')
+        out = quality.lint('./--config=evil.cfg')
+        assert out.startswith('Refused:') and 'option' in out
+        assert seen == []
 
     def test_flake8_config_is_honoured_and_clean(self, project) -> None:
         (project / 'setup.cfg').write_text('[flake8]\nignore = E225,F401\n')
@@ -217,7 +288,7 @@ class TestLint:
         assert 'mypy: 1 issue(s)' in out
         assert 'a.py:2: error: Incompatible return value type' in out
         mypy_argv = [a for a, _ in seen if a[2] == 'mypy' and a[-1] == 'a.py']
-        assert mypy_argv == [[sys.executable, '-m', 'mypy', 'a.py']]
+        assert mypy_argv == [[sys.executable, '-m', 'mypy', '--', 'a.py']]
 
     def test_issues_are_capped(self) -> None:
         rows = "\n".join(f'a.py:{i}:1: E999 x' for i in range(1, 15))

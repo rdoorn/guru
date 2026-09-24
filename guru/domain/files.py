@@ -34,6 +34,10 @@ _MAX_RANGE_SPAN = 2000      # cap on an explicit read_file range
 _MAX_MATCHES = 100          # global cap on rows returned by search_code
 _MAX_PER_FILE = 20          # per-file cap so one big file can't eat the budget
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than this in search_code
+# Public names for the helpers other domain modules (code, quality, gitread,
+# patch) build on; the underscore forms stay as aliases.
+NOISE_DIRS = _NOISE_DIRS
+MAX_FILE_BYTES = _MAX_FILE_BYTES
 
 
 # --- directory allow-list gate ----------------------------------------------
@@ -125,6 +129,21 @@ def project_root(path: Path, fallback: bool = True):
     return Path.cwd().resolve() if fallback else None
 
 
+def refuse_noise_write(path: Path) -> str:
+    """The denial text for a write whose resolved path has a noise-dir
+    component (``.git``, ``.venv``, ``node_modules``, …), or '' when the
+    write may proceed. A model must never be able to plant a git hook, a
+    ``.git/config`` entry or a site-packages file through a file tool, so
+    every write verb (write_file, edit_file, delete_file, apply_patch) asks
+    this before the allow-list gate."""
+    hit = next((part for part in Path(path).parts if part in _NOISE_DIRS),
+               '')
+    if not hit:
+        return ''
+    return (f"Refused: {path} is inside '{hit}', a directory the file tools"
+            " never write to (.git, virtualenvs, caches, node_modules).")
+
+
 def ensure_write_path_allowed(path: Path, detail: str) -> bool:
     """Gate a WRITE of ``path`` against the write allow-list. Refuses in
     read-only mode; the prompt states the exact write (``detail``)."""
@@ -192,6 +211,12 @@ def _forget_sha(target: Path) -> None:
 
 def _resolve(path: str) -> Path:
     return Path(path or '.').expanduser().resolve()
+
+
+sha_of = _sha
+remember_sha = _remember_sha
+forget_sha = _forget_sha
+resolve_path = _resolve
 
 
 def _sorted_children(d: Path) -> list:
@@ -372,6 +397,9 @@ def _walk_files(root: Path):
                 yield p
 
 
+walk_files = _walk_files
+
+
 def search_code(pattern: str, path: str = '.', glob: str = '') -> str:
     """
     Search file contents for a string or regular expression under a directory
@@ -535,6 +563,11 @@ def _show_change(diff: str) -> None:
         ui.console.print(diff)
 
 
+write_detail = _write_detail
+will_prompt_write = _will_prompt_write
+show_change = _show_change
+
+
 def write_file(path: str, content: str) -> str:
     """
     Create or overwrite a file with the given content. Needs write access to
@@ -544,6 +577,9 @@ def write_file(path: str, content: str) -> str:
     target = _resolve(path)
     if config.MODE == config.MODE_READ_ONLY:
         return "Refused: read-only mode. Change mode to write files."
+    refusal = refuse_noise_write(target)
+    if refusal:
+        return refusal
     if target.is_dir():
         return f"{target} is a directory."
     old_content = ''
@@ -583,6 +619,9 @@ def edit_file(path: str, old: str, new: str, sha: str) -> str:
     target = _resolve(path)
     if config.MODE == config.MODE_READ_ONLY:
         return "Refused: read-only mode. Change mode to write files."
+    refusal = refuse_noise_write(target)
+    if refusal:
+        return refusal
     if not target.exists():
         return f"No such file: {target}"
     if target.is_dir():
@@ -629,6 +668,9 @@ def delete_file(path: str) -> str:
     target = _resolve(path)
     if config.MODE == config.MODE_READ_ONLY:
         return "Refused: read-only mode. Change mode to delete files."
+    refusal = refuse_noise_write(target)
+    if refusal:
+        return refusal
     if not target.exists():
         return f"No such file: {target}"
     if target.is_dir():

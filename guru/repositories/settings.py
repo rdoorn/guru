@@ -44,7 +44,7 @@ that ``config`` documents; the sidecar and timing keys stay in
 ``settings.toml``.
 
 ``.guru/tools.toml`` (:func:`load_tools_policy`) is the per-project tool
-policy — the ``ToolsPolicy`` entity lives in ``guru.domain.tools``::
+policy — the ``ToolsPolicy`` entity lives in ``guru.domain.toolpolicy``::
 
     [tools]
     enabled = ["read_file", "run_tests"]   # non-empty: allowlist
@@ -69,7 +69,7 @@ from typing import Any, Callable, Optional
 from guru import config, log
 from guru.domain import routing
 from guru.domain.routing import Ladder, Rung
-from guru.domain.tools import ToolsPolicy
+from guru.domain.toolpolicy import ToolsPolicy
 from guru.repositories.adapters import AdapterRegistry
 
 __all__ = ['DecisionsSettings', 'RoutingSettings', 'RungSpec',

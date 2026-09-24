@@ -26,6 +26,13 @@ Mechanics:
   which the stdlib documents as unsafe with threads (guru's turns run on
   worker threads).
 
+Caveat: the child gets ``PYTHONPATH=<cwd>``, so a ``python -m <module>``
+invocation resolves ``<module>`` in the project first — a project file named
+``pytest.py`` / ``flake8.py`` / ``mypy.py`` shadows the real tool and runs
+instead. That is project code the user already trusts to run its own tests,
+and it runs under the same limits and scrubbed environment; callers that
+need the tool itself must not rely on ``-m`` resolution being untouchable.
+
 Stdlib only (``subprocess``, ``resource``, ``tempfile``); the allow-list
 gate is ``guru.domain.files.ensure_path_allowed``.
 """

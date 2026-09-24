@@ -54,9 +54,13 @@ class TestGitStatus:
         seen = _spy(monkeypatch)
         out = gitread.git_status()
         assert out == f"{repo}: working tree clean."
+        safe = ['-c', 'core.fsmonitor=false', '-c',
+                'core.hooksPath=/dev/null']
         assert seen == [
-            ['git', '-C', str(repo), 'rev-parse', '--show-toplevel'],
-            ['git', '-C', str(repo), 'status', '--porcelain=v1', '-uall']]
+            ['git', '-C', str(repo)] + safe + ['rev-parse',
+                                               '--show-toplevel'],
+            ['git', '-C', str(repo)] + safe + ['status', '--porcelain=v1',
+                                               '-uall']]
 
     def test_edit_and_untracked(self, repo) -> None:
         (repo / 'a.py').write_text('x = 1\ny = 3\n')
@@ -102,19 +106,38 @@ class TestGitDiff:
             "1 deletion(-)"
         assert out[1].startswith('a.py |') and '+-' in out[1]
         assert 'detail=true' in out[-1]
-        assert seen[-1] == ['git', '-C', str(repo), 'diff', '--stat', '--']
+        assert seen[-1] == (['git', '-C', str(repo)] + gitread._SAFE_CONFIG
+                            + ['diff', '--stat', '--no-ext-diff',
+                               '--no-textconv', '--'])
         full = gitread.git_diff(detail='true')
         assert '-y = 2\n+y = 3\n+z = 4\n' in full
-        assert seen[-1] == ['git', '-C', str(repo), 'diff', '--']
+        assert seen[-1] == (['git', '-C', str(repo)] + gitread._SAFE_CONFIG
+                            + ['diff', '--no-ext-diff', '--no-textconv',
+                               '--'])
         assert gitread.git_diff(detail=True) == full
+
+    def test_hostile_diff_external_does_not_run(self, repo) -> None:
+        marker = repo / 'MARKER'
+        script = repo / 'ext.sh'
+        script.write_text(f'#!/bin/sh\ntouch {marker}\n')
+        script.chmod(0o755)
+        _git(repo, 'config', 'diff.external', str(script))
+        _git(repo, 'config', 'core.fsmonitor', str(script))
+        (repo / 'a.py').write_text('x = 1\ny = 3\n')
+        full = gitread.git_diff(detail=True)
+        assert '-y = 2\n+y = 3\n' in full        # git's own diff, not ext
+        assert not marker.exists()
+        gitread.git_status()
+        gitread.git_diff()
+        assert not marker.exists()
 
     def test_path_limits_the_diff(self, repo, monkeypatch) -> None:
         seen = _spy(monkeypatch)
         (repo / 'a.py').write_text('x = 0\n')
         (repo / 'sub' / 'b.txt').write_text('bb\n')
         out = gitread.git_diff('sub')
-        assert seen[-1] == ['git', '-C', str(repo), 'diff', '--stat', '--',
-                            'sub']
+        assert seen[-1][-2:] == ['--', 'sub']
+        assert seen[-1][:3] == ['git', '-C', str(repo)]
         assert 'b.txt' in out and 'a.py' not in out
         assert f'({repo / "sub"})' not in out and '(sub)' in out
 
@@ -141,8 +164,9 @@ class TestGitDiff:
         gitread.git_diff()
         gitread.git_diff('a.py', detail=True)
         for argv in seen:
-            assert argv[0] == 'git' and argv[3] in (
-                'rev-parse', 'status', 'diff')
+            verbs = [a for a in argv if a in ('rev-parse', 'status', 'diff')]
+            assert argv[0] == 'git' and len(verbs) == 1
+            assert not any(a in argv for a in ('add', 'commit', 'checkout'))
         status = subprocess.run(['git', 'status', '--porcelain'], cwd=repo,
                                 capture_output=True, text=True).stdout
         assert status.strip() == 'M a.py'          # still unstaged

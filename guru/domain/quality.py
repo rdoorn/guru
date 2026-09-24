@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from guru import log
-from guru.domain import files, procs
+from guru.domain import files, procs, toolpolicy
 
 _MAX_FAILURES = 10          # failing ids listed in the run_tests digest
 _MAX_ISSUES = 10            # lint issues listed per linter in the digest
@@ -44,15 +44,8 @@ _MYPY_ROW = re.compile(r'^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.*)$')
 _available: dict = {}
 
 
-def _policy():
-    """The installed tool policy (lazy import: ``tools`` registers these
-    verbs, so a top-level import would be circular)."""
-    from guru.domain import tools
-    return tools.active_policy()
-
-
 def _limits() -> procs.Limits:
-    return procs.Limits.from_dict(_policy().limits)
+    return procs.Limits.from_dict(toolpolicy.active_policy().limits)
 
 
 def _log_output(verb: str, res: procs.ProcResult) -> None:
@@ -65,21 +58,33 @@ def _log_output(verb: str, res: procs.ProcResult) -> None:
 
 
 def _rel(target: Path, root: Path) -> str:
+    """``target`` relative to ``root`` (or absolute when outside it). A
+    result whose first component starts with '-' is refused with
+    ``ValueError``: even behind a ``--`` separator such a name must never be
+    handed to a child as a positional argument."""
     try:
-        return str(target.relative_to(root)) or '.'
+        rel = str(target.relative_to(root)) or '.'
     except ValueError:
-        return str(target)
+        rel = str(target)
+    if Path(rel).parts and Path(rel).parts[0].startswith('-'):
+        raise ValueError(f"refusing a target that looks like an option: "
+                         f"{rel!r}")
+    return rel
 
 
-def _resolve_target(path: str) -> tuple:
+def _resolve_target(path: str
+                    ) -> tuple[Optional[Path], Optional[Path], str]:
     """``(target, root, error)``: the resolved (gated) target path and the
     project root it belongs to; ``target`` is None for an empty path."""
+    if (path or '').strip().startswith('-'):
+        return None, None, (f"Refused: target {path.strip()!r} looks like a"
+                            " command-line option, not a path.")
     if not (path or '').strip():
         root = files.project_root(Path.cwd())
         if not files.ensure_path_allowed(root):
             return None, None, f"Access to '{root}' was denied by the user."
         return None, root, ''
-    target = files._resolve(path)
+    target = files.resolve_path(path)
     if not files.ensure_path_allowed(target):
         return None, None, f"Access to '{target}' was denied by the user."
     if not target.exists():
@@ -130,10 +135,16 @@ def _block_for(test_id: str, blocks: dict) -> str:
     'test_x', 'TestC.test_x' or 'ERROR at setup of test_x')."""
     tail = test_id.split('::', 1)[1] if '::' in test_id else test_id
     tail = re.sub(r'\[.*\]$', '', tail).replace('::', '.')
+    cleaned = []
     for title, block in blocks.items():
         clean = re.sub(r'\[.*\]$', '', title)
         clean = re.sub(r'^ERROR at (setup|teardown) of ', '', clean)
-        if clean == tail or clean.endswith('.' + tail.rsplit('.', 1)[-1]):
+        cleaned.append((clean, block))
+    for clean, block in cleaned:               # exact title first
+        if clean == tail:
+            return block
+    for clean, block in cleaned:               # then the bare method name
+        if clean.endswith('.' + tail.rsplit('.', 1)[-1]):
             return block
     return ''
 
@@ -268,22 +279,27 @@ def run_tests(target: str = '', k: str = '', maxfail: int = 1,
     if '::' in path:
         path, node = path.split('::', 1)
     resolved, root, err = _resolve_target(path)
-    if err:
+    if err or root is None:
         return err
-    runner = _policy().test_runner
+    if k and str(k).strip().startswith('-'):
+        return f"Refused: k {k!r} looks like a command-line option."
+    runner = toolpolicy.active_policy().test_runner
     argv = [sys.executable, '-m', runner]
+    try:
+        rel = _rel(resolved, root) if resolved is not None else ''
+    except ValueError as e:
+        return f"Refused: {e}"
+    # Options first, then '-k <expr>', then '--' and the model-chosen
+    # target: a file named like an option can never be parsed as one.
     if runner == 'pytest':
         argv += ['-q', '-p', 'no:cacheprovider', f'--maxfail={stop}', '-rfE']
-        if resolved is not None:
-            argv.append(_rel(resolved, root) + (f'::{node}' if node else ''))
-        if k:
-            argv += ['-k', str(k)]
     else:
         argv.append('-q')
-        if resolved is not None:
-            argv.append(_rel(resolved, root))
-        if k:
-            argv += ['-k', str(k)]
+    if k:
+        argv += ['-k', str(k)]
+    if rel:
+        suffix = f'::{node}' if node and runner == 'pytest' else ''
+        argv += ['--', rel + suffix]
     res = procs.run(argv, root, _limits())
     if res.denied:
         return f"Refused: {res.denied}"
@@ -308,7 +324,7 @@ def check_syntax(path: str) -> str:
     or the SyntaxError with its line, column and offending text. Cheap:
     call it after every edit to a .py file, before running tests.
     """
-    target = files._resolve(path)
+    target = files.resolve_path(path)
     if not files.ensure_path_allowed(target):
         return f"Access to '{target}' was denied by the user."
     if not target.exists():
@@ -408,18 +424,21 @@ def lint(path: str = '', detail: str = '') -> str:
     output (up to 4 KB). Read-only.
     """
     resolved, root, err = _resolve_target(path)
-    if err:
+    if err or root is None:
         return err
     detail = (detail or '').strip().lower()
     if detail and detail not in ('flake8', 'mypy'):
         return "detail must be 'flake8', 'mypy' or empty."
-    rel = _rel(resolved, root) if resolved is not None else '.'
+    try:
+        rel = _rel(resolved, root) if resolved is not None else '.'
+    except ValueError as e:
+        return f"Refused: {e}"
     limits = _limits()
     parts: list = []
     if _installed('flake8', root):
         argv = [sys.executable, '-m', 'flake8',
-                '--extend-exclude=' + ','.join(sorted(files._NOISE_DIRS)),
-                rel]
+                '--extend-exclude=' + ','.join(sorted(files.NOISE_DIRS)),
+                '--', rel]
         res = procs.run(argv, root, limits)
         _log_output('lint/flake8', res)
         if detail == 'flake8':
@@ -436,7 +455,7 @@ def lint(path: str = '', detail: str = '') -> str:
     else:
         argv = [sys.executable, '-m', 'mypy']
         if resolved is not None:
-            argv.append(rel)
+            argv += ['--', rel]
         res = procs.run(argv, root, limits)
         _log_output('lint/mypy', res)
         if detail == 'mypy':

@@ -24,6 +24,7 @@ _MAX_PLAIN_LINES = 40       # non-Python fallback: numbered head of the file
 _MAX_ROWS = 30              # find_symbol rows (defs first, then refs)
 _LINE_HEAD = 160            # chars of a reference line shown
 _KINDS = ('', 'def', 'ref')
+_DIGEST_BYTES = 4096        # safety net on any digest this module returns
 
 _DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
@@ -52,6 +53,13 @@ def _entries(body: list, depth: int) -> Iterator[str]:
             yield from _entries(node.body, depth + 1)
 
 
+def _clip(text: str, limit: int = _DIGEST_BYTES) -> str:
+    """Hard cap on a digest (the row caps keep it far smaller normally)."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"\n… ({len(text) - limit} more chars)"
+
+
 def _numbered_head(text: str, path: Path, sha: str, note: str = '') -> str:
     lines = text.splitlines()
     shown = lines[:_MAX_PLAIN_LINES]
@@ -75,7 +83,7 @@ def outline(path: str) -> str:
     lines. Returns the file's sha (usable with edit_file). Restricted to
     allowed directories.
     """
-    target = files._resolve(path)
+    target = files.resolve_path(path)
     if not files.ensure_path_allowed(target):
         return f"Access to '{target}' was denied by the user."
     if not target.exists():
@@ -89,16 +97,16 @@ def outline(path: str) -> str:
         text = target.read_text(encoding='utf-8', errors='replace')
     except OSError as e:
         return f"Cannot read {target}: {e}"
-    sha = files._sha(text)
-    files._remember_sha(target, sha)
+    sha = files.sha_of(text)
+    files.remember_sha(target, sha)
     if target.suffix != '.py':
-        return _numbered_head(text, target, sha)
+        return _clip(_numbered_head(text, target, sha))
     try:
         tree = ast.parse(text)
     except SyntaxError as e:
-        return _numbered_head(
+        return _clip(_numbered_head(
             text, target, sha,
-            f"(not parseable: SyntaxError line {e.lineno}: {e.msg})")
+            f"(not parseable: SyntaxError line {e.lineno}: {e.msg})"))
     total = len(text.splitlines())
     out = [f"{target} ({total} lines, sha:{sha}) outline:"]
     doc = ast.get_docstring(tree)
@@ -111,7 +119,7 @@ def outline(path: str) -> str:
     if len(rows) > _MAX_ENTRIES:
         out.append(f"… {len(rows) - _MAX_ENTRIES} more entries; outline a"
                    " narrower file or read_file a range.")
-    return "\n".join(out)
+    return _clip("\n".join(out))
 
 
 # --- find_symbol -------------------------------------------------------------
@@ -124,7 +132,7 @@ def _def_kind(node: ast.AST) -> str:
     return 'def'
 
 
-def _definitions(tree: ast.Module, name: str) -> list:
+def _definitions(tree: ast.Module, name: str) -> list[tuple[int, str]]:
     """``(line, kind)`` for every def/class named ``name`` at any depth and
     every module-level assignment to it."""
     out: list = []
@@ -148,11 +156,11 @@ def _definitions(tree: ast.Module, name: str) -> list:
 
 
 def _python_files(root: Path) -> Iterator[Path]:
-    for f in files._walk_files(root):
+    for f in files.walk_files(root):
         if f.suffix != '.py':
             continue
         try:
-            if f.stat().st_size > files._MAX_FILE_BYTES:
+            if f.stat().st_size > files.MAX_FILE_BYTES:
                 continue
         except OSError:
             continue
@@ -205,13 +213,13 @@ def find_symbol(name: str, kind: str = '') -> str:
                 if kind != 'ref':
                     defs.append(f"def: {rel}:{line} ({what})")
         if kind != 'def':
-            for i, line in enumerate(text.splitlines(), 1):
-                if i in def_lines or not word.search(line):
+            for i, row in enumerate(text.splitlines(), 1):
+                if i in def_lines or not word.search(row):
                     continue
                 total_refs += 1
                 if len(refs) < _MAX_ROWS:
                     refs.append(
-                        f"ref: {rel}:{i}: {line.strip()[:_LINE_HEAD]}")
+                        f"ref: {rel}:{i}: {row.strip()[:_LINE_HEAD]}")
     rows = (defs + refs)[:_MAX_ROWS]
     more = len(defs) + total_refs - len(rows)
     if not rows:
@@ -221,4 +229,4 @@ def find_symbol(name: str, kind: str = '') -> str:
            f" {total_refs} reference(s):"] + rows
     if more:
         out.append(f"… {more} more; narrow with kind='def' or search_code.")
-    return "\n".join(out)
+    return _clip("\n".join(out))

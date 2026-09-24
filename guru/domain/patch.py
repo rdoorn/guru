@@ -5,9 +5,13 @@ The diff may touch several files; every hunk of every file is validated
 against the current content before anything is written (context and removed
 lines must match exactly — a hunk may sit at a different line number than
 the header says, as with ``git apply``, but no context line may differ), and
-the write is all-or-nothing across files. Refused: renames, binary patches,
-deletions (use ``delete_file``), and new files outside the project. Each
-target passes ``files.ensure_write_path_allowed`` (so read-only mode refuses)
+the write is all-or-nothing across files (a write that fails midway rolls
+the earlier files back). Refused: renames, binary patches, deletions (use
+``delete_file``), a path listed twice, new files outside the project, and
+anything under a noise dir (``.git``, ``.venv``, …). Each target passes
+``files.ensure_path_allowed`` before it is read (a refused file is never
+read, so the patch is no content oracle) and
+``files.ensure_write_path_allowed`` (so read-only mode refuses)
 and lands in the sha ledger like ``edit_file`` does, so a follow-up
 ``edit_file`` needs no re-read.
 """
@@ -18,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from guru import config
+from guru import config, log
 from guru.domain import files
 
 _HUNK_RE = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
@@ -77,7 +81,7 @@ def _strip_prefix(raw: str) -> str:
     return text
 
 
-def parse(diff: str) -> list:
+def parse(diff: str) -> list[FilePatch]:
     """Parse a unified diff into ``FilePatch`` objects.
 
     Raises ``PatchError`` for renames, binary patches, deletions, a hunk
@@ -101,8 +105,9 @@ def parse(diff: str) -> list:
         if line.startswith('Binary files ') or line.startswith(
                 'GIT binary patch'):
             raise PatchError('binary patches are not supported')
-        if line.startswith('--- ') and i + 1 < len(lines) and \
-                lines[i + 1].startswith('+++ '):
+        hunk_open = hunk is not None and (old_left > 0 or new_left > 0)
+        if (not hunk_open and line.startswith('--- ')
+                and i + 1 < len(lines) and lines[i + 1].startswith('+++ ')):
             old = _strip_prefix(line[4:])
             new = _strip_prefix(lines[i + 1][4:])
             if new == _DEV_NULL:
@@ -110,6 +115,10 @@ def parse(diff: str) -> list:
                                  ' supported; use delete_file')
             if old != _DEV_NULL and old != new:
                 raise PatchError(f'rename {old} -> {new} is not supported')
+            if any(fp.path == new for fp in patches):
+                raise PatchError(f'{new} appears twice in the diff; give'
+                                 ' each file one ---/+++ section with all'
+                                 ' its hunks')
             current = FilePatch(new, new_file=(old == _DEV_NULL))
             patches.append(current)
             hunk = None
@@ -211,7 +220,7 @@ def apply_hunks(text: str, hunks: list, where: str = '') -> str:
     return "\n".join(out) + ("\n" if trailing and out else '')
 
 
-def targets(diff: str) -> list:
+def targets(diff: str) -> list[str]:
     """The target paths a diff names (best effort; for the audit row)."""
     try:
         return [fp.path for fp in parse(diff)]
@@ -249,7 +258,14 @@ def apply_patch(diff: str) -> str:
         return f"Patch rejected: {e}"
     plan: list = []                  # (target, old_text, new_text, hunks)
     for fp in patches:
-        target = files._resolve(fp.path)
+        target = files.resolve_path(fp.path)
+        # Read gate first: a refused path is never read, so the patch cannot
+        # be used as an oracle for the content of unapproved files.
+        if not files.ensure_path_allowed(target):
+            return f"Access to '{target}' was denied by the user."
+        refusal = files.refuse_noise_write(target)
+        if refusal:
+            return refusal
         if target.is_dir():
             return f"Patch rejected: {target} is a directory."
         if fp.new_file:
@@ -277,23 +293,42 @@ def apply_patch(diff: str) -> str:
     blocks: list = []
     for target, old_text, new_text, _ in plan:
         verb = 'Create' if not target.exists() else 'Update'
-        block = files._write_detail(target, old_text, new_text, verb)
-        silent = not files._will_prompt_write(target)
+        block = files.write_detail(target, old_text, new_text, verb)
+        silent = not files.will_prompt_write(target)
         if not files.ensure_write_path_allowed(target, block):
             return (f"Write access to '{target}' was denied."
                     " Nothing was written.")
         blocks.append((block, silent))
+    written: list = []               # (target, existed, old_text)
     out: list = []
-    for (target, _, new_text, n), (block, silent) in zip(plan, blocks):
+    for (target, old_text, new_text, n), (block, silent) in zip(plan, blocks):
+        existed = target.exists()
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(new_text, encoding='utf-8')
         except OSError as e:
-            out.append(f"{target}: cannot write: {e}")
-            continue
+            _rollback(written)
+            return (f"FAILED: nothing applied (cannot write {target}: {e};"
+                    f" {len(written)} earlier file(s) restored).")
+        written.append((target, existed, old_text))
         if silent:
-            files._show_change(block)
-        sha = files._sha(new_text)
-        files._remember_sha(target, sha)
+            files.show_change(block)
+        sha = files.sha_of(new_text)
+        files.remember_sha(target, sha)
         out.append(f"{target}: {n} hunk(s) applied (sha:{sha})")
     return "Applied patch:\n" + "\n".join(out)
+
+
+def _rollback(written: list) -> None:
+    """Restore files an aborted apply_patch already wrote: previous content
+    for files that existed, removal for files it created. Best effort;
+    failures are logged, never raised."""
+    for target, existed, old_text in reversed(written):
+        try:
+            if existed:
+                target.write_text(old_text, encoding='utf-8')
+            else:
+                target.unlink()
+        except OSError:
+            log.exc(f'apply_patch rollback failed for {target}')
+        files.forget_sha(target)

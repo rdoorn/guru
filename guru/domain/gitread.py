@@ -1,9 +1,12 @@
 """Read-only git verbs: ``git_status`` and ``git_diff`` (design plan B3).
 
 Fixed argv only (``git -C <root> status --porcelain=v1 -uall``,
-``git -C <root> diff --stat -- <path>``, ``git -C <root> diff -- <path>``)
-through ``procs.run``; never ``add``, ``commit``, ``checkout`` or anything
-else that changes the tree or the index. The root is the git toplevel of the
+``git -C <root> diff --stat -- <path>``, ``git -C <root> diff -- <path>``,
+each with ``-c core.fsmonitor=false -c core.hooksPath=/dev/null`` and the
+diffs with ``--no-ext-diff --no-textconv`` so a hostile ``.git/config``
+cannot make a read execute anything) through ``procs.run``; never ``add``,
+``commit``, ``checkout`` or anything else that changes the tree or the
+index. The root is the git toplevel of the
 allow-listed project directory, and it must itself be under the read
 allow-list (a project nested inside a larger repo does not expose the parent
 repo's state). Digests are capped. Stdlib only.
@@ -15,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from guru import log
-from guru.domain import files, procs
+from guru.domain import files, procs, toolpolicy
 
 _MAX_STATUS_ROWS = 40       # porcelain rows shown by git_status
 _MAX_STAT_ROWS = 40         # --stat rows shown by git_diff
@@ -28,9 +31,17 @@ _STATUS_WORDS = {
 }
 
 
+# Hardening against a hostile checkout: no fsmonitor daemon or hook can be
+# started by a read (``core.fsmonitor``, ``core.hooksPath``), and a diff
+# never runs an external diff driver or a textconv filter configured in
+# ``.git/config`` (``--no-ext-diff --no-textconv``).
+_SAFE_CONFIG = ['-c', 'core.fsmonitor=false', '-c',
+                'core.hooksPath=/dev/null']
+_SAFE_DIFF = ['--no-ext-diff', '--no-textconv']
+
+
 def _limits() -> procs.Limits:
-    from guru.domain import tools          # lazy: tools registers these verbs
-    return procs.Limits.from_dict(tools.active_policy().limits)
+    return procs.Limits.from_dict(toolpolicy.active_policy().limits)
 
 
 def _truthy(value: object) -> bool:
@@ -40,13 +51,14 @@ def _truthy(value: object) -> bool:
 
 
 def _git(args: list, root: Path) -> procs.ProcResult:
-    res = procs.run(['git', '-C', str(root)] + args, root, _limits())
+    res = procs.run(['git', '-C', str(root)] + _SAFE_CONFIG + args, root,
+                    _limits())
     log.info('gitread: %s -> rc=%s%s', ' '.join(res.argv), res.returncode,
              f' denied={res.denied}' if res.denied else '')
     return res
 
 
-def _toplevel(project: Path) -> tuple:
+def _toplevel(project: Path) -> tuple[Optional[Path], str]:
     """``(toplevel, error)``: the repository root of ``project``."""
     res = _git(['rev-parse', '--show-toplevel'], project)
     if res.denied:
@@ -62,11 +74,11 @@ def _toplevel(project: Path) -> tuple:
     return top, ''
 
 
-def _root_for(path: str) -> tuple:
+def _root_for(path: str) -> tuple[Optional[Path], str, str]:
     """``(root, rel, error)``: the repo root for ``path`` (default: the
     project of the working directory) and ``path`` relative to it."""
     if (path or '').strip():
-        target = files._resolve(path)
+        target = files.resolve_path(path)
         if not files.ensure_path_allowed(target):
             return None, '', f"Access to '{target}' was denied by the user."
         project = files.project_root(target)
@@ -76,7 +88,7 @@ def _root_for(path: str) -> tuple:
         if not files.ensure_path_allowed(project):
             return None, '', f"Access to '{project}' was denied by the user."
     top, err = _toplevel(project)
-    if err:
+    if err or top is None:
         return None, '', err
     rel = ''
     if target is not None:
@@ -113,7 +125,7 @@ def git_status() -> str:
     count. Read-only; never stages or commits.
     """
     root, _, err = _root_for('')
-    if err:
+    if err or root is None:
         return err
     res = _git(['status', '--porcelain=v1', '-uall'], root)
     if res.denied:
@@ -150,12 +162,14 @@ def git_diff(path: str = '', detail: object = False) -> str:
     returns the unified diff itself (capped at 8 KB). Read-only.
     """
     root, rel, err = _root_for(path)
-    if err:
+    if err or root is None:
         return err
     if _truthy(detail):
-        res = _git(['diff', '--'] + ([rel] if rel else []), root)
+        res = _git(['diff'] + _SAFE_DIFF + ['--'] + ([rel] if rel else []),
+                   root)
     else:
-        res = _git(['diff', '--stat', '--'] + ([rel] if rel else []), root)
+        res = _git(['diff', '--stat'] + _SAFE_DIFF + ['--']
+                   + ([rel] if rel else []), root)
     if res.denied:
         return f"Refused: {res.denied}"
     if res.timed_out:

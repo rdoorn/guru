@@ -50,11 +50,15 @@ is injected through setters rather than hard-coded:
   repository in the CLI/TUI, a fake in tests. `guru.ledger_cli review`
   installs the JSONL repository of the directory it labels for the duration
   of the command and restores the previous one afterwards.
-- `tools.set_policy` — the project's tool policy (`.guru/tools.toml`, loaded
-  by `guru.repositories.settings.load_tools_policy`): which registry tools
+- `toolpolicy.set_policy` (re-exported as `tools.set_policy`) — the
+  project's tool policy (`.guru/tools.toml`, loaded by
+  `guru.repositories.settings.load_tools_policy`): which registry tools
   are enabled/disabled, the test runner and any subprocess-limit overrides.
-  The CLI installs it at startup; the default (no file, or `set_policy(None)`)
-  enables everything. `tools.execute_tool` consults it through
+  The entity and the installed instance live in `guru.domain.toolpolicy` so
+  the audited verbs (`quality`, `gitread`) read the runner and limits without
+  importing `tools` (which registers them). The CLI installs it at startup;
+  the default (no file, or `set_policy(None)`) enables everything.
+  `tools.execute_tool` consults it through
   `tools.is_enabled` and writes a `denied = "policy"` `tool_events` row for a
   refused call. The same predicate filters what the model is told about:
   `_core_tool_fns` (pre-activation), `activate`, `search_tools` results and

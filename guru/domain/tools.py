@@ -5,8 +5,6 @@ model requests a tool; this module handles the domain allow-list gate,
 ``search_tools`` activation, and running the tool, returning a result string.
 """
 import time
-from dataclasses import dataclass, field
-from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,15 +12,19 @@ from ddgs import DDGS
 
 from guru import config, log, session, skills, ui
 from guru.domain import (code, decisions, files, gitread, ledger, patch,
-                         policy, procs, quality, routing)
+                         policy, procs, quality, routing, toolpolicy)
 
 # The tools a controller (``[routing] controller = true``) keeps: it
 # coordinates and never executes (design doc §2).
 CONTROLLER_TOOLS = frozenset(('spawn', 'check', 'join', 'use_skill'))
-# Tools every agent has regardless of the project tool policy: discovery,
-# method selection and the delegation mailbox are not registry tools.
-ALWAYS_ON_TOOLS = frozenset(
-    ('search_tools', 'use_skill', 'spawn', 'check', 'join'))
+# The project tool policy seam lives in guru.domain.toolpolicy (so the
+# audited verbs can read it without importing this module); re-exported
+# here so tools.set_policy / is_enabled / active_policy keep working.
+ALWAYS_ON_TOOLS = toolpolicy.ALWAYS_ON_TOOLS
+ToolsPolicy = toolpolicy.ToolsPolicy
+set_policy = toolpolicy.set_policy
+active_policy = toolpolicy.active_policy
+is_enabled = toolpolicy.is_enabled
 
 _STOP_WORDS = {
     'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for',
@@ -33,50 +35,6 @@ _STOP_WORDS = {
 
 
 # --- project tool policy (.guru/tools.toml) ----------------------------------
-
-@dataclass
-class ToolsPolicy:
-    """A project's tool policy (loaded by
-    ``guru.repositories.settings.load_tools_policy``).
-
-    ``disabled`` always wins; a non-empty ``enabled`` set is an allowlist
-    for registry tools. ``test_runner`` is ``pytest`` or ``unittest``;
-    ``limits`` holds ``[tools.limits]`` overrides for ``procs.Limits``.
-    The default (no file) enables everything.
-    """
-    enabled: set = field(default_factory=set)
-    disabled: set = field(default_factory=set)
-    test_runner: str = 'pytest'
-    limits: dict = field(default_factory=dict)
-
-
-_policy = ToolsPolicy()
-
-
-def set_policy(pol: Optional[ToolsPolicy]) -> None:
-    """Install the project tool policy (the CLI at startup); None resets
-    to the default that enables everything."""
-    global _policy
-    _policy = pol if pol is not None else ToolsPolicy()
-
-
-def active_policy() -> ToolsPolicy:
-    """The installed project tool policy."""
-    return _policy
-
-
-def is_enabled(name: str) -> bool:
-    """Whether the project policy lets ``name`` run: always-on tools are
-    never gated; ``disabled`` wins; a non-empty ``enabled`` set allows only
-    its members."""
-    if name in ALWAYS_ON_TOOLS:
-        return True
-    if name in _policy.disabled:
-        return False
-    if _policy.enabled:
-        return name in _policy.enabled
-    return True
-
 
 def _advertised() -> list:
     """The registry tool names the project policy lets run, in registry
