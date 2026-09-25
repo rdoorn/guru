@@ -1542,6 +1542,7 @@ class TestCliRouting:
 
     def test_allow_spend_flag(self, tmp_path: Path, monkeypatch) -> None:
         cdir = self._cases_dir(tmp_path)
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: [])
         seen: dict = {}
 
         def fake_suite(suite, model_spec, out_root, **kw):
@@ -2466,16 +2467,53 @@ class TestCliRubricAndRepeat:
             return _fake_run(model_spec, {'a': True}, {'a': 2})
 
         monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: [
+            {'name': 'Remote', 'type': 'litellm'}])
         base = ['run', '--cases-dir', str(cdir), '--out',
                 str(tmp_path / 'r'), '--routing', str(routing_file)]
         assert cli_main(base + ['--allow-spend']) == 0
-        assert seen['rubric_spec'] == 'Fake|haiku'
+        assert seen['rubric_spec'] == 'Fake|haiku'      # the rung wins
         assert cli_main(base) == 0                      # no spend: no judge
         assert seen['rubric_spec'] == ''
         assert cli_main(base + ['--allow-spend', '--rubric', 'none']) == 0
         assert seen['rubric_spec'] == ''
         assert cli_main(base + ['--allow-spend', '--rubric', 'X|y']) == 0
         assert seen['rubric_spec'] == 'X|y'
+
+    def test_default_judge_with_spend_alone_is_the_cheapest_remote_tier(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        """Grading is the default whenever the run may spend: without a
+        routing file (or with one that has no rung) the judge is the
+        cheapest Claude tier of the first enabled remote adapter; no
+        remote adapter means nothing to grade with."""
+        cdir = _cli_case_dir(tmp_path, 'a')
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            return _fake_run(model_spec, {'a': True}, {'a': 2})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        adapters = [{'name': 'Ollama', 'type': 'ollama'},
+                    {'name': 'SBP Litellm', 'type': 'litellm'}]
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: adapters)
+        base = ['run', '--cases-dir', str(cdir), '--out', str(tmp_path / 'r')]
+        assert cli_main(base + ['--allow-spend']) == 0
+        assert seen['rubric_spec'] == 'SBP Litellm|aws/claude-4-5-haiku'
+        assert cli_main(base) == 0                      # no spend: no judge
+        assert seen['rubric_spec'] == ''
+        assert cli_main(base + ['--allow-spend', '--rubric', 'none']) == 0
+        assert seen['rubric_spec'] == ''
+        rungless = tmp_path / 'ctl.toml'
+        rungless.write_text('[routing]\ncontroller = true\n')
+        assert cli_main(base + ['--allow-spend', '--routing',
+                                str(rungless)]) == 0
+        assert seen['rubric_spec'] == 'SBP Litellm|aws/claude-4-5-haiku'
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: [])
+        assert cli_main(base + ['--allow-spend']) == 0
+        assert seen['rubric_spec'] == ''
+        assert cli_main(base + ['--allow-spend', '--rubric-min', '1']) == 2
+        assert 'needs a rubric judge' in capsys.readouterr().err
 
     def test_rubric_min_without_judge_is_a_usage_error(self, tmp_path,
                                                        capsys,

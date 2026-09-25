@@ -45,6 +45,19 @@ class TestDefaults:
             config, 'GLOBAL_SETTINGS_PATH', tmp_path / 'absent.toml')
         assert load_routing() == load_routing({})
 
+    def test_type_router_defaults_on_with_a_per_kind_ladder(self) -> None:
+        """A [[routing.ladders.review]] table is meant to be used: without
+        the key the type router is on when a per-kind ladder has a rung,
+        off with only the default ladder; type_router = false still wins."""
+        rung = {'adapter': 'A', 'model': 'm', 'max_complexity': 'hard'}
+        assert load_routing({'ladder': [rung]}).type_router is False
+        s = load_routing({'ladder': [rung], 'ladders': {'review': [rung]}})
+        assert s.type_router is True and s.controller is True
+        assert load_routing({'ladders': {'review': []}}).type_router is False
+        s = load_routing({'ladders': {'review': [rung]},
+                          'type_router': False})
+        assert s.type_router is False
+
 
 class TestScalars:
     def test_all_scalars_parsed(self) -> None:
@@ -389,7 +402,7 @@ class TestSandboxSettings:
             load_sandbox)
         s = load_sandbox({}, tmp_path / 'absent.toml')
         assert s == SandboxSettings()
-        assert s.enabled is False and s.runtime == 'docker'
+        assert s.enabled is True                 # on; the file turns it off
         assert s.base_image == DEFAULT_BASE_IMAGE
         assert '@sha256:' in DEFAULT_BASE_IMAGE
         assert '@sha256:' in DEFAULT_PROXY_IMAGE
@@ -427,10 +440,25 @@ class TestSandboxSettings:
         with pytest.raises(ValueError, match='enabled'):
             load_sandbox({}, p)
 
-    def test_absent_project_file_stays_disabled(self, tmp_path) -> None:
+    def test_absent_project_file_stays_enabled(self, tmp_path) -> None:
         from guru.repositories.settings import load_sandbox
         assert load_sandbox({'cpus': 1}, tmp_path / 'nope.toml').enabled \
-            is False
+            is True
+        p = self._project_file(tmp_path, '[sandbox]\ncpus = 1\n')
+        assert load_sandbox({}, p).enabled is True
+
+    def test_enabled_false_is_the_project_off_switch(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        p = self._project_file(tmp_path, '[sandbox]\nenabled = false\n')
+        assert load_sandbox({'cpus': 1}, p).enabled is False
+
+    def test_runtime_is_not_a_key(self, tmp_path) -> None:
+        """The runtime is docker (Colima); nothing read a ``runtime`` key,
+        so it is gone and named as unknown like any other typo."""
+        from guru.repositories.settings import SandboxSettings, load_sandbox
+        assert not hasattr(SandboxSettings(), 'runtime')
+        with pytest.raises(ValueError, match='runtime'):
+            load_sandbox({'runtime': 'docker'}, tmp_path / 'absent.toml')
 
     def test_unknown_key_named(self, tmp_path) -> None:
         from guru.repositories.settings import load_sandbox
@@ -464,12 +492,6 @@ class TestSandboxSettings:
         with pytest.raises(ValueError, match=key):
             load_sandbox({key: value}, tmp_path / 'absent.toml')
 
-    def test_bad_runtime(self, tmp_path) -> None:
-        from guru.repositories.settings import load_sandbox
-        with pytest.raises(ValueError, match='runtime') as e:
-            load_sandbox({'runtime': 'podman'}, tmp_path / 'absent.toml')
-        assert 'docker' in str(e.value)
-
     @pytest.mark.parametrize('key,value', [
         ('cpus', 0), ('cpus', '2'), ('cpus', True), ('memory_mb', 0),
         ('memory_mb', 2.5), ('memory_mb', True), ('pids', -1),
@@ -483,3 +505,36 @@ class TestSandboxSettings:
         from guru.repositories.settings import load_sandbox
         assert load_sandbox({'cpus': 3}, tmp_path / 'x').cpus == 3.0
         assert load_sandbox({'cpus': 0.5}, tmp_path / 'x').cpus == 0.5
+
+
+class TestCheapestRemoteSpec:
+    """cheapest_remote_spec: the eval CLI's rubric judge when a run may
+    spend but no routing file names a rung."""
+
+    def test_first_enabled_remote_adapter_haiku_tier(self) -> None:
+        from guru.repositories.settings import cheapest_remote_spec
+        adapters = [
+            {'name': 'Ollama', 'type': 'ollama'},
+            {'name': 'Off', 'type': 'anthropic', 'enable': False},
+            {'name': 'SBP Litellm', 'type': 'litellm'},
+            {'name': 'Direct', 'type': 'anthropic'}]
+        assert cheapest_remote_spec(adapters) == \
+            'SBP Litellm|aws/claude-4-5-haiku'
+        assert cheapest_remote_spec([{'name': 'Direct', 'type': 'anthropic'}]
+                                    ) == 'Direct|claude-haiku-4-5'
+
+    def test_no_remote_adapter_is_empty(self) -> None:
+        from guru.repositories.settings import cheapest_remote_spec
+        assert cheapest_remote_spec([]) == ''
+        assert cheapest_remote_spec([{'name': 'Ollama', 'type': 'ollama'}]
+                                    ) == ''
+
+    def test_default_reads_adapters_toml(self, tmp_path, monkeypatch) -> None:
+        from guru.repositories.settings import cheapest_remote_spec
+        p = tmp_path / 'adapters.toml'
+        p.write_text('[[adapter]]\nname = "L"\ntype = "litellm"\n',
+                     encoding='utf-8')
+        monkeypatch.setattr(config, 'ADAPTERS_PATH', p)
+        assert cheapest_remote_spec() == 'L|aws/claude-4-5-haiku'
+        monkeypatch.setattr(config, 'ADAPTERS_PATH', tmp_path / 'absent')
+        assert cheapest_remote_spec() == ''

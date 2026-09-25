@@ -186,9 +186,13 @@ def provision(project: Path, settings: Optional[SandboxSettings] = None,
     applied) as the build context, build on the internal network through
     the proxy, tear down, and return the new record. ``ProvisionError``
     when a domain is denied or the network/proxy/build fails; the
-    context copy and the network are removed either way.
+    context copy and the network are removed either way; a project whose
+    ``.guru/sandbox.toml`` says ``enabled = false`` is refused up front.
     """
     cfg = _settings(settings)
+    if not cfg.enabled:
+        raise ProvisionError('the sandbox is disabled for this project '
+                             '(enabled = false in .guru/sandbox.toml)')
     spec = sb.spec_from(project, cfg)
     text = sb.dockerfile_for(spec.project, spec.base_image)
     if not force and not images.needs_build(spec, text):

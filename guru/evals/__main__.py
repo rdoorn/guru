@@ -5,13 +5,14 @@ Plain-text output (like ``guru.bench``); ``run`` exits 1 when any case
 failed so it can gate a script. ``--repeat N`` runs the selection N times
 (one run file each) and prints an aggregate; the gate is then that every
 case passed at least ``ceil(N/2)`` times. ``--rubric 'Adapter|model'``
-grades the rubric cases with a model (default with ``--allow-spend`` and
-``--routing``: the routing file's cheapest rung; ``--rubric none`` turns
-that off); a grade is reported, and fails the case only under
-``--rubric-min N``. ``grade RUN_ID --rubric SPEC [--rubric SPEC2]``
-re-grades a stored run offline (no case re-runs) with one column per
-judge next to the hand grade from ``evals/rubric-labels.toml``; ``grade
-RUN_ID --show`` prints what the judge sees per case (prompt, rubric,
+grades the rubric cases with a model (default whenever ``--allow-spend``
+is given: the routing file's cheapest rung, else the cheapest Claude tier
+of the first enabled remote adapter; ``--rubric none`` turns that off); a
+grade is reported, and fails the case only under ``--rubric-min N``.
+``grade RUN_ID --rubric SPEC [--rubric SPEC2]`` re-grades a stored run
+offline (no case re-runs) with one column per judge next to the hand grade
+from ``evals/rubric-labels.toml``; ``grade RUN_ID --show`` prints what the
+judge sees per case (prompt, rubric,
 evidence, answer) with a ``[[label]]`` stub, for grading by hand.
 ``--samples N`` (both commands) asks each judge N times per case; the
 recorded score is the median (ties to the lower value), the cell reads
@@ -28,6 +29,7 @@ from typing import Optional
 from guru import config, log
 from guru.evals import cases, grading, labels, runner, runs
 from guru.evals.runs import CaseResult, Run
+from guru.repositories import settings as routing_settings
 from guru.repositories.settings import RoutingSettings
 
 DEFAULT_OUT = cases.REPO_ROOT / 'evals' / 'runs'
@@ -198,15 +200,18 @@ def _print_aggregate(run_list: list, repeats: int) -> None:
 
 def _resolve_rubric(args: argparse.Namespace,
                     routing: Optional[RoutingSettings]) -> str:
-    """The rubric judge spec for the run: the flag, else (with
-    ``--allow-spend`` and a routing file) the file's cheapest rung; ``''``
-    for no grading (``--rubric none`` or no default)."""
+    """The rubric judge spec for the run: the flag, else — whenever the
+    run may spend (``--allow-spend``) — the routing file's cheapest rung
+    or, without one, the cheapest Claude tier of the first enabled remote
+    adapter in ``adapters.toml``; ``''`` for no grading (``--rubric
+    none``, no spend, or no remote adapter to grade with)."""
     if args.rubric is not None:
         spec = args.rubric.strip()
         return '' if spec.lower() == RUBRIC_OFF else spec
-    if args.allow_spend and routing is not None:
-        return runner.default_rubric_spec(routing)
-    return ''
+    if not args.allow_spend:
+        return ''
+    spec = runner.default_rubric_spec(routing) if routing is not None else ''
+    return spec or routing_settings.cheapest_remote_spec()
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -251,7 +256,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     rubric_spec = _resolve_rubric(args, routing)
     if args.rubric_min is not None and not rubric_spec:
         print('error: --rubric-min needs a rubric judge (--rubric, or '
-              '--allow-spend with --routing)', file=sys.stderr)
+              '--allow-spend with a remote adapter configured)',
+              file=sys.stderr)
         return 2
 
     def progress(res: CaseResult) -> None:
@@ -458,8 +464,9 @@ def _parser() -> argparse.ArgumentParser:
                             'submit (default: deny, nothing is applied)')
     run_p.add_argument('--rubric', default=None, metavar='SPEC',
                        help="'Adapter|model' that grades the rubric cases "
-                            "0-2 (default: with --allow-spend and "
-                            "--routing, the routing file's cheapest rung; "
+                            "0-2 (default with --allow-spend: the routing "
+                            "file's cheapest rung, else the cheapest Claude "
+                            "tier of the first remote adapter; "
                             f"'{RUBRIC_OFF}' turns grading off)")
     run_p.add_argument('--rubric-min', type=int, default=None, metavar='N',
                        help='fail a rubric case graded below N (default: '

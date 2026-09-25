@@ -649,6 +649,14 @@ class TestProvision:
         assert provision.provision(root, _settings(), force=True).digest == (
             'sha256:new')
 
+    def test_disabled_project_is_refused_before_docker(
+            self, allowed, fake_run) -> None:
+        settings = _settings()
+        settings.enabled = False
+        with pytest.raises(provision.ProvisionError, match='enabled = false'):
+            provision.provision(_project(allowed), settings)
+        assert fake_run.calls == []
+
     def test_domain_denied_means_no_network_at_all(self, allowed, fake_run,
                                                    monkeypatch) -> None:
         from guru.domain import tools
