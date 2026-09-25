@@ -32,3 +32,11 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-25T07:18:04+00:00 | dd0ff914337d | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 7/8 | 17.5 | $0.25 | top-10 gate: fast x3 (repeat 3/3) |
 | 2026-09-25T07:22:01+00:00 | 871dc26f9efa | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 26.4 | $0.07 | rubric judge verified after the max_tokens floor (logic-bug 2/2) |
 | 2026-09-25T07:22:58+00:00 | fa5c42d05059 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 66.8 | $1.39 | top-10: real guru cases with caching + Haiku rubric judge |
+| 2026-09-25T09:47:42+00:00 | 8bf355893d82 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 16.2 | $0.25 | loop 1: fast x3 (1/3), conversation cache breakpoint |
+| 2026-09-25T09:50:41+00:00 | 9f122a20774b | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 17.0 | $0.24 | loop 1: fast x3 (2/3) |
+| 2026-09-25T09:53:36+00:00 | 644b68facb64 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 20.1 | $0.25 | loop 1: fast x3 (3/3) |
+| 2026-09-25T09:56:50+00:00 | 1de2ea5a68fa | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/4 | 122.3 | $1.21 | loop 1: real + dogfood; sandbox checks errored (runner bug) |
+| 2026-09-25T10:07:46+00:00 | 94fdc1bb11a5 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/3 | 33.3 | $0.15 | loop 1: sandbox cases; checks errored (runner bug), stall answers |
+| 2026-09-25T10:10:11+00:00 | 61c2e3bb32d3 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 79.5 | $0.32 | loop 1: review-multi-file x3 with panel active (1/3) |
+| 2026-09-25T10:12:03+00:00 | cc4411c400e3 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 78.4 | $0.18 | loop 1: panel (2/3), spawned_min miss |
+| 2026-09-25T10:13:39+00:00 | c1362a8ac39a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 86.2 | $0.32 | loop 1: panel (3/3) |
