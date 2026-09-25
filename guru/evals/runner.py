@@ -374,20 +374,37 @@ def _fixture_env(repo: Path) -> dict:
     return env
 
 
-def fixture_tests_pass(repo: Path,
-                       timeout: float = FIXTURE_PYTEST_TIMEOUT_S) -> bool:
+FIXTURE_TAIL_LINES = 30
+
+
+def fixture_tests_result(repo: Path,
+                         timeout: float = FIXTURE_PYTEST_TIMEOUT_S
+                         ) -> tuple[bool, str]:
     """Run the fixture's own pytest in ``repo`` (this interpreter, the copy
-    first on ``PYTHONPATH``, tests marked ``sandbox`` deselected); True
-    when it exits 0."""
+    first on ``PYTHONPATH``, tests marked ``sandbox`` deselected); return
+    ``(passed, tail)`` where ``tail`` is the last ``FIXTURE_TAIL_LINES``
+    lines of its output (the failing test ids and summary line) — a bare
+    False told nobody WHY a fixture failed (loop-3 dogfood run
+    ac6c18d35849)."""
     try:
         proc = subprocess.run(
             [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
-             '-m', FIXTURE_PYTEST_DESELECT],
+             '--color=no', '-m', FIXTURE_PYTEST_DESELECT],
             cwd=repo, capture_output=True, text=True, timeout=timeout,
             env=_fixture_env(repo))
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False, f'fixture pytest timed out after {timeout:.0f}s'
+    except OSError as e:
+        return False, f'fixture pytest could not run: {e}'
+    text = (proc.stdout or '') + (proc.stderr or '')
+    tail = '\n'.join(text.strip().splitlines()[-FIXTURE_TAIL_LINES:])
+    return proc.returncode == 0, tail
+
+
+def fixture_tests_pass(repo: Path,
+                       timeout: float = FIXTURE_PYTEST_TIMEOUT_S) -> bool:
+    """``fixture_tests_result`` without the tail."""
+    return fixture_tests_result(repo, timeout)[0]
 
 
 # --- adapter / model resolution --------------------------------------------
@@ -637,7 +654,8 @@ def _stall_nudges(agents: list) -> int:
 def _observe(agents: list, seconds: float, timed_out: bool,
              changed: list[str], tests_pass: Optional[bool],
              error: str, gate_verdicts: Optional[list[str]] = None,
-             sandbox: Optional[dict] = None) -> Observed:
+             sandbox: Optional[dict] = None,
+             tests_tail: str = '') -> Observed:
     answer = bench._final_answer(agents[0]) if agents else ''
     skipped = error == SANDBOX_UNAVAILABLE
     if not error and not timed_out and not answer:
@@ -652,6 +670,7 @@ def _observe(agents: list, seconds: float, timed_out: bool,
                if a.state.active_role],
         stall_nudges=_stall_nudges(agents), seconds=round(seconds, 3),
         files_changed=changed, fixture_tests_pass=tests_pass,
+        fixture_tests_tail=tests_tail if tests_pass is False else '',
         timed_out=timed_out, error=error,
         gate_verdicts=list(gate_verdicts or []), sandbox=sandbox,
         skipped=skipped)
@@ -735,6 +754,7 @@ def run_case(case: Case, base_state: session.SessionState,
     seconds = 0.0
     changed: list[str] = []
     tests_pass: Optional[bool] = None
+    tests_tail = ''
     sandbox: Optional[dict] = None
     try:
         copy = prepare_fixture(case.fixture_git or case.fixture, workdir,
@@ -752,7 +772,7 @@ def run_case(case: Case, base_state: session.SessionState,
         _check_copy(copy, inode)         # the checks must see THIS copy
         changed = files_changed(copy)
         if case.expect.fixture_tests_pass is not None:
-            tests_pass = fixture_tests_pass(copy)
+            tests_pass, tests_tail = fixture_tests_result(copy)
     except Exception as e:                           # noqa: BLE001
         error = error or str(e) or type(e).__name__
     finally:
@@ -760,7 +780,8 @@ def run_case(case: Case, base_state: session.SessionState,
     timed_out = bool(case.timeout_s) and seconds >= case.timeout_s
     verdicts = gate_verdicts(repo.rows('sandbox_events')[events_before:])
     obs = _observe(agents, seconds, timed_out, changed, tests_pass, error,
-                   gate_verdicts=verdicts, sandbox=sandbox)
+                   gate_verdicts=verdicts, sandbox=sandbox,
+                   tests_tail=tests_tail)
     if case.fixture_git is not None:
         obs.fixture_git = {'path': str(case.fixture_git.path),
                            'ref': case.fixture_git.ref}

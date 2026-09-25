@@ -356,7 +356,10 @@ class TestRunCase:
             base, [base.adapter], tmp_path)
         assert bad.observed['fixture_tests_pass'] is False
         assert bad.passed is False
-        assert bad.checks[0]['detail'] == 'fixture tests failed, expected pass'
+        assert bad.checks[0]['detail'].startswith(
+            'fixture tests failed, expected pass: ')
+        assert 'test_words_across_newlines' in bad.checks[0]['detail']
+        assert '\x1b[' not in bad.checks[0]['detail']
         good = runner.run_case(
             _case(fixture='flaskish', fixture_tests_pass=True),
             base, [base.adapter], tmp_path)
@@ -1647,6 +1650,17 @@ class TestGitFixture:
         assert runner.fixture_tests_pass(copy) is True
         (copy / 'pkg' / '__init__.py').write_text('X = 2\n')
         assert runner.fixture_tests_pass(copy) is False
+
+    def test_result_carries_the_failing_tail(self, tmp_path) -> None:
+        copy = runner.prepare_fixture('cli-tool', tmp_path)
+        ok, tail = runner.fixture_tests_result(copy)
+        assert ok is False and 'test_words_across_newlines' in tail
+        assert 'failed' in tail.splitlines()[-1]
+        (copy / 'wordcount.py').write_text(
+            (copy / 'wordcount.py').read_text().replace(
+                "text.split(' ')", 'text.split()'))
+        ok, tail = runner.fixture_tests_result(copy)
+        assert ok is True and 'passed' in tail
 
     def test_pythonpath_prepends_and_keeps_existing(self, tmp_path,
                                                     monkeypatch) -> None:

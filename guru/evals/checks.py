@@ -27,6 +27,9 @@ class Observed:
     fixture_tests_pass: Optional[bool]
     timed_out: bool
     error: str = ''
+    # Last lines of the fixture's pytest output when it FAILED (failing
+    # test ids and the summary line); '' otherwise.
+    fixture_tests_tail: str = ''
     # ``{'path', 'ref'}`` of a ``[fixture_git]`` case (traceability);
     # None for a directory fixture.
     fixture_git: Optional[dict] = None
@@ -166,8 +169,13 @@ def _fixture_tests_pass(e: Expect, o: Observed) -> CheckResult:
     ok = o.fixture_tests_pass is e.fixture_tests_pass
     got = 'passed' if o.fixture_tests_pass else 'failed'
     want = 'pass' if e.fixture_tests_pass else 'fail'
-    return CheckResult('fixture_tests_pass', ok, '' if ok else
-                       f'fixture tests {got}, expected {want}')
+    detail = f'fixture tests {got}, expected {want}'
+    if not ok and o.fixture_tests_tail:
+        failing = [ln for ln in o.fixture_tests_tail.splitlines()
+                   if ln.startswith(('FAILED', 'ERROR')) or ' failed' in ln]
+        detail += ': ' + ' | '.join(failing[-6:] or
+                                    o.fixture_tests_tail.splitlines()[-3:])
+    return CheckResult('fixture_tests_pass', ok, '' if ok else detail)
 
 
 def _last_verdict(o: Observed) -> str:

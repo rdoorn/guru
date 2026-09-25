@@ -219,3 +219,18 @@ class TestGateVerdict:
         e = Expect(gate_verdict='unclear', gate_verdict_any=['unclear'])
         names = [r.name for r in evaluate(e, obs(gate_verdicts=['unclear']))]
         assert names == ['gate_verdict', 'gate_verdict_any']
+
+
+class TestFixtureTestsTail:
+    def test_failing_check_names_the_failing_tests(self) -> None:
+        e = Expect(fixture_tests_pass=True)
+        o = obs(fixture_tests_pass=False,
+                fixture_tests_tail='x\nFAILED tests/test_a.py::test_b - '
+                                   'boom\n1 failed, 3 passed in 0.1s')
+        r = one(e, o)
+        assert not r.passed
+        assert 'FAILED tests/test_a.py::test_b' in r.detail
+        assert '1 failed, 3 passed' in r.detail
+
+    def test_tail_defaults_empty(self) -> None:
+        assert obs().fixture_tests_tail == ''

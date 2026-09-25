@@ -387,7 +387,7 @@ ref = "dc0cd3111db9c6beec89ebf56315980323c441e9"    # commit sha or tag
 The runner materialises the copy with `git archive <ref>` (so only tracked
 files at that commit are present; caches and `.git` are excluded as for a
 directory fixture), then `git init`s and commits it, so `files_changed`
-works the same way. `fixture_tests_pass` runs `python -m pytest -q` in the
+works the same way. `fixture_tests_pass` (a failing run also records `fixture_tests_tail`, the last lines of the fixture's pytest output, and the check names the failing tests) runs `python -m pytest -q` in the
 copy with this interpreter and the copy first on `PYTHONPATH` (a real repo
 has no venv of its own in the copy); the case's `observed.fixture_git`
 records `{path, ref}` for traceability, and `list` shows the pin as
