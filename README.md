@@ -509,7 +509,8 @@ The verbs:
   for one path; read-only, never `add`/`commit`/`checkout`.
 - `apply_patch(diff)` — a unified diff for one or more project files,
   validated hunk by hunk before anything is written, all-or-nothing, through
-  the same write gates and sha ledger as `edit_file`.
+  the same write gates and sha ledger as `edit_file`; a deletion
+  (`+++ /dev/null`) is applied when its body equals the file exactly.
 
 **Digest and detail.** Every verb returns at most a few hundred characters
 by default; a `detail` argument expands one item (one failing test, one
@@ -633,6 +634,15 @@ the user's request, the task, the intent and the diff. Three verdicts:
 - `unclear` — the user is asked, with the reviewer's reasons, in every mode
   (auto never waves it through).
 - `suspicious` — refused; nothing is applied and the reasons are printed.
+
+File deletions go through the same gate: a file deleted in the copy shows
+up as a `delete` flag (`deletes <path> (N lines)`, informational) and in
+the change summary the reviewer sees, and the reviewer answers whether
+every deletion is something the *user's request* asked for
+(`deletions_requested`); a `no` makes the verdict `unclear`, a `yes` with
+an otherwise clean review is applied like any edit. `apply_patch` accepts
+deletions (`+++ /dev/null`) whose body equals the file exactly, inside and
+outside the sandbox — one patch algebra.
 
 In read-only mode a submit reports the diff and stops before the reviewer
 is consulted (nothing could be applied, so the diff never leaves the

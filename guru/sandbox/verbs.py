@@ -386,11 +386,15 @@ def _settle(spec: sb.SandboxSpec, key: tuple[str, str], what: str,
             started: float) -> str:
     """Apply, ask or refuse per ``verdict`` (the copy lock is held)."""
     reasons = '\n'.join(f'  - {r}' for r in verdict.reasons) or '  - (none)'
+    gone = gate.deleted_paths(diff)
     images.record_sandbox_event(
         'submit', ['submit', what[:80]], time.monotonic() - started,
         verdict.state == gate.INTENDED,
-        f"{verdict.state}: {'; '.join(verdict.reasons)}")
+        f"{verdict.state}: {'; '.join(verdict.reasons)}"
+        + (f"; deletes: {', '.join(gone)}" if gone else ''))
     header = f'Gate verdict: {verdict.state}\n{reasons}\n{stat}'
+    if gone:
+        header += '\nDeleted files: ' + ', '.join(gone)
     if verdict.state == gate.SUSPICIOUS:
         return ('Refused: the quality gate found the change suspicious; '
                 f'nothing was applied.\n{header}\nThe sandbox copy is kept; '

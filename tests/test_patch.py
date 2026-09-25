@@ -1,5 +1,7 @@
 """Tests for guru.domain.patch: unified-diff parsing/application and the
 apply_patch verb (plan B4)."""
+from pathlib import Path
+
 import pytest
 
 from guru import config, session
@@ -7,6 +9,9 @@ from guru.domain import files, patch
 
 A_OLD = ''.join(f'a{i}\n' for i in range(1, 11))
 B_OLD = 'one\ntwo\nthree\n'
+DELETE_B = ('diff --git a/b.txt b/b.txt\ndeleted file mode 100644\n'
+            'index 3333333..0000000\n--- a/b.txt\n+++ /dev/null\n'
+            '@@ -1,3 +0,0 @@\n-one\n-two\n-three\n')
 
 TWO_FILES = '''\
 diff --git a/a.txt b/a.txt
@@ -76,7 +81,9 @@ class TestParse:
         ('diff --git a/x b/y\nrename from x\nrename to y\n', 'renames'),
         ('--- a/x\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n', 'rename x -> y'),
         ('Binary files a/x and b/x differ\n', 'binary'),
-        ('--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n', 'delete_file'),
+        ('--- a/x\n+++ /dev/null\n@@ -1,2 +0,1 @@\n-a\n+b\n',
+         'removed lines only'),
+        ('--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n', 'names no file'),
         ('@@ -1 +1 @@\n-a\n+b\n', 'before any'),
         ('just some prose\n', 'no ---'),
         ('--- a/x\n+++ b/x\n', 'no hunks'),
@@ -84,6 +91,23 @@ class TestParse:
     def test_refusals(self, diff, why) -> None:
         with pytest.raises(patch.PatchError, match=why):
             patch.parse(diff)
+
+    def test_deletion_parses_from_the_old_side(self) -> None:
+        [fp] = patch.parse(DELETE_B)
+        assert fp.deleted and not fp.new_file and fp.path == 'b.txt'
+        assert fp.removed_lines == ['one', 'two', 'three']
+        assert patch.deletion_matches(fp, B_OLD)
+        assert not patch.deletion_matches(fp, B_OLD + 'four\n')
+        assert not patch.deletion_matches(fp, B_OLD.rstrip('\n'))
+        assert patch.render([fp]) == ('--- b.txt\n+++ /dev/null\n'
+                                      '@@ -1,3 +0,0 @@\n-one\n-two\n-three\n')
+        assert patch.targets(DELETE_B) == ['b.txt']
+
+    def test_deletion_without_trailing_newline(self) -> None:
+        [fp] = patch.parse('--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n'
+                           '\\ No newline at end of file\n')
+        assert fp.deleted and patch.deletion_matches(fp, 'a')
+        assert not patch.deletion_matches(fp, 'a\n')
 
     def test_targets_best_effort(self) -> None:
         assert patch.targets(TWO_FILES) == ['a.txt', 'b.txt']
@@ -232,15 +256,96 @@ class TestApplyPatch:
         assert not (project / 'c.txt').exists()
         assert session.file_shas == {}
 
-    def test_rename_and_delete_refused(self, project) -> None:
+    def test_rename_refused(self, project) -> None:
         out = patch.apply_patch('--- a/a.txt\n+++ b/c.txt\n@@ -1 +1 @@\n'
                                 '-a1\n+A\n')
         assert out.startswith('Patch rejected') and 'rename' in out
-        out = patch.apply_patch('--- a/a.txt\n+++ /dev/null\n@@ -1,10 +0,0 @@'
-                                + ''.join(f'\n-a{i}' for i in range(1, 11))
-                                + '\n')
-        assert 'delete_file' in out
+        assert 'delete_file' not in out
         assert (project / 'a.txt').read_text() == A_OLD
+
+    def test_deletion_applies_exactly_and_drops_the_sha(self, project):
+        files.remember_sha(project / 'b.txt', files.sha_of(B_OLD))
+        out = patch.apply_patch(DELETE_B)
+        assert out == ('Applied patch:\n'
+                       f'deleted {project / "b.txt"} (3 lines)')
+        assert not (project / 'b.txt').exists()
+        assert (project / 'a.txt').read_text() == A_OLD
+        assert session.file_shas == {}
+
+    def test_deletion_mixed_with_an_edit(self, project) -> None:
+        out = patch.apply_patch(TWO_FILES.split('--- b.txt')[0] + DELETE_B)
+        assert 'a.txt: 2 hunk(s) applied' in out and 'deleted' in out
+        assert not (project / 'b.txt').exists()
+        assert 'nine' in (project / 'a.txt').read_text()
+
+    @pytest.mark.parametrize('body', [
+        '-one\n-two\n',                         # a line missing
+        '-one\n-two\n-three\n-four\n',           # a line too many
+        '-one\n-TWO\n-three\n',                 # a line differs
+        '-two\n-one\n-three\n',                 # order differs
+        '-one\n-two\n-three\n\\ No newline at end of file\n',
+    ])
+    def test_deletion_must_match_exactly(self, project, body) -> None:
+        n = sum(1 for ln in body.splitlines() if ln.startswith('-'))
+        diff = f'--- a/b.txt\n+++ /dev/null\n@@ -1,{n} +0,0 @@\n{body}'
+        out = patch.apply_patch(diff)
+        assert out.startswith('Patch rejected: b.txt: the deletion does not'
+                              ' match')
+        assert (project / 'b.txt').read_text() == B_OLD
+
+    def test_deletion_of_a_missing_or_outside_file(self, project,
+                                                   monkeypatch) -> None:
+        out = patch.apply_patch(DELETE_B.replace('b.txt', 'zz.txt'))
+        assert out.startswith('Patch rejected: no such file')
+        outside = project.parent / f'{project.name}_out'
+        outside.mkdir()
+        (outside / 'b.txt').write_text(B_OLD)
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS',
+                            {str(project), str(outside)})
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS',
+                            {str(project), str(outside)})
+        monkeypatch.setattr(files, 'project_root',
+                            lambda p, fallback=True: None)
+        out = patch.apply_patch(DELETE_B.replace(
+            'b.txt', str(outside / 'b.txt')))
+        assert 'outside the project' in out and 'delete' in out
+        assert (outside / 'b.txt').exists()
+
+    def test_deletion_in_a_noise_dir_refused(self, project) -> None:
+        (project / '.git').mkdir()
+        (project / '.git' / 'config').write_text('x\n')
+        out = patch.apply_patch('--- a/.git/config\n+++ /dev/null\n'
+                                '@@ -1 +0,0 @@\n-x\n')
+        assert out.startswith('Refused:') and '.git' in out
+        assert (project / '.git' / 'config').exists()
+
+    def test_deletion_is_write_gated(self, project, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
+        asked: list = []
+        files.set_path_asker(lambda q: asked.append(q) or False)
+        out = patch.apply_patch(DELETE_B)
+        assert out.startswith('Write access to') and 'Nothing was written'\
+            in out
+        assert (project / 'b.txt').read_text() == B_OLD
+        assert asked and 'Delete(b.txt)' in asked[0]
+        monkeypatch.setattr(config, 'MODE', config.MODE_READ_ONLY)
+        assert patch.apply_patch(DELETE_B).startswith('Refused: read-only')
+
+    def test_deletion_rolled_back_when_a_later_write_fails(
+            self, project, monkeypatch) -> None:
+        real = Path.write_text
+
+        def boom(self, text, *args, **kwargs):
+            if self.name == 'c.txt':
+                raise OSError('disk full')
+            return real(self, text, *args, **kwargs)
+        monkeypatch.setattr(Path, 'write_text', boom)
+        diff = DELETE_B + '--- /dev/null\n+++ b/c.txt\n@@ -0,0 +1 @@\n+c\n'
+        out = patch.apply_patch(diff)
+        assert out.startswith('FAILED: nothing applied')
+        assert '1 earlier file(s) restored' in out
+        assert (project / 'b.txt').read_text() == B_OLD
+        assert not (project / 'c.txt').exists()
 
     def test_read_only_refused(self, project, monkeypatch) -> None:
         monkeypatch.setattr(config, 'MODE', config.MODE_READ_ONLY)

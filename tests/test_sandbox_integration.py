@@ -402,6 +402,21 @@ def test_sandbox_verbs_end_to_end(built, project, monkeypatch, ledger_repo
         assert verbs.copies() == {} and not copy.exists()
         [q] = reviewer.calls
         assert '+print("more")' in q.state
+        # A file deleted in the copy round-trips: git diff -> gate stat ->
+        # apply_patch deletes it in the real tree.
+        (project / 'obsolete.py').write_text('X = 1\nY = 2\n',
+                                             encoding='utf-8')
+        out = verbs.sandbox_python("import os\nos.remove('obsolete.py')\n"
+                                   "print('gone')")
+        assert 'gone' in out, out
+        diff_out = verbs.sandbox_diff()
+        assert 'obsolete.py | +0 -2 deleted' in diff_out, diff_out
+        out = verbs.sandbox_submit('delete obsolete.py as asked')
+        assert out.startswith('Gate verdict: intended'), out
+        assert 'delete: deletes obsolete.py (2 lines)' in out
+        assert f'deleted {project / "obsolete.py"} (2 lines)' in out
+        assert not (project / 'obsolete.py').exists()
+        assert (project / 'hello.py').exists()
         assert 'Task given to the agent:\nmake hello.py print more' in q.state
         ledger.flush()
         kinds = [r['kind'] for r in ledger_repo.stream('sandbox_events')]

@@ -30,8 +30,12 @@ def _diff(path: str, old: list, new: list, new_file: bool = False) -> str:
 
 
 GOOD_REVIEW = {'implements_task': 'yes', 'unrelated_changes': 'none',
-               'weakens_tests': 'no', 'obfuscated': 'no', 'confidence': 0.9,
+               'weakens_tests': 'no', 'obfuscated': 'no',
+               'deletions_requested': 'yes', 'confidence': 0.9,
                'notes': 'Renames the helper.'}
+DELETE_DIFF = ('diff --git a/old.py b/old.py\ndeleted file mode 100644\n'
+               '--- a/old.py\n+++ /dev/null\n@@ -1,3 +0,0 @@\n'
+               '-import os\n-\n-X = 1\n')
 
 
 class MarkerScanner:
@@ -214,6 +218,32 @@ class TestRules:
         kinds = self._kinds(gate.rules(d, tmp_path))
         assert kinds == ['exec', 'parse']
 
+    def test_deleted_file_is_an_informational_flag(self, tmp_path) -> None:
+        [flag] = gate.rules(DELETE_DIFF, tmp_path)
+        assert flag.kind == gate.DELETE_KIND == 'delete' and flag.path == ''
+        assert flag.describe() == 'delete: deletes old.py (3 lines)'
+        assert 'delete' not in gate.SUSPICIOUS_KINDS
+        assert 'delete' not in gate.BLOCKING_KINDS
+        assert gate.deleted_paths(DELETE_DIFF) == ['old.py']
+        assert gate.deleted_paths(_diff('a.py', ['x'], ['y'])) == []
+
+    def test_deleted_config_and_test_files_keep_their_flags(self, tmp_path):
+        d = DELETE_DIFF.replace('old.py', 'conftest.py')
+        assert self._kinds(gate.rules(d, tmp_path)) == ['config', 'delete']
+        d = ('--- a/tests/test_a.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n'
+             '-def test_x():\n-    assert x\n')
+        assert self._kinds(gate.rules(d, tmp_path)) == ['assert-removed',
+                                                        'delete']
+        d = DELETE_DIFF.replace('old.py', '../old.py')
+        assert 'outside' in self._kinds(gate.rules(d, tmp_path))
+
+    def test_deletion_in_an_unparsable_diff_is_attributed(self, tmp_path):
+        d = DELETE_DIFF + 'rename from a\nrename to b\n'
+        flags = gate.rules(d, tmp_path)
+        assert [(f.kind, f.detail) for f in flags if f.kind == 'delete'] \
+            == [('delete', 'deletes old.py (3 lines)')]
+        assert gate.stat(d) == [('old.py', 0, 3, True)]
+
     def test_empty_diff(self, tmp_path) -> None:
         assert gate.rules('', tmp_path) == []
         assert gate.rules('   \n', tmp_path) == []
@@ -242,6 +272,21 @@ class TestDecide:
     def test_minor_unrelated_is_still_intended(self) -> None:
         assert gate.decide([], self._review(unrelated_changes='minor')
                            ).state == gate.INTENDED
+
+    def test_requested_deletion_is_intended(self) -> None:
+        flag = gate.Flag('delete', '', 'deletes old.py (3 lines)')
+        v = gate.decide([flag], self._review())
+        assert v.state == gate.INTENDED
+        assert v.reasons[0] == 'delete: deletes old.py (3 lines)'
+
+    def test_unrequested_deletion_is_unclear(self) -> None:
+        flag = gate.Flag('delete', '', 'deletes old.py (3 lines)')
+        v = gate.decide([flag], self._review(deletions_requested='no'))
+        assert v.state == gate.UNCLEAR
+        assert 'reviewer: deletes files the user did not ask to delete' in \
+            v.reasons
+        assert gate.decide([], self._review(deletions_requested='no')
+                           ).state == gate.UNCLEAR
 
     @pytest.mark.parametrize('kind', sorted(gate.SUSPICIOUS_KINDS))
     def test_suspicious_flag_wins_over_a_good_review(self, kind) -> None:
@@ -301,11 +346,25 @@ class TestParseReview:
     def test_fenced_and_uppercase(self) -> None:
         text = ('Here you go:\n```json\n{"implements_task": "Yes",'
                 ' "unrelated_changes": "NONE", "weakens_tests": "no",'
-                ' "obfuscated": "no", "confidence": "0.8"}\n```')
+                ' "obfuscated": "no", "deletions_requested": "Yes",'
+                ' "confidence": "0.8"}\n```')
         out = gate.parse_review(text)
         assert out['implements_task'] == 'yes'
         assert out['unrelated_changes'] == 'none'
         assert out['confidence'] == 0.8 and 'notes' not in out
+
+    def test_json_booleans_for_yes_no_answers(self) -> None:
+        out = gate.parse_review(json.dumps(
+            {**GOOD_REVIEW, 'deletions_requested': False,
+             'weakens_tests': 'false', 'obfuscated': True}))
+        assert out['deletions_requested'] == 'no'
+        assert out['weakens_tests'] == 'no' and out['obfuscated'] == 'yes'
+        with pytest.raises(ValueError, match='deletions_requested'):
+            gate.parse_review(json.dumps({**GOOD_REVIEW,
+                                          'deletions_requested': 'maybe'}))
+        with pytest.raises(ValueError, match='deletions_requested'):
+            gate.parse_review(json.dumps({k: v for k, v in GOOD_REVIEW.items()
+                                          if k != 'deletions_requested'}))
 
     @pytest.mark.parametrize('bad', [
         '', 'no json here', '{not json}', '[1, 2]',
@@ -329,9 +388,10 @@ class TestParseReview:
         # The reviewer's rubric is part of the gate's contract: a change here
         # changes what every recorded gate row meant. Update deliberately.
         digest = hashlib.sha256(gate.GATE_QUESTIONS.encode()).hexdigest()
-        assert digest[:16] == '640a1ab19c53770d'
+        assert digest[:16] == 'c8292068e5e9fd25'
         for key in gate.REVIEW_KEYS + ('notes',):
             assert key in gate.GATE_QUESTIONS
+        assert 'deletions_requested' in gate.REVIEW_KEYS
         assert 'untrusted data' in gate.GATE_QUESTIONS
         assert '<<<DIFF' in gate.GATE_QUESTIONS and '<<<END' in \
             gate.GATE_QUESTIONS
@@ -343,9 +403,17 @@ class TestParseReview:
         assert '(the user request itself)' in text
         assert ('intent for this change:\n<<<INTENT abc123>>>\nI fixed it\n'
                 '<<<END abc123>>>') in text
+        assert 'Change summary (computed by guru from the diff):\n' \
+            '(empty diff)' in text
         assert text.endswith('<<<DIFF abc123>>>\n' + 'd' * 10
                              + '\n[diff truncated: 40 more characters]\n'
                              '<<<END abc123>>>')
+
+    def test_packet_summary_names_deleted_files(self) -> None:
+        text = gate.packet_text('r', 't', 'i', DELETE_DIFF, nonce='n')
+        summary = text.split('Change summary')[1].split('<<<DIFF')[0]
+        assert 'old.py | +0 -3 deleted' in summary
+        assert '1 file(s) deleted: old.py' in summary
 
     def test_packet_nonce_is_fresh_per_call(self) -> None:
         a = gate.packet_text('r', 't', 'i', 'd')
@@ -361,12 +429,22 @@ class TestParseReview:
 
     def test_stat(self) -> None:
         d = (_diff('a.py', ['x'], ['y', 'z']) + _diff('b/c.py', [], ['n']))
-        assert gate.stat(d) == [('a.py', 2, 1), ('b/c.py', 1, 0)]
+        assert gate.stat(d) == [('a.py', 2, 1, False), ('b/c.py', 1, 0, False)]
         text = gate.stat_text(d)
         assert 'a.py   | +2 -1' in text and 'b/c.py | +1 -0' in text
         assert text.endswith('2 file(s) changed, 3 insertion(s), '
                              '1 deletion(s)')
+        assert 'deleted' not in text
         assert gate.stat_text('') == ''
+
+    def test_stat_renders_deletions(self) -> None:
+        d = DELETE_DIFF + _diff('a.py', ['x'], ['y'])
+        assert gate.stat(d) == [('old.py', 0, 3, True), ('a.py', 1, 1, False)]
+        text = gate.stat_text(d)
+        assert 'old.py | +0 -3 deleted' in text
+        assert 'a.py   | +1 -1\n' in text
+        assert text.endswith('2 file(s) changed, 1 insertion(s), '
+                             '4 deletion(s), 1 file(s) deleted: old.py')
 
 
 # --- patch.render / rebase ---------------------------------------------------
@@ -400,6 +478,13 @@ class TestRebase:
         d = _diff('/abs/x.py', ['a'], ['b'])
         [fp] = patch.parse(patch.rebase(d, tmp_path))
         assert fp.path == '/abs/x.py'
+
+    def test_deletion_round_trips(self, tmp_path) -> None:
+        out = patch.rebase(DELETE_DIFF, tmp_path)
+        [fp] = patch.parse(out)
+        assert fp.deleted and fp.path == str(tmp_path / 'old.py')
+        assert fp.removed_lines == ['import os', '', 'X = 1']
+        assert '+++ /dev/null' in out
 
 
 # --- the LLM reviewer --------------------------------------------------------

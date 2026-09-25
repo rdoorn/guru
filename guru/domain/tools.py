@@ -754,9 +754,11 @@ TOOL_REGISTRY: dict = {
             " or plain paths relative to the working directory). Every"
             " hunk's context must match the file exactly; the whole patch is"
             " validated first and applied all-or-nothing. New files inside"
-            " the project are allowed; renames, deletions and binary patches"
-            " are refused. Write-gated like edit_file (refused in read-only"
-            " mode). Returns per file the hunks applied and the new sha."
+            " the project are allowed; a deletion ('+++ /dev/null') must list"
+            " the file's current content exactly; renames and binary patches"
+            " are refused. Write-gated like edit_file and delete_file"
+            " (refused in read-only mode). Returns per file the hunks applied"
+            " and the new sha, or 'deleted'."
             " Verify with check_syntax/run_tests afterwards."
         ),
         "tags": [

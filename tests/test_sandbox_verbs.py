@@ -24,6 +24,9 @@ MOD_DIFF = ('diff --git a/pkg/mod.py b/pkg/mod.py\n'
 EXEC_DIFF = ('--- a/pkg/mod.py\n+++ b/pkg/mod.py\n'
              '@@ -1,2 +1,3 @@\n def f():\n+    import subprocess\n'
              '     return 1\n')
+DELETE_DIFF = ('diff --git a/pkg/mod.py b/pkg/mod.py\n'
+               'deleted file mode 100644\n--- a/pkg/mod.py\n+++ /dev/null\n'
+               '@@ -1,2 +0,0 @@\n-def f():\n-    return 1\n')
 
 
 class FakeReviewer:
@@ -286,6 +289,38 @@ class TestSubmit:
         [row] = [r for r in fake_repo.stream('decisions')
                  if r['point'] == 'gate']
         assert row['used'] == 'judge' and row['chosen'] == 'intended'
+
+    def test_requested_deletion_is_applied(self, sandboxed, fake_repo):
+        root, fake = sandboxed
+        fake.diff_text = DELETE_DIFF
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        out = verbs.sandbox_submit('remove the obsolete module as asked')
+        assert out.startswith('Gate verdict: intended\n')
+        assert '  - delete: deletes pkg/mod.py (2 lines)' in out
+        assert 'pkg/mod.py | +0 -2 deleted' in out
+        assert 'Deleted files: pkg/mod.py' in out
+        assert f'deleted {root / "pkg" / "mod.py"} (2 lines)' in out
+        assert not (root / 'pkg' / 'mod.py').exists()
+        assert verbs.copies() == {}
+        [q] = reviewer.calls
+        assert '1 file(s) deleted: pkg/mod.py' in q.state
+        [submit] = _events(fake_repo, 'submit')
+        assert submit['detail'].endswith('; deletes: pkg/mod.py')
+
+    def test_unrequested_deletion_asks(self, sandboxed) -> None:
+        root, fake = sandboxed
+        fake.diff_text = DELETE_DIFF
+        decisions.set_judge('gate', FakeReviewer(
+            {**GOOD_REVIEW, 'deletions_requested': 'no'}))
+        asked: list = []
+        provision.set_approve_asker(lambda q: asked.append(q) or False)
+        out = verbs.sandbox_submit('clean up')
+        assert out.startswith('Declined: ') and 'unclear' in out
+        assert 'did not ask to delete' in out
+        [q] = asked
+        assert 'Deleted files' not in q and 'pkg/mod.py | +0 -2 deleted' in q
+        assert (root / 'pkg' / 'mod.py').read_text() == MOD
 
     def test_task_text_reaches_the_reviewer(self, sandboxed, monkeypatch):
         _root, fake = sandboxed

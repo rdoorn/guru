@@ -5,7 +5,10 @@ provisioning proxy, verbs + gate, eval cases and docs. First real runs on
 Colima: the three `sandbox` cases pass 3/3 (run d0c352bbb675, $0.80); the
 13-case comparison run costs 4% less and runs 16% faster than the
 audited-tools baseline. Triage: `evals/triage/2026-09-24-sandbox.md`.
-Open: file deletion through the gate, a `destructive` rule kind.
+Resolved 2026-09-25: file deletion goes through the gate (`delete` flag,
+reviewer question `deletions_requested`; `apply_patch` applies exact-match
+deletions inside and outside the sandbox). Open: a `destructive` rule kind
+for renames and mass removals.
 Builds on `2026-09-24-audited-tools-plan.md` (fixed-argv runner,
 tool_events, tools policy, apply_patch).
 

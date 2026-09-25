@@ -6,14 +6,17 @@ against the current content before anything is written (context and removed
 lines must match exactly — a hunk may sit at a different line number than
 the header says, as with ``git apply``, but no context line may differ), and
 the write is all-or-nothing across files (a write that fails midway rolls
-the earlier files back). Refused: renames, binary patches, deletions (use
-``delete_file``), a path listed twice, new files outside the project, and
-anything under a noise dir (``.git``, ``.venv``, …). Each target passes
-``files.ensure_path_allowed`` before it is read (a refused file is never
-read, so the patch is no content oracle) and
-``files.ensure_write_path_allowed`` (so read-only mode refuses)
-and lands in the sha ledger like ``edit_file`` does, so a follow-up
-``edit_file`` needs no re-read.
+the earlier files back, and recreates a file it deleted). Deletions
+(``--- a/x`` / ``+++ /dev/null``) are part of the algebra: the removed
+lines must equal the current file exactly (no fuzz, no offset), the file
+must lie inside the project, and the write gate applies as for
+``delete_file``. Refused: renames, binary patches, a path listed twice, new
+files outside the project, and anything under a noise dir (``.git``,
+``.venv``, …). Each target passes ``files.ensure_path_allowed`` before it
+is read (a refused file is never read, so the patch is no content oracle)
+and ``files.ensure_write_path_allowed`` (so read-only mode refuses) and
+lands in the sha ledger like ``edit_file`` does (a deleted file leaves
+it), so a follow-up ``edit_file`` needs no re-read.
 """
 from __future__ import annotations
 
@@ -60,10 +63,16 @@ class Hunk:
 @dataclass
 class FilePatch:
     """All hunks for one target path. ``new_file`` when the old side is
-    /dev/null."""
+    /dev/null; ``deleted`` when the new side is."""
     path: str
     hunks: list = field(default_factory=list)
     new_file: bool = False
+    deleted: bool = False
+
+    @property
+    def removed_lines(self) -> list:
+        """Every ``-`` line of every hunk, in order (a deletion's body)."""
+        return [t for h in self.hunks for tag, t in h.lines if tag == '-']
 
 
 def _strip_prefix(raw: str) -> str:
@@ -84,9 +93,10 @@ def _strip_prefix(raw: str) -> str:
 def parse(diff: str) -> list[FilePatch]:
     """Parse a unified diff into ``FilePatch`` objects.
 
-    Raises ``PatchError`` for renames, binary patches, deletions, a hunk
-    without a ``---``/``+++`` header, a malformed hunk header, or a body
-    whose line counts disagree with the header.
+    Raises ``PatchError`` for renames, binary patches, a hunk without a
+    ``---``/``+++`` header, a malformed hunk header, a body whose line
+    counts disagree with the header, or a deletion (``+++ /dev/null``)
+    whose body has anything but ``-`` lines.
     """
     text = diff.replace('\r\n', '\n')
     lines = text.split('\n')
@@ -101,7 +111,8 @@ def parse(diff: str) -> list[FilePatch]:
         line = lines[i]
         if line.startswith('rename from ') or line.startswith('rename to '):
             raise PatchError('renames are not supported; edit the file in'
-                             ' place or use write_file + delete_file')
+                             ' place, or delete it and create the new file'
+                             ' in the same patch')
         if line.startswith('Binary files ') or line.startswith(
                 'GIT binary patch'):
             raise PatchError('binary patches are not supported')
@@ -110,16 +121,20 @@ def parse(diff: str) -> list[FilePatch]:
                 and i + 1 < len(lines) and lines[i + 1].startswith('+++ ')):
             old = _strip_prefix(line[4:])
             new = _strip_prefix(lines[i + 1][4:])
-            if new == _DEV_NULL:
-                raise PatchError(f'deleting {old} via a patch is not'
-                                 ' supported; use delete_file')
+            deleted = new == _DEV_NULL
+            if deleted:
+                if old == _DEV_NULL:
+                    raise PatchError('a diff from /dev/null to /dev/null'
+                                     ' names no file')
+                new = old
             if old != _DEV_NULL and old != new:
                 raise PatchError(f'rename {old} -> {new} is not supported')
             if any(fp.path == new for fp in patches):
                 raise PatchError(f'{new} appears twice in the diff; give'
                                  ' each file one ---/+++ section with all'
                                  ' its hunks')
-            current = FilePatch(new, new_file=(old == _DEV_NULL))
+            current = FilePatch(new, new_file=(old == _DEV_NULL),
+                                deleted=deleted)
             patches.append(current)
             hunk = None
             i += 2
@@ -170,6 +185,10 @@ def parse(diff: str) -> list[FilePatch]:
     for fp in patches:
         if not fp.hunks:
             raise PatchError(f'{fp.path}: no hunks')
+        if fp.deleted and any(tag != '-' for h in fp.hunks
+                              for tag, _t in h.lines):
+            raise PatchError(f'{fp.path}: a deletion (+++ /dev/null) may'
+                             ' contain removed lines only')
     if not patches:
         raise PatchError('no ---/+++ file headers found in the diff')
     return patches
@@ -230,9 +249,18 @@ def targets(diff: str) -> list[str]:
         return [n for n in names if n != _DEV_NULL]
 
 
+def deletion_matches(fp: FilePatch, text: str) -> bool:
+    """Whether a deletion's removed lines are exactly ``text`` (the whole
+    file, trailing newline included unless the diff marks its absence)."""
+    body = '\n'.join(fp.removed_lines)
+    if fp.removed_lines and not fp.hunks[-1].old_no_newline:
+        body += '\n'
+    return body == text
+
+
 def _inside_project(target: Path) -> bool:
-    """Whether a NEW file would land inside the project (an allow-listed
-    dir or the working directory)."""
+    """Whether a NEW or DELETED file lies inside the project (an
+    allow-listed dir or the working directory)."""
     if files.project_root(target, fallback=False) is not None:
         return True
     cwd = Path.cwd().resolve()
@@ -245,10 +273,11 @@ def apply_patch(diff: str) -> str:
     paths, relative to the working directory) to the project. Every hunk's
     context must match the current file exactly (line numbers may be off;
     context may not); the whole patch is validated first and applied
-    all-or-nothing. New files are allowed inside the project; renames,
-    deletions and binary patches are refused. Write-gated like edit_file
-    (refused in read-only mode). Returns per file the hunks applied and the
-    new sha (reusable with edit_file).
+    all-or-nothing. New files are allowed inside the project; a deletion
+    ('+++ /dev/null') must list the file's current content exactly;
+    renames and binary patches are refused. Write-gated like edit_file and
+    delete_file (refused in read-only mode). Returns per file the hunks
+    applied and the new sha (reusable with edit_file), or 'deleted'.
     """
     if config.MODE == config.MODE_READ_ONLY:
         return "Refused: read-only mode. Change mode to apply patches."
@@ -256,7 +285,7 @@ def apply_patch(diff: str) -> str:
         patches = parse(diff or '')
     except PatchError as e:
         return f"Patch rejected: {e}"
-    plan: list = []                  # (target, old_text, new_text, hunks)
+    plan: list = []          # (target, old_text, new_text|None, hunks)
     for fp in patches:
         target = files.resolve_path(fp.path)
         # Read gate first: a refused path is never read, so the patch cannot
@@ -283,6 +312,16 @@ def apply_patch(diff: str) -> str:
                 old_text = target.read_text(encoding='utf-8')
             except (OSError, UnicodeDecodeError) as e:
                 return f"Patch rejected: cannot read {target}: {e}"
+        if fp.deleted:
+            if not _inside_project(target):
+                return (f"Patch rejected: {target} is outside the project;"
+                        " a patch may not delete it.")
+            if not deletion_matches(fp, old_text):
+                return (f"Patch rejected: {fp.path}: the deletion does not"
+                        " match the file's current content exactly."
+                        " Nothing was written.")
+            plan.append((target, old_text, None, len(fp.hunks)))
+            continue
         try:
             new_text = apply_hunks(old_text, fp.hunks, fp.path)
         except PatchError as e:
@@ -292,8 +331,11 @@ def apply_patch(diff: str) -> str:
     # it was.
     blocks: list = []
     for target, old_text, new_text, _ in plan:
-        verb = 'Create' if not target.exists() else 'Update'
-        block = files.write_detail(target, old_text, new_text, verb)
+        if new_text is None:
+            block = f"\u23fa Delete({target.name})  {target}"
+        else:
+            verb = 'Create' if not target.exists() else 'Update'
+            block = files.write_detail(target, old_text, new_text, verb)
         silent = not files.will_prompt_write(target)
         if not files.ensure_write_path_allowed(target, block):
             return (f"Write access to '{target}' was denied."
@@ -304,15 +346,24 @@ def apply_patch(diff: str) -> str:
     for (target, old_text, new_text, n), (block, silent) in zip(plan, blocks):
         existed = target.exists()
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(new_text, encoding='utf-8')
+            if new_text is None:
+                target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(new_text, encoding='utf-8')
         except OSError as e:
             _rollback(written)
-            return (f"FAILED: nothing applied (cannot write {target}: {e};"
+            what = 'delete' if new_text is None else 'write'
+            return (f"FAILED: nothing applied (cannot {what} {target}: {e};"
                     f" {len(written)} earlier file(s) restored).")
         written.append((target, existed, old_text))
         if silent:
             files.show_change(block)
+        if new_text is None:
+            files.forget_sha(target)
+            out.append(f"deleted {target} "
+                       f"({len(old_text.splitlines())} lines)")
+            continue
         sha = files.sha_of(new_text)
         files.remember_sha(target, sha)
         out.append(f"{target}: {n} hunk(s) applied (sha:{sha})")
@@ -320,12 +371,14 @@ def apply_patch(diff: str) -> str:
 
 
 def _rollback(written: list) -> None:
-    """Restore files an aborted apply_patch already wrote: previous content
-    for files that existed, removal for files it created. Best effort;
-    failures are logged, never raised."""
+    """Restore files an aborted apply_patch already wrote or deleted:
+    previous content for files that existed (recreating a deleted one),
+    removal for files it created. Best effort; failures are logged, never
+    raised."""
     for target, existed, old_text in reversed(written):
         try:
             if existed:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(old_text, encoding='utf-8')
             else:
                 target.unlink()
@@ -337,13 +390,14 @@ def _rollback(written: list) -> None:
 def render(patches: list) -> str:
     """The unified diff text for ``patches`` (as :func:`parse` returns
     them): plain ``---``/``+++`` paths (``/dev/null`` for a new file's old
-    side), hunk headers with counts recomputed from the bodies, and the
+    side and a deleted file's new side), hunk headers with counts
+    recomputed from the bodies, and the
     ``\\ No newline at end of file`` markers. ``parse(render(p))`` yields
     ``p`` again."""
     out: list = []
     for fp in patches:
         out.append(f'--- {_DEV_NULL if fp.new_file else fp.path}')
-        out.append(f'+++ {fp.path}')
+        out.append(f'+++ {_DEV_NULL if fp.deleted else fp.path}')
         for h in fp.hunks:
             out.append(f'@@ -{h.old_start},{len(h.old_lines)} '
                        f'+{h.new_start},{len(h.new_lines)} @@')
