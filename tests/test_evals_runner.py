@@ -1683,6 +1683,8 @@ class TestGitFixture:
         assert scratch.is_dir()
         assert copy not in scratch.parents and scratch != copy
         assert env[runner.SANDBOX_ROOT_ENV] == str(scratch)
+        assert Path(env['HOME']) == scratch / 'home'
+        assert Path(env['HOME']).is_dir()
 
     def test_run_case_records_fixture_git_in_observed(self, tmp_path, repo,
                                                       canned) -> None:

@@ -371,6 +371,15 @@ def _fixture_env(repo: Path) -> dict:
     scratch.mkdir(exist_ok=True)
     env['TMPDIR'] = str(scratch)
     env[SANDBOX_ROOT_ENV] = str(scratch)
+    # A private HOME as well: guru resolves ~/.guru from HOME, and the
+    # runner has just provisioned a sandbox image for this very copy, so
+    # guru-as-fixture would otherwise see itself in sandbox mode and fail
+    # its own tests that assume none (loop-3 dogfood rerun c38e907de6a2:
+    # 12 tool-registry tests). The developer's settings and adapters stay
+    # out of the fixture's tests too.
+    home = scratch / 'home'
+    home.mkdir(exist_ok=True)
+    env['HOME'] = str(home)
     return env
 
 

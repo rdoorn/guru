@@ -59,3 +59,4 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-25T12:33:45+00:00 | d13ae86ca63a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 83.3 | $0.32 | loop 3: panel x3 (1/3), two workers after the decomposition hint |
 | 2026-09-25T12:35:53+00:00 | 68444551eccf | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 60.2 | $0.26 | loop 3: panel x3 (2/3), two workers |
 | 2026-09-25T12:37:28+00:00 | b9c241f9deab | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 71.9 | $0.19 | loop 3: panel x3 (3/3), single worker |
+| 2026-09-25T12:49:12+00:00 | c38e907de6a2 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 0/1 | 211.1 | $0.34 |  |
