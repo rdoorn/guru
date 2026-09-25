@@ -10,22 +10,30 @@ One class, two configured auth modes:
 Full tool parity: guru's tool directory is translated to Anthropic tool
 schema and the model's ``tool_use`` requests run through the shared
 ``guru.domain.tools.execute_tool``.
+
+Prompt caching (``cache = true`` in the adapter record, the default): the
+system prompt is sent as one text block and it and the last tool
+definition carry ``cache_control: {type: ephemeral}``, so the stable prefix
+(tools, then system) is cached across the rounds of a turn and across
+turns; the messages themselves stay uncached.
 """
 import os
 import pathlib
 import shutil
 import subprocess
 import time
+from typing import Optional, Union
 
 from guru import log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import Adapter, ModelInfo
+from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo
 from guru.domain import ledger, pricing, tools
 
 # Non-streaming per tool-call round (parity with the Ollama adapter). Kept at
 # the SDK's non-streaming ceiling to avoid the large-output timeout guard.
 _MAX_TOKENS = 16000
 _DEFAULT_CONTEXT = 200000
+CACHE_CONTROL = {'type': 'ephemeral'}
 
 
 # --- pure translation helpers (unit-tested) ----------------------------------
@@ -90,6 +98,28 @@ def tool_defs(specs: list) -> list:
     return defs
 
 
+def system_blocks(system: str,
+                  cache: bool) -> Optional[Union[str, list]]:
+    """The ``system`` request field: with ``cache`` a one-block list that
+    carries the cache marker, else the plain string; None when empty."""
+    if not system:
+        return None
+    if not cache:
+        return system
+    return [{'type': 'text', 'text': system,
+             'cache_control': dict(CACHE_CONTROL)}]
+
+
+def cached_tools(defs: list, cache: bool) -> list:
+    """``defs`` with the cache marker on the last tool (a copy), or ``defs``
+    unchanged when ``cache`` is off or there are no tools."""
+    if not cache or not defs:
+        return defs
+    out = [dict(d) for d in defs]
+    out[-1]['cache_control'] = dict(CACHE_CONTROL)
+    return out
+
+
 def neutral_assistant(text: str, tool_calls: list) -> dict:
     """Build a neutral assistant message from text + [(name, input), ...]."""
     msg: dict = {'role': 'assistant', 'content': text}
@@ -108,7 +138,8 @@ class AnthropicAdapter(Adapter):
 
     def __init__(self, name: str = "Anthropic", auth: str = "api_key",
                  base_url=None, api_key_env=None, api_key=None, profile=None,
-                 models=None, thinking: bool = True) -> None:
+                 models=None, thinking: bool = True,
+                 cache: bool = True) -> None:
         self.name = name
         self.auth = auth
         self.base_url = base_url
@@ -117,6 +148,7 @@ class AnthropicAdapter(Adapter):
         self.profile = profile
         self.static_models = models or []
         self.thinking = thinking
+        self.cache = bool(cache)
         self._context_by_model: dict = {}
 
     # --- client construction -------------------------------------------------
@@ -247,13 +279,15 @@ class AnthropicAdapter(Adapter):
 
     # --- ledger --------------------------------------------------------------
 
-    def _record_call(self, phase: str, resp, seconds: float) -> None:
-        """Write one CallRecord from a Messages API response's usage.
+    def _record_call(self, phase: str, resp, seconds: float,
+                     model: str = '') -> None:
+        """Write one CallRecord from a Messages API response's usage
+        (``model`` when the call ran on another model than the session's).
         Never raises into the turn."""
         try:
             usage = getattr(resp, 'usage', None)
             ledger.record_call(
-                adapter=self.name, model=session.model,
+                adapter=self.name, model=model or session.model,
                 usage=pricing.Usage(
                     input_tokens=getattr(usage, 'input_tokens', 0) or 0,
                     output_tokens=getattr(usage, 'output_tokens', 0) or 0,
@@ -274,7 +308,8 @@ class AnthropicAdapter(Adapter):
             ui.console.print(f"[red]Anthropic auth error: {e}[/red]")
             return
         system, native = to_anthropic_messages(session.messages)
-        anth_tools = tool_defs(tools.active_specs())
+        anth_tools = cached_tools(tool_defs(tools.active_specs()), self.cache)
+        system_field = system_blocks(system, self.cache)
 
         def step():
             """One Messages API round; returns (text, [(name, input, block)])
@@ -285,8 +320,8 @@ class AnthropicAdapter(Adapter):
                 'messages': native,
                 'tools': anth_tools,
             }
-            if system:
-                kwargs['system'] = system
+            if system_field is not None:
+                kwargs['system'] = system_field
             if self.thinking:
                 kwargs['thinking'] = {
                     'type': 'adaptive', 'display': 'summarized'}
@@ -377,6 +412,18 @@ class AnthropicAdapter(Adapter):
         except Exception as e:
             _note_error(e)
             return f'(summary failed: {e})'
+
+    def complete(self, prompt: str, max_tokens: int = 1024,
+                 model: str = '') -> str:
+        t0 = time.perf_counter()
+        resp = self._client().messages.create(
+            model=model or session.model, max_tokens=int(max_tokens),
+            system=JSON_ONLY,
+            messages=[{'role': 'user', 'content': prompt}])
+        self._record_call('complete', resp, time.perf_counter() - t0,
+                          model=model)
+        return next((b.text for b in resp.content if b.type == 'text'),
+                    '').strip()
 
 
 def _note_error(e: Exception) -> None:

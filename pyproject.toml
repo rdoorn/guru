@@ -47,3 +47,6 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]      # evals/fixtures/* carry their own (one failing) tests
+markers = [
+    "sandbox: builds and runs containers against the local Colima; excluded by `make test`, run with `make test-sandbox`",
+]

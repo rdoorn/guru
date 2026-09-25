@@ -1,4 +1,4 @@
-.PHONY: bench bench-plot test lint typecheck yarn ledger-report
+.PHONY: bench bench-plot test test-sandbox lint typecheck yarn ledger-report eval-fast
 
 VENV ?= .venv/bin
 RESULTS ?= $(shell ls -t bench/results-*.json 2>/dev/null | head -1)
@@ -20,8 +20,14 @@ bench-plot:       ## Plot the latest results (override with RESULTS=...)
 ledger-report:    ## Judge vs heuristic vs labels per decision point (guru.ledger_cli report)
 	$(VENV)/python -m guru.ledger_cli report
 
-test:             ## Run the test suite
-	$(VENV)/python -m pytest -q
+eval-fast:        ## Fast eval gate x3: --tags fast --repeat 3; extra flags via EVAL_ARGS='--routing ... --allow-spend'
+	$(VENV)/python -m guru.evals run --tags fast --repeat 3 $(EVAL_ARGS)
+
+test:             ## Run the test suite (container tests excluded)
+	$(VENV)/python -m pytest -q -m "not sandbox"
+
+test-sandbox:     ## Run the container integration tests (needs Colima)
+	$(VENV)/python -m pytest -q -m sandbox tests/test_sandbox_integration.py
 
 lint:             ## Lint with flake8
 	$(VENV)/flake8 guru bench tests evals

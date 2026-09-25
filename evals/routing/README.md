@@ -131,3 +131,4 @@ drawing further conclusions.
 - `c7473cbe8524` — config 1 rerun after the controller-context fix: 8/9, 38.9 s, $1.205.
 
 - Real cases on guru (2026-09-24): see `evals/triage/2026-09-24-real-cases.md` — Haiku controller + tiers matched plain Opus quality at 22% of its cost.
+- `69bc45821a7d` — audited tools v1 (2026-09-24, git 6bed035): Haiku controller, fast+edit+real cases, 11/13, 37.6 s, $2.53; both failures are check artefacts. See `evals/triage/2026-09-24-audited-tools.md`.

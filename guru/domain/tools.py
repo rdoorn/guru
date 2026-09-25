@@ -4,16 +4,27 @@ Tool execution is provider-agnostic. Adapters call ``execute_tool`` when a
 model requests a tool; this module handles the domain allow-list gate,
 ``search_tools`` activation, and running the tool, returning a result string.
 """
+import time
+
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 from guru import config, log, session, skills, ui
-from guru.domain import decisions, files, ledger, policy, routing
+from guru.domain import (code, decisions, files, gitread, ledger, patch,
+                         policy, procs, quality, routing, toolpolicy)
 
 # The tools a controller (``[routing] controller = true``) keeps: it
 # coordinates and never executes (design doc §2).
 CONTROLLER_TOOLS = frozenset(('spawn', 'check', 'join', 'use_skill'))
+# The project tool policy seam lives in guru.domain.toolpolicy (so the
+# audited verbs can read it without importing this module); re-exported
+# here so tools.set_policy / is_enabled / active_policy keep working.
+ALWAYS_ON_TOOLS = toolpolicy.ALWAYS_ON_TOOLS
+ToolsPolicy = toolpolicy.ToolsPolicy
+set_policy = toolpolicy.set_policy
+active_policy = toolpolicy.active_policy
+is_enabled = toolpolicy.is_enabled
 
 _STOP_WORDS = {
     'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for',
@@ -21,6 +32,45 @@ _STOP_WORDS = {
     'which', 'that', 'this', 'are', 'was', 'were', 'be', 'been',
     'being', 'do', 'does', 'did', 'me', 'my', 'you', 'your', 'its',
 }
+
+
+# The sandbox verbs (guru.sandbox.verbs): advertised and pre-activated only
+# while the project has a provisioned sandbox image; refused otherwise.
+SANDBOX_TOOLS = ('sandbox_run', 'sandbox_python', 'sandbox_diff',
+                 'sandbox_submit', 'request_dependency')
+# In a sandbox-enabled project the quality gate is the ONLY write path: the
+# direct write tools are neither advertised nor executable by an agent
+# (apply_patch stays a module function sandbox_submit and provisioning call).
+DIRECT_WRITE_TOOLS = frozenset(('write_file', 'edit_file', 'apply_patch',
+                                'delete_file'))
+SANDBOX_WRITE_REFUSAL = ('Refused: this project runs in a sandbox; edit '
+                         'inside it and use sandbox_submit')
+
+
+# --- project tool policy (.guru/tools.toml) ----------------------------------
+
+def _sandbox_available() -> bool:
+    """Whether the sandbox verbs can run for the current project (the
+    endpoint module is imported lazily; any failure means no)."""
+    try:
+        from guru.sandbox import verbs
+        return bool(verbs.available())
+    except Exception:                                # noqa: BLE001
+        log.exc('sandbox availability check failed')
+        return False
+
+
+def _advertised() -> list:
+    """The registry tool names the project policy lets run, in registry
+    order. Discovery, pre-activation and the specs sent to the model all
+    draw from this list, so a disabled tool is never described to the
+    model (and ``execute_tool`` refuses it anyway if called by name). The
+    sandbox verbs are listed only while the project has a sandbox image,
+    and then the direct write tools are not (``DIRECT_WRITE_TOOLS``)."""
+    sandbox = _sandbox_available()
+    hidden = DIRECT_WRITE_TOOLS if sandbox else frozenset(SANDBOX_TOOLS)
+    return [name for name in TOOL_REGISTRY if is_enabled(name)
+            and name not in hidden]
 
 
 # Pluggable domain approval — overridable by the TUI so it doesn't call the
@@ -319,6 +369,62 @@ def fetch_github_releases(repo: str) -> str:
     )
 
 
+# --- sandbox verbs (guru.sandbox.verbs; endpoint, imported lazily) -----------
+
+def sandbox_run(argv: str, detail: str = '') -> str:
+    """
+    Run a command inside the project's sandbox container on this task's copy
+    of the project (no network; nothing touches the real tree). argv is a
+    JSON list or a whitespace-separated command whose first word is one of
+    python, python3, pytest, uv, ruff, mypy, flake8, make. Returns the exit
+    code and the first lines of output; detail=true returns the last 4 KB.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_run(argv, detail)
+
+
+def sandbox_python(code: str, detail: str = '') -> str:
+    """
+    Run a Python snippet inside the sandbox container on this task's copy of
+    the project (the snippet may edit files in the copy). Returns the exit
+    code and the first lines of output; detail=true returns the last 4 KB.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_python(code, detail)
+
+
+def sandbox_diff() -> str:
+    """
+    Show which files this task's sandbox copy changed (per-file +/- counts)
+    compared with the real project. Nothing is applied by this call.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_diff()
+
+
+def sandbox_submit(intent: str) -> str:
+    """
+    Submit the sandbox copy's changes to the quality gate with your stated
+    intent (what the change does and why). The gate checks the diff and
+    reviews it against the user's request; an intended change is applied to
+    the real project (or shown to the user first), an unclear one is asked
+    about, a suspicious one is refused. The only way sandbox edits reach the
+    real tree.
+    """
+    from guru.sandbox import verbs
+    return verbs.sandbox_submit(intent)
+
+
+def request_dependency(name: str, constraint: str = '') -> str:
+    """
+    Ask for a package to be added to the project's lockfile (e.g. name='six',
+    constraint='>=1.16'). Nothing is installed: the request is recorded and
+    the user approves it, which updates uv.lock and rebuilds the sandbox.
+    """
+    from guru.sandbox import verbs
+    return verbs.request_dependency(name, constraint)
+
+
 # Each entry: fn (callable), description, tags, parameters.
 # search_tools matches against all of these fields.
 TOOL_REGISTRY: dict = {
@@ -506,6 +612,258 @@ TOOL_REGISTRY: dict = {
             "path": "File to delete",
         },
     },
+    # --- audited coding verbs (design plan chunk B) --------------------------
+    "outline": {
+        "fn": code.outline,
+        "description": (
+            "Outline a source file instead of reading it: one row per"
+            " def/class with its line range and signature (nested ones"
+            " indented) plus the module docstring, so you can pick the exact"
+            " lines to read_file next. Non-Python files show their first 40"
+            " numbered lines. Returns the file's sha. Use this BEFORE"
+            " read_file on any file you have not seen."
+        ),
+        "tags": [
+            "outline", "structure", "skeleton", "functions", "classes",
+            "signatures", "summary", "navigate", "code", "file", "ast",
+            "overview", "local",
+        ],
+        "parameters": {
+            "path": "Source file to outline",
+        },
+    },
+    "find_symbol": {
+        "fn": code.find_symbol,
+        "description": (
+            "Find where a function, class, method or module-level name is"
+            " defined and where it is referenced across the project's Python"
+            " files, in one call ('def: path:line (kind)' rows, then"
+            " 'ref: path:line: text' rows, max 30). kind narrows to 'def' or"
+            " 'ref'. Prefer this over search_code for 'where is X defined /"
+            " who calls X'."
+        ),
+        "tags": [
+            "symbol", "definition", "references", "callers", "usages",
+            "find", "where", "defined", "function", "class", "locate",
+            "code", "local",
+        ],
+        "parameters": {
+            "name": "The identifier to look up (e.g. 'compact_messages')",
+            "kind": "Optional filter: 'def' or 'ref' (default both)",
+        },
+        "optional": ["kind"],
+    },
+    "run_tests": {
+        "fn": quality.run_tests,
+        "description": (
+            "Run the project's test suite (pytest by default; unittest when"
+            " the project policy says so) and get a short digest: the"
+            " summary line and the failing test ids with their assertion"
+            " line. target = a test file, directory or 'file::test' node id"
+            " (default: whole project); k = pytest -k expression; maxfail ="
+            " stop after N failures (default 1); detail = a failing test id"
+            " to see that failure in full. Always run this to verify an edit"
+            " before reporting it done."
+        ),
+        "tags": [
+            "test", "tests", "pytest", "unittest", "run", "verify", "check",
+            "failing", "suite", "assert", "regression", "ci", "local",
+        ],
+        "parameters": {
+            "target": "Test file, directory or node id (default: project)",
+            "k": "Optional pytest -k expression to select tests",
+            "maxfail": "Stop after this many failures (default 1)",
+            "detail": "A failing test id to expand into its full block",
+        },
+        "optional": ["target", "k", "maxfail", "detail"],
+        "retain": "keep",
+    },
+    "check_syntax": {
+        "fn": quality.check_syntax,
+        "description": (
+            "Compile one Python file (in-process, nothing written) and"
+            " report 'ok' or the SyntaxError with line, column and text."
+            " Cheap: call it after every edit to a .py file, before"
+            " run_tests."
+        ),
+        "tags": [
+            "syntax", "compile", "check", "verify", "python", "error",
+            "parse", "valid", "code", "local",
+        ],
+        "parameters": {
+            "path": "Python file to compile",
+        },
+        "retain": "keep",
+    },
+    "lint": {
+        "fn": quality.lint,
+        "description": (
+            "Run the project's linters (flake8; mypy when the project"
+            " configures it) on a file or directory and get counts plus the"
+            " first 10 issues per linter. detail = 'flake8' or 'mypy'"
+            " returns that linter's output (up to 4 KB). Read-only."
+        ),
+        "tags": [
+            "lint", "flake8", "mypy", "style", "pep8", "typecheck", "types",
+            "static", "analysis", "quality", "warnings", "code", "local",
+        ],
+        "parameters": {
+            "path": "File or directory to lint (default: project)",
+            "detail": "Optional: 'flake8' or 'mypy' to expand that output",
+        },
+        "optional": ["path", "detail"],
+        "retain": "keep",
+    },
+    "git_status": {
+        "fn": gitread.git_status,
+        "description": (
+            "Show the working tree status of the project's git repository"
+            " (porcelain 'XY path' rows incl. untracked files) with a count."
+            " Read-only: never stages or commits."
+        ),
+        "tags": [
+            "git", "status", "changed", "modified", "untracked", "staged",
+            "working tree", "dirty", "repository", "vcs", "local",
+        ],
+        "parameters": {},
+        "retain": "keep",
+    },
+    "git_diff": {
+        "fn": gitread.git_diff,
+        "description": (
+            "Show unstaged changes in the project's git repository: a"
+            " per-file +/- stat by default, optionally limited to path;"
+            " detail=true returns the unified diff itself (capped at 8 KB)."
+            " Read-only."
+        ),
+        "tags": [
+            "git", "diff", "changes", "patch", "modified", "review", "what"
+            " changed", "unstaged", "repository", "vcs", "local",
+        ],
+        "parameters": {
+            "path": "Optional file or directory to limit the diff to",
+            "detail": "true to return the unified diff instead of the stat",
+        },
+        "optional": ["path", "detail"],
+        "retain": "keep",
+    },
+    "apply_patch": {
+        "fn": patch.apply_patch,
+        "description": (
+            "Apply a unified diff (one or more files, '--- a/x' / '+++ b/x'"
+            " or plain paths relative to the working directory). Every"
+            " hunk's context must match the file exactly; the whole patch is"
+            " validated first and applied all-or-nothing. New files inside"
+            " the project are allowed; a deletion ('+++ /dev/null') must list"
+            " the file's current content exactly; renames and binary patches"
+            " are refused. Write-gated like edit_file and delete_file"
+            " (refused in read-only mode). Returns per file the hunks applied"
+            " and the new sha, or 'deleted'."
+            " Verify with check_syntax/run_tests afterwards."
+        ),
+        "tags": [
+            "patch", "diff", "apply", "unified", "hunk", "edit", "change",
+            "modify", "multi-file", "write", "code", "local",
+        ],
+        "parameters": {
+            "diff": "The unified diff text to apply",
+        },
+    },
+    # --- sandbox verbs (design plan sandbox §1; chunk S3) --------------------
+    "sandbox_run": {
+        "fn": sandbox_run,
+        "description": (
+            "Run a command (pytest, python, uv, ruff, mypy, flake8, make)"
+            " inside the project's sandbox container on this task's copy of"
+            " the project: no network, nothing touches the real tree. argv is"
+            " a JSON list or a whitespace-separated command. Returns the exit"
+            " code and the first 30 lines of stdout/stderr; detail=true"
+            " returns the last 4 KB instead. Use sandbox_submit to bring"
+            " changes back."
+        ),
+        "tags": [
+            "sandbox", "container", "run", "command", "isolated", "pytest",
+            "python", "execute", "docker", "safe", "test", "local",
+        ],
+        "parameters": {
+            "argv": ("The command as a JSON list (e.g. [\"pytest\", \"-q\"])"
+                     " or whitespace-separated words"),
+            "detail": "true to return the last 4 KB of output",
+        },
+        "optional": ["detail"],
+        "retain": "keep",
+    },
+    "sandbox_python": {
+        "fn": sandbox_python,
+        "description": (
+            "Run a Python snippet inside the sandbox container on this"
+            " task's copy of the project. The snippet may edit files in the"
+            " copy (that is how you make changes in the sandbox); nothing"
+            " touches the real tree. Returns the exit code and the first 30"
+            " lines of output; detail=true returns the last 4 KB."
+        ),
+        "tags": [
+            "sandbox", "python", "script", "snippet", "execute", "code",
+            "isolated", "container", "edit", "safe", "local",
+        ],
+        "parameters": {
+            "code": "The Python source to run",
+            "detail": "true to return the last 4 KB of output",
+        },
+        "optional": ["detail"],
+        "retain": "keep",
+    },
+    "sandbox_diff": {
+        "fn": sandbox_diff,
+        "description": (
+            "Show which files this task's sandbox copy changed compared with"
+            " the real project (per-file +/- counts). Nothing is applied."
+        ),
+        "tags": [
+            "sandbox", "diff", "changes", "changed", "files", "stat",
+            "review", "pending", "local",
+        ],
+        "parameters": {},
+        "retain": "keep",
+    },
+    "sandbox_submit": {
+        "fn": sandbox_submit,
+        "description": (
+            "Submit the sandbox copy's changes to the quality gate with your"
+            " stated intent (what the change does and why). Deterministic"
+            " checks and an AI reviewer compare the diff with the user's"
+            " request: an intended change is applied to the real project (or"
+            " shown to the user first), an unclear one is asked about, a"
+            " suspicious one is refused. The only way sandbox edits reach"
+            " the real tree; verify with run_tests afterwards."
+        ),
+        "tags": [
+            "sandbox", "submit", "apply", "gate", "review", "patch",
+            "changes", "commit", "finish", "local",
+        ],
+        "parameters": {
+            "intent": "One or two sentences: what the change does and why",
+        },
+    },
+    "request_dependency": {
+        "fn": request_dependency,
+        "description": (
+            "Request a package for the project's lockfile (name plus an"
+            " optional version constraint). Nothing is installed: the request"
+            " is recorded and the user approves it, which updates uv.lock and"
+            " rebuilds the sandbox image. Use when the sandbox lacks a"
+            " dependency you need."
+        ),
+        "tags": [
+            "dependency", "package", "install", "pip", "uv", "add",
+            "requirement", "library", "lockfile", "sandbox", "local",
+        ],
+        "parameters": {
+            "name": "The package name (e.g. 'six')",
+            "constraint": "Optional version constraint (e.g. '>=1.16')",
+        },
+        "optional": ["constraint"],
+    },
 }
 
 
@@ -515,10 +873,12 @@ def _match_tools(query: str) -> list:
         w.lower() for w in query.replace('-', ' ').split()
         if len(w) > 2 and w.lower() not in _STOP_WORDS
     ]
+    names = _advertised()
     if not keywords:
-        return list(TOOL_REGISTRY.keys())
+        return names
     scores: dict = {}
-    for name, info in TOOL_REGISTRY.items():
+    for name in names:
+        info = TOOL_REGISTRY[name]
         score = 0
         tags_text = ' '.join(info['tags']).lower()
         desc_text = info['description'].lower()
@@ -535,8 +895,28 @@ def _match_tools(query: str) -> list:
         if score > 0:
             scores[name] = score
     if not scores:
-        return list(TOOL_REGISTRY.keys())
+        return names
     return sorted(scores, key=scores.__getitem__, reverse=True)
+
+
+SEARCH_TOOLS_LIMIT = 6
+"""Most tools one ``search_tools`` call lists (and activates)."""
+
+
+def _top_matches(query: str) -> list:
+    """The ``_match_tools`` ranking cut to ``SEARCH_TOOLS_LIMIT`` names.
+
+    Both the digest ``search_tools`` returns and the activation
+    ``execute_tool`` performs use this, so the model is told about exactly
+    the tools it can now call and the tool specs stay small.
+    """
+    return _match_tools(query)[:SEARCH_TOOLS_LIMIT]
+
+
+def _first_sentence(text: str) -> str:
+    """The first sentence of a tool description (up to the first '. ')."""
+    head, sep, _rest = text.partition('. ')
+    return head + ('.' if sep else '')
 
 
 def search_tools(query: str) -> str:
@@ -550,19 +930,17 @@ def search_tools(query: str) -> str:
       search_tools("get latest github release version")
 
     Matched tools are added to your active tool set and can be called directly.
+
+    The result is a digest — at most ``SEARCH_TOOLS_LIMIT`` rows of
+    ``name — first sentence of the description`` — because the full
+    description and parameters reach the model through the activated tool
+    spec anyway (a full listing cost ~5 KB per call in the eval audit).
     """
-    matched = _match_tools(query)
     lines: list = [f"Tools matching '{query}':\n"]
-    for name in matched:
-        info = TOOL_REGISTRY[name]
-        param_lines = "\n".join(
-            f"      {k}: {v}" for k, v in info['parameters'].items()
-        )
-        lines.append(
-            f"  {name}\n"
-            f"    {info['description']}\n"
-            f"    Parameters:\n{param_lines}\n"
-        )
+    for name in _top_matches(query):
+        desc = _first_sentence(TOOL_REGISTRY[name]['description'])
+        lines.append(f"  {name} — {desc}")
+    lines.append("")
     lines.append("These tools are now active — call them directly by name.")
     return "\n".join(lines)
 
@@ -608,13 +986,15 @@ def specs_for(active_tool_names, can_spawn: bool,
     Lets callers (e.g. the context breakdown) price a specific agent's tool
     schemas without binding that agent's session context. A controller gets
     only spawn/check/join/use_skill, whatever ``active_tool_names`` holds.
+    A tool the project policy disables is left out even if it is in
+    ``active_tool_names`` (e.g. activated before the policy changed).
     """
     if controller:
         return [_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC, _USE_SKILL_SPEC]
     specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC]
     if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
-    for name in TOOL_REGISTRY:
+    for name in _advertised():
         if name in active_tool_names:
             info = TOOL_REGISTRY[name]
             specs.append({
@@ -631,15 +1011,17 @@ def _core_tool_fns() -> list:
     directly without going through search_tools first. Normally the
     config-driven core set; when [tools] flat = true it is the ENTIRE registry,
     so a capable model gets the whole toolset up front (no search_tools
-    hop)."""
-    names = (list(TOOL_REGISTRY) if config.FLAT_TOOLS
-             else config.PREACTIVATE_TOOLS)
-    out = []
-    for name in names:
-        info = TOOL_REGISTRY.get(name)
-        if info:
-            out.append((name, info['fn']))
-    return out
+    hop). Either way a tool the project policy disables is skipped."""
+    if config.FLAT_TOOLS:
+        names = list(TOOL_REGISTRY)
+    else:
+        # The sandbox verbs join the core set whenever the project has a
+        # sandbox image (a worker must find them without a search hop).
+        names = list(config.PREACTIVATE_TOOLS) + [
+            n for n in SANDBOX_TOOLS if n not in config.PREACTIVATE_TOOLS]
+    advertised = set(_advertised())
+    return [(name, TOOL_REGISTRY[name]['fn']) for name in names
+            if name in advertised]
 
 
 def initial_tools(can_spawn: bool, controller: bool = False) -> tuple:
@@ -674,8 +1056,10 @@ def reset_active_tools() -> None:
 
 
 def activate(name: str) -> None:
-    """Add a registry tool to the active set if not already present."""
-    if name in TOOL_REGISTRY and name not in session.active_tool_names:
+    """Add a registry tool to the active set if not already present; a
+    tool the project policy disables is never activated."""
+    if (name in TOOL_REGISTRY and is_enabled(name)
+            and name not in session.active_tool_names):
         session.active_tool_names.add(name)
         session.active_tools.append(TOOL_REGISTRY[name]['fn'])
         ui.console.print(f"[green]\\[ACTIVATED][/green] {name}")
@@ -705,27 +1089,83 @@ def _redact_for_remote(name: str, result: str) -> str:
     return policy.redact(result, findings)
 
 
+def _mode_denial(result: str) -> bool:
+    """Whether a tool result text is an access-mode/allow-list refusal
+    (message texts owned by guru.domain.files / ensure_domain_allowed), or
+    the subprocess runner's own refusal (``procs.DENIED_PREFIX``, which the
+    verbs surface bare or behind ``Refused: ``)."""
+    head = result[:300]
+    return (head.startswith('Refused: read-only mode')
+            or head.startswith(procs.DENIED_PREFIX)
+            or head.startswith(f'Refused: {procs.DENIED_PREFIX}')
+            or 'was denied by the user' in head
+            or (head.startswith('Write access to ') and head.rstrip()
+                .endswith('was denied.')))
+
+
+def _record_event(name: str, arguments: dict, raw: str, shown: str,
+                  seconds: float, denied: str) -> None:
+    """One ``tool_events`` audit row for a finished execute_tool call."""
+    ok = not denied and not raw.startswith(('Tool error:', 'Unknown tool:'))
+    ledger.record_tool_event(
+        name, arguments, seconds=seconds, ok=ok, produced_bytes=len(raw),
+        shown_bytes=len(shown), files_touched=_files_touched(name, arguments),
+        denied=denied)
+
+
+def _files_touched(name: str, arguments: dict) -> list:
+    """The paths a tool call named: its ``path`` (or ``target`` for
+    run_tests) argument, or every file an apply_patch diff addresses."""
+    if not isinstance(arguments, dict):
+        return []
+    if name == 'apply_patch':
+        return patch.targets(str(arguments.get('diff', '')))
+    for key in ('path', 'target'):
+        value = arguments.get(key)
+        if value:
+            return [str(value)]
+    return []
+
+
 def execute_tool(name: str, arguments: dict) -> str:
     """Run a tool the model requested and return its result text.
 
-    Handles search_tools activation and unknown/error cases. The domain
-    allow-list gate is applied inside the individual web tools.
+    Handles search_tools activation, the project tool policy, and
+    unknown/error cases; the domain and directory allow-list gates are
+    applied inside the individual tools. Every call — including refused
+    and unknown ones — writes one ``tool_events`` ledger row.
     """
     # File-write tools render their own '⏺ Verb(file)' diff block, so the raw
     # note (which would dump the whole content/old/new) is shown as just the
     # path — or skipped for delete, which prints its own line.
     if name in ('write_file', 'edit_file'):
         ui.note_tool(name, str(arguments.get('path', '')))
+    elif name == 'apply_patch':
+        ui.note_tool(name, ', '.join(patch.targets(
+            str(arguments.get('diff', '')))))
+    elif name == 'sandbox_python':
+        code = str(arguments.get('code', ''))
+        ui.note_tool(name, f'{len(code)} chars, {len(code.splitlines())} '
+                           'lines')
     elif name != 'delete_file':
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
+    denied = ''
+    started = time.monotonic()
     if session.controller and name not in CONTROLLER_TOOLS:
         # A controller coordinates only; CONTROLLER_HINT promises it has no
         # other tools, so keep that true (the attempt is still measured by
         # turn.controller_executed).
         result = f"Unknown tool: {name}"
+        denied = 'controller'
+    elif name in TOOL_REGISTRY and not is_enabled(name):
+        result = f"Tool '{name}' is disabled by .guru/tools.toml"
+        denied = 'policy'
+    elif name in DIRECT_WRITE_TOOLS and _sandbox_available():
+        result = SANDBOX_WRITE_REFUSAL
+        denied = 'policy'
     elif name == "search_tools":
         result = search_tools(**arguments)
-        for tn in _match_tools(arguments.get("query", "")):
+        for tn in _top_matches(arguments.get("query", "")):
             activate(tn)
     elif name == "use_skill":
         result = use_skill(**arguments)
@@ -742,6 +1182,10 @@ def execute_tool(name: str, arguments: dict) -> str:
             result = f"Tool error: {e}"
     else:
         result = f"Unknown tool: {name}"
+    seconds = time.monotonic() - started
+    if not denied and _mode_denial(result):
+        denied = 'mode'
+    raw = result
     result = _redact_for_remote(name, result)
     # Struggle counters: a tool that raised, or an edit_file refused because
     # the model passed a stale sha (message text owned by files.edit_file).
@@ -749,6 +1193,7 @@ def execute_tool(name: str, arguments: dict) -> str:
         ledger.bump('tool_errors')
     elif name == 'edit_file' and result.startswith('sha mismatch:'):
         ledger.bump('sha_mismatches')
+    _record_event(name, arguments, raw, result, seconds, denied)
     # Show the output's size — the context cost of this tool result.
     ui.note_tool_result(len(result))
     return result

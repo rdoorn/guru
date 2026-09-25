@@ -46,10 +46,56 @@ is injected through setters rather than hard-coded:
   mode), installed from settings by `guru.judges.install()` at startup.
   Whether a point *acts* on its judge is process config
   (`config.DECISIONS_ACTIVE`, category 3), not a property of the judge.
+- `provision.set_approve_asker` (`guru.sandbox.provision`) — the sandbox
+  approval prompt: applying a dependency request (`/sandbox deps apply`),
+  and `sandbox_submit`'s "apply this change?" for an `intended` verdict
+  outside silent auto mode and for every `unclear` verdict (read-only never
+  approves; a raising asker is a decline). The TUI installs its access
+  asker; the eval runner installs a deny, or with `--allow-spend` an asker
+  that grants `intended` submits only (an unattended run never approves
+  `unclear`). None restores the console prompt.
+- `judges.set_registry` (`guru.judges` → `guru.judges.llm`) — the adapter
+  registry, plus optionally the routing settings, that `llm:<Adapter>|<model>`
+  judges and the sandbox gate's default reviewer resolve adapter names and
+  ladders against. The CLI installs `REGISTRY` with the loaded routing at
+  startup; the eval runner installs the suite's registry (and the routing
+  file, or empty settings) for a run and clears it afterwards. Without a
+  registry the default reviewer is the session's own adapter/model.
 - `ledger.set_repository` — the ledger persistence backend, a JSONL
   repository in the CLI/TUI, a fake in tests. `guru.ledger_cli review`
   installs the JSONL repository of the directory it labels for the duration
-  of the command and restores the previous one afterwards.
+  of the command and restores the previous one afterwards. Independently of
+  the repository, `guru.domain.ledger` keeps this process's call rows in
+  memory per `turn_id` (the last `TURNS_KEPT` turns, plus the run total)
+  behind a lock, so the per-turn cost line (`turn_summary`,
+  `session_summary`; `[ledger] turn_line`, category 3 as
+  `config.LEDGER_TURN_LINE`) never reads the JSONL back and works for a
+  disabled ledger too (it then omits the cost).
+- `Orchestrator.set_routing` — the typed `RoutingSettings` a running
+  orchestrator resolves routes with (its ladders are rebuilt on next use).
+  The CLI loads the table at startup (after
+  `settings.ensure_default_routing` has written the default block into a
+  settings file that had no `[routing]`); `/routing on|off` rewrites only
+  the table's `mode` line (`settings.switch_routing`), reloads the table
+  through `cli.load_routing` (which rebinds the scanner and
+  `config.SECRET_SCAN`) and hands the result to the orchestrator. The
+  main agent's tool set (controller or hands-on) is fixed at configure
+  time and follows the new setting on the next start.
+- `toolpolicy.set_policy` (re-exported as `tools.set_policy`) — the
+  project's tool policy (`.guru/tools.toml`, loaded by
+  `guru.repositories.settings.load_tools_policy`): which registry tools
+  are enabled/disabled, the test runner and any subprocess-limit overrides.
+  The entity and the installed instance live in `guru.domain.toolpolicy` so
+  the audited verbs (`quality`, `gitread`) read the runner and limits without
+  importing `tools` (which registers them). The CLI installs it at startup;
+  the default (no file, or `set_policy(None)`) enables everything.
+  `tools.execute_tool` consults it through
+  `tools.is_enabled` and writes a `denied = "policy"` `tool_events` row for a
+  refused call. The same predicate filters what the model is told about:
+  `_core_tool_fns` (pre-activation), `activate`, `search_tools` results and
+  `specs_for` all skip a disabled tool, so a policy never has to rely on the
+  refusal alone. The always-on tools (`search_tools`, `use_skill`, `spawn`,
+  `check`, `join`) are never subject to it.
 
 These are the dependency-injection points, and they already exist where
 front-ends actually diverge.
@@ -68,10 +114,15 @@ Single-valued, process-wide configuration lives as module-level state in
   `DECISIONS_TIMEOUT_MS` — the decision seam's mode, which points act on
   their judge, the per-point `P(yes)` threshold and the active-mode wait
   budget (`[decisions]` in settings.toml),
+- `config.PROC_TIMEOUT_S` / `PROC_CPU_S` / `PROC_MEM_MB` / `PROC_FSIZE_MB` /
+  `PROC_OUT_KB` — the subprocess ceilings `guru.domain.procs.Limits` defaults
+  to (`[tools.limits]` in settings.toml; a project's `.guru/tools.toml`
+  overrides per call through the installed policy),
 - `config.SECRET_SCAN` — mirrors `[routing] secret_scan` for the tool layer,
   and stays off (no scanner bound) when no `[routing]` table is configured
-  (the typed `RoutingSettings` itself travels with the `Orchestrator`, which
-  also holds the `AdapterRegistry` it resolves routes against).
+  or the table says `mode = "off"` (the typed `RoutingSettings` itself
+  travels with the `Orchestrator`, which also holds the `AdapterRegistry`
+  it resolves routes against; see `Orchestrator.set_routing` above).
 
 These are the same for every agent in the process. guru is a single-user,
 single-process CLI, so there is never more than one value of each. Making them

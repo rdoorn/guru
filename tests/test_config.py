@@ -240,6 +240,7 @@ class TestDecisionsAndLedgerSettings:
                               ('DECISIONS_LABELS_MARGIN', 0.15),
                               ('DECISIONS_SIDECAR_MODEL', 'qwen3:4b'),
                               ('LEDGER_ENABLED', True),
+                              ('LEDGER_TURN_LINE', True),
                               ('PRICING_OVERRIDES', {})):
             monkeypatch.setattr(config, name, default)
         config._apply_settings()
@@ -258,6 +259,7 @@ class TestDecisionsAndLedgerSettings:
         assert config.DECISIONS_LABELS_MARGIN == 0.15
         assert config.OVER_READ_LIMIT == 8
         assert config.LEDGER_ENABLED is True
+        assert config.LEDGER_TURN_LINE is True
         assert config.LEDGER_DIR == config.GURU_HOME / 'ledger'
         assert config.PRICING_OVERRIDES == {}
 
@@ -284,6 +286,13 @@ class TestDecisionsAndLedgerSettings:
         assert config.LEDGER_ENABLED is False
         assert config.PRICING_OVERRIDES == {
             'claude-sonnet-5': {'input_per_m': 2.5, 'output_per_m': 11.0}}
+
+    def test_ledger_turn_line_switch(self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch, '[ledger]\nturn_line = false\n')
+        assert config.LEDGER_TURN_LINE is False
+        assert config.LEDGER_ENABLED is True          # independent keys
+        self._apply(tmp_path, monkeypatch, '[ledger]\nenabled = false\n')
+        assert config.LEDGER_TURN_LINE is True
 
     def test_unknown_mode_falls_back_to_off(self, tmp_path, monkeypatch):
         self._apply(tmp_path, monkeypatch, '[decisions]\nmode = "yolo"\n')
@@ -361,3 +370,43 @@ class TestEvalsSettings:
                     '[evals]\nnum_ctx = "lots"\nmodel = 3\n')
         assert config.EVALS_NUM_CTX == 8192
         assert config.EVALS_MODEL == ''
+
+
+class TestProcLimitSettings:
+    """settings.toml [tools.limits] overrides the subprocess ceilings."""
+
+    _DEFAULTS = (('PROC_TIMEOUT_S', 120), ('PROC_CPU_S', 120),
+                 ('PROC_MEM_MB', 2048), ('PROC_FSIZE_MB', 64),
+                 ('PROC_OUT_KB', 256))
+
+    def _apply(self, tmp_path, monkeypatch, text: str) -> None:
+        p = tmp_path / 'settings.toml'
+        p.write_text(text, encoding='utf-8')
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
+        for name, default in self._DEFAULTS:
+            monkeypatch.setattr(config, name, default)
+        config._apply_settings()
+
+    def test_defaults(self) -> None:
+        for name, default in self._DEFAULTS:
+            assert getattr(config, name) == default
+
+    def test_apply_reads_limits(self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch,
+                    '[tools.limits]\ntimeout_s = 30\ncpu_s = 20\n'
+                    'mem_mb = 512\nfsize_mb = 8\nout_kb = 16\n')
+        assert (config.PROC_TIMEOUT_S, config.PROC_CPU_S, config.PROC_MEM_MB,
+                config.PROC_FSIZE_MB, config.PROC_OUT_KB) == (
+                    30, 20, 512, 8, 16)
+
+    def test_bad_values_are_ignored(self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch,
+                    '[tools.limits]\ntimeout_s = "soon"\ncpu_s = -5\n'
+                    'out_kb = true\n')
+        assert config.PROC_TIMEOUT_S == 120
+        assert config.PROC_CPU_S == 120
+        assert config.PROC_OUT_KB == 256
+
+    def test_tools_policy_path_under_project_dir(self) -> None:
+        assert config.TOOLS_POLICY_PATH == (
+            config.PROJECT_GURU_DIR / 'tools.toml')

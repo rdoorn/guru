@@ -8,6 +8,12 @@ state. Tool execution and gating stay in the domain layer — adapters call
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+# System instruction for :meth:`Adapter.complete`: every single-shot
+# completion guru asks for (the sandbox gate's review) is machine-read, so
+# the model is told once, the same way on every provider, to emit JSON only.
+JSON_ONLY = ('Answer with a single JSON object and nothing else: no prose,'
+             ' no markdown fences, no explanation outside the object.')
+
 
 @dataclass
 class ModelInfo:
@@ -68,3 +74,16 @@ class Adapter(ABC):
     @abstractmethod
     def summarise(self, transcript: str) -> str:
         """Return a concise summary of a conversation transcript."""
+
+    def complete(self, prompt: str, max_tokens: int = 1024,
+                 model: str = '') -> str:
+        """One single-shot completion of ``prompt`` under the ``JSON_ONLY``
+        system instruction; returns the model's text (the caller parses
+        it). ``model`` overrides the session's model (the gate reviewer
+        runs on a routed model, possibly off the session's thread), so an
+        empty ``model`` should only be used from a bound session. No tool
+        loop, nothing appended to the conversation; the call is recorded
+        with ``phase='complete'``. Raises the provider's error: the
+        decision seam turns it into an ``error`` row. Adapters that cannot
+        complete raise ``NotImplementedError`` (the default)."""
+        raise NotImplementedError(f'{self.name} has no complete()')

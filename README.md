@@ -50,6 +50,8 @@ Requires the Ollama app running in the menu bar (for local models).
 | `/search <query>` | Call `web_search` directly and optionally `web_fetch` a result |
 | `/good [note]`, `/bad [note]` | Label the last completed turn (and the sub-agent tasks it spawned) in the ledger's `labels` stream |
 | `/ledger` | Print this run's spend: calls, tokens and cost per model, tasks per model, the three most expensive tasks |
+| `/tools` | Print the last turn's tool calls from the audit stream: tool, args head, seconds, bytes shown/produced, denials |
+| `/routing`, `/routing off`, `/routing on` | Show the active routing configuration (mode, ladders, judges) or flip `mode` in `settings.toml` and reload it |
 | `exit` / `quit` | Exit |
 
 ## Roles & skills
@@ -185,10 +187,13 @@ only when it differs from the controller's and beats the runner-up by
 `labels_margin`; the task row's `reason` then says
 `labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
 lost on margin leaves a row with `fallback_reason = "margin"` (the kind
-label is only observed). `panel` and `injection` are shadow-only until the
-review loop promotes them. The promotion rule (100+ labelled rows, judge beats the
-heuristic, acceptable false-positive rate) and the labelling procedure are in
-`docs/review-loop.md`.
+label is only observed). The default routing block also runs `panel`
+active: when its `needs_security` answer is yes for a review-kind task and
+no security worker was spawned, the orchestrator adds one
+(`reason` starts with `origin:panel`). `injection` stays shadow-only until
+the review loop promotes it. The promotion rule (100+ labelled rows, judge
+beats the heuristic, acceptable false-positive rate) and the labelling
+procedure are in `docs/review-loop.md`.
 
 Judge specs are `ollama` or `ollama:<model>`, `encoder` or
 `encoder:<hf-model>` (default `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`)
@@ -212,71 +217,119 @@ viewers.
 
 ## Routing (controller and ladder)
 
-Sub-agent tasks can be *routed*: the model that runs a spawned task is picked
-from a ladder of rungs (cheapest first) by the task's labels rather than
-inherited from the parent. The `spawn` tool carries two labels the model
-fills in — `kind` (`debug`, `build`, `refactor`, `review`, `explain`, `docs`,
-`ops`, `other`) and `complexity` (`trivial`, `standard`, `hard`) — and
-`[routing]` in `~/.guru/settings.toml` says what to do with them:
+Sub-agent tasks are *routed*: the model that runs a spawned task is picked
+from a ladder of Claude tiers (cheapest first) by the task's labels rather
+than inherited from the parent. The `spawn` tool carries two labels the
+controller fills in — `kind` (`debug`, `build`, `refactor`, `review`,
+`explain`, `docs`, `ops`, `other`) and `complexity` (`trivial`, `standard`,
+`hard`) — and `[routing]` in `~/.guru/settings.toml` says what to do with
+them.
+
+**The default configuration.** On startup, when `~/.guru/settings.toml`
+has no `[routing]` table and at least one remote adapter (`litellm` or
+`anthropic`) is enabled in `adapters.toml`, guru appends the measured
+default block (`evals/routing/claude-tiers-judges.toml`, triage notes
+`evals/triage/2026-09-24-*`) to the file and prints one line saying so.
+The block is written once; an existing `[routing]` table — even an empty
+one — is never touched, other tables are left as they are, and the file is
+created if missing. For a LiteLLM adapter named `SBP Litellm` it reads:
 
 ```toml
 [routing]
-mode = "local-and-remote"   # local-only | local-and-remote | remote-only
-controller = true           # main agent only coordinates (see below);
-                            # default: on when any ladder rung is configured
-complexity_router = true    # pick the lowest rung that covers the complexity
-type_router = false         # use the per-kind ladders below (default: no)
-spend_confirm = "ask"       # ask | auto | never
-secret_scan = true          # findings force local + redact remote tool output
+mode = "local-and-remote"   # local-only | local-and-remote | remote-only | off
+controller = true           # the main agent only spawns, checks and joins
+complexity_router = true    # lowest rung whose max_complexity covers the task
+type_router = true          # review tasks use [[routing.ladders.review]]
+spend_confirm = "ask"       # ask (once per run) | auto | never
+secret_scan = true          # findings force local; remote tool output redacted
 
-[[routing.ladder]]          # the default ladder, lowest rung first:
-adapter = "SBP Litellm"     # Claude tiers via a LiteLLM adapter (the name
-model = "aws/claude-4-5-haiku"   # must match an [[adapter]] in adapters.toml)
-max_complexity = "trivial"  # the hardest task this rung should take
+[[routing.ladder]]          # trivial: lookups, one-file summaries
+adapter = "SBP Litellm"
+model = "aws/claude-4-5-haiku"
+max_complexity = "trivial"
 
-[[routing.ladder]]
+[[routing.ladder]]          # standard: a few files, one bug, one edit
 adapter = "SBP Litellm"
 model = "aws/claude-5-sonnet"
 max_complexity = "standard"
-default = true              # used when complexity_router = false
+default = true
 
-[[routing.ladder]]
+[[routing.ladder]]          # hard: multi-file work, whole-repo reviews
 adapter = "SBP Litellm"
 model = "aws/claude-5-5-opus"
 max_complexity = "hard"
 
-[[routing.ladders.review]]  # optional per-kind ladder (only with type_router)
+[[routing.ladders.review]]  # review-kind tasks: never Haiku
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
+default = true
+
+[[routing.ladders.review]]
 adapter = "SBP Litellm"
 model = "aws/claude-5-5-opus"
 max_complexity = "hard"
+
+[decisions]
+mode = "active"
+labels_margin = 0.15
+[decisions.points]
+labels = "encoder"          # complexity tie-breaker for the controller's label
+panel = "encoder"           # needs_security: one extra security reviewer
+injection = "injection"     # shadow: fetched pages checked for injection
+[decisions.active]
+labels = true
+panel = true
 ```
 
-Without a `[routing]` table guru behaves exactly as before: children run on
-the parent's adapter and model, nothing is scanned or redacted, and no spend
-question is asked. With one, secret scan and redaction default on. A rung
-naming an adapter that is not configured is dropped with a warning at
-startup; an invalid table logs a warning and the defaults apply. The
-parent's own adapter/model is always *pre-approved*: it is the "no change"
-fallback, it never needs a spend confirmation and neither a scan finding nor
-a declined confirmation takes it away (the parent already runs that model
-and already saw the task text); only `mode = "local-only"` refuses to fall
-back to a remote parent model.
+For an `anthropic` adapter the model ids are the first-party ones
+(`claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5-5`). The
+`[decisions]` part is skipped when the file already has one, and without
+the `judge` extra (`uv sync --extra judge`) `labels` and `panel` are
+written `false` with a note: the encoder judges are then only observed.
+The measurements behind the block used Haiku 4.5 as the main (controller)
+model — pick it in `/models`; the routing table does not set the main
+model.
+
+**Inspecting and turning it off.** `/routing` prints the mode and flags,
+every ladder's rungs and the judge per decision point (active / shadow,
+installed or not). `/routing off` writes `mode = "off"` into the table
+(remembering the previous mode in a trailing `# was "…"` comment, touching
+no other line) and reloads: routing, the controller hint on new agents,
+secret scan and redaction all behave as if no `[routing]` table existed.
+`/routing on` restores the previous mode. Both take effect in the running
+process; the main agent keeps its current controller/hands-on tool set
+until the next start.
+
+**How a task is routed.** With `complexity_router` on, a task takes the
+lowest surviving rung whose `max_complexity` is at least its complexity;
+off, the ladder's `default` rung. With `type_router` on, a task whose
+`kind` has a per-kind ladder (`[[routing.ladders.<kind>]]`) uses it — the
+default block gives `review` its own ladder starting at Sonnet, so a
+trivial-labelled review never lands on Haiku; every other kind uses the
+default ladder. A rung naming an adapter that is not configured is dropped
+with a warning at startup; an invalid table logs a warning and the defaults
+apply. The parent's own adapter/model is always *pre-approved*: it is the
+"no change" fallback, it never needs a spend confirmation and neither a scan
+finding nor a declined confirmation takes it away (the parent already runs
+that model and already saw the task text); only `mode = "local-only"`
+refuses to fall back to a remote parent model.
 
 **Working modes.** `local-only` never runs a task on an adapter that sends
 content off-machine (Ollama is local; Anthropic and LiteLLM are remote);
 `remote-only` never runs one locally; `local-and-remote` uses the whole
-ladder. With `complexity_router` on, a task takes the lowest surviving rung
-whose `max_complexity` is at least its complexity; off, the ladder's
-`default` rung. When the chosen ladder is emptied by the filters the task
-falls back to the default ladder, then to the parent's own model
-(pre-approved, see above), then to the first surviving rung of any ladder.
-A spawn is *refused* only when no permitted rung is left after those steps:
-in `remote-only` mode (where the parent model is never a fallback) when the
-filters strip every remote rung — a secret-scan finding, or a declined spend
-confirmation — or in `local-only` mode when the parent itself runs remotely
-and no ladder has a local rung. The spawn tool reports why and a `refused`
-task row is written. Every filter that changed the outcome is listed
-verbatim in the task row's `reason` (and its `route`).
+ladder. When the chosen ladder is emptied by the filters the task falls
+back to the default ladder, then to the parent's own model (pre-approved,
+see above), then to the first surviving rung of any ladder. A spawn is
+*refused* only when no permitted rung is left after those steps: in
+`remote-only` mode (where the parent model is never a fallback) when the
+filters strip every remote rung — a secret-scan finding, or a declined
+spend confirmation — or in `local-only` mode when the parent itself runs
+remotely and no ladder has a local rung. The spawn tool reports why and a
+`refused` task row is written. Every filter that changed the outcome is
+listed verbatim in the task row's `reason` (and its `route`). Ollama stays
+the local-only option: point the rungs at an Ollama adapter for a
+`local-only` setup, and at the sidecar for the `ollama` judge.
 
 **Controller mode.** `controller = true` turns the main agent into a
 coordinator: it converses, clarifies, decomposes with
@@ -293,6 +346,21 @@ with more than 600 characters without spawning. A hands-on main agent has
 an over-read guard instead: after `OVER_READ_LIMIT` (8) distinct files
 read in one turn without a spawn it is told, once, to delegate
 (struggle counter `over_read`).
+
+**Judges on the routing seam.** Two decision points act with the default
+block (`[decisions] mode = "active"`, see **Ledger and decisions**):
+`labels` is a margin-gated tie-breaker for the controller's complexity
+label — the encoder judge's tier routes the task only when it differs from
+the controller's and beats the runner-up by `labels_margin` (the task
+row's `reason` then says `labels:judge override standard->hard (0.57 vs
+0.33)`); `panel` asks the same judge `needs_security` over every
+`review`-kind task a controller spawns without a security reviewer (role
+`security-engineer` or a skill containing `security`), and on *yes* guru
+spawns one extra `security-engineer` worker on the same task with the
+`/review` panel's security focus — once per parent turn, routed like the
+task it shadows, its row's `reason` opening with `origin:panel
+(needs_security)`, and the controller told to join it. A shadow judge, a
+timeout, an error or a missing judge adds nothing. `injection` stays shadow.
 
 **Spend confirmation.** In `ask` mode the first task that would run on a
 remote (paid) *ladder rung* asks once per run — "Allow remote model spend for this
@@ -408,10 +476,15 @@ Remote models are queried for their context window; no memory is shown.
 - `[tools]`
   - `preactivate = [...]` — core tools pre-activated on every agent so weaker
     models can call them directly without the `search_tools` hop (default
-    `["list_dir", "list_tree", "read_file", "search_code"]`).
+    `["list_dir", "list_tree", "read_file", "search_code", "outline",
+    "find_symbol", "run_tests", "check_syntax"]`).
   - `flat = true` — pre-activate the ENTIRE registry on every agent, so a
     capable, large-context model gets the whole toolset up front (costs more
     prompt tokens; off by default).
+  - `[tools.limits]` — ceilings for every subprocess the audited tools start
+    (`guru/domain/procs.py`): `timeout_s` (default `120`), `cpu_s` (`120`),
+    `mem_mb` (`2048`), `fsize_mb` (`64`), `out_kb` (`256`, per output
+    stream). A project's `.guru/tools.toml` can override them again.
 - `[sampling]` — sampling overrides applied on top of a model's own modelfile
   defaults. Scalar keys here are global (all models); a `[sampling."<model>"]`
   sub-table holds per-model overrides (per-model wins). Empty by default.
@@ -431,6 +504,7 @@ state travels with the project (created lazily on first write):
 - `.guru/domains_allow.txt` — this project's network allow-list (see below).
 - `.guru/read_dirs_allow.txt` / `.guru/write_dirs_allow.txt` — approved
   file-read / file-write directories.
+- `.guru/tools.toml` — the project's tool policy (see **Audited tools**).
 - `.guru/memory/*.memory` — saved conversations, one JSON file per `/save`.
 
 ## Access modes & safeguards
@@ -469,9 +543,205 @@ Registry tools:
   (grep), `write_file`, `edit_file`, `delete_file`. All are restricted to
   allowed directories and gated by the access mode.
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
+- **Code** — the eight audited verbs below.
+- **Sandbox** — `sandbox_run`, `sandbox_python`, `sandbox_diff`,
+  `sandbox_submit`, `request_dependency`; advertised only in a project
+  with a provisioned sandbox image (see Sandbox below).
 
 `search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
 `check`, `join` are always available and not part of the registry.
+
+### Audited tools
+
+guru has no shell tool. Coding and verification go through fixed Python
+procedures: the model chooses a **verb and a target**, guru builds the argv
+list, runs it under limits, and hands back a short digest. Design and plan:
+[`docs/plans/2026-09-24-audited-tools-plan.md`](docs/plans/2026-09-24-audited-tools-plan.md).
+
+The verbs:
+
+- `outline(path)` — def/class map of a file with line ranges (non-Python:
+  the first 40 numbered lines), so the model can pick lines to read instead
+  of reading whole files.
+- `find_symbol(name, kind='')` — definitions (AST) and references (word
+  grep) across the project's `.py` files; `kind` filters `def`/`ref`.
+- `run_tests(target='', k='', maxfail=1, detail='')` — pytest (or unittest,
+  per policy) via a fixed argv; the digest is the summary line plus the
+  failing test ids with their assertion line.
+- `check_syntax(path)` — `py_compile` in-process; `ok` or the SyntaxError.
+- `lint(path='')` — flake8, and mypy when configured; skips a linter that
+  is not installed and says so.
+- `git_status()` — changed files (porcelain); read-only.
+- `git_diff(path='', detail=False)` — `--stat` digest, or the unified diff
+  for one path; read-only, never `add`/`commit`/`checkout`.
+- `apply_patch(diff)` — a unified diff for one or more project files,
+  validated hunk by hunk before anything is written, all-or-nothing, through
+  the same write gates and sha ledger as `edit_file`; a deletion
+  (`+++ /dev/null`) is applied when its body equals the file exactly.
+
+**Digest and detail.** Every verb returns at most a few hundred characters
+by default; a `detail` argument expands one item (one failing test, one
+file's diff, one linter's issues). The full subprocess output goes to the
+log and the ledger transcript, never to the model — that is what keeps a
+test run from flooding the context.
+
+**Limits.** Every subprocess runs with a fixed argv (a shell binary as the
+program is refused), in its own process group (killed whole on timeout,
+strays included), with an environment built from scratch (a secret in
+guru's own environment never reaches the child), rlimits on CPU, memory and
+file size, and output captured to files under a throw-away `HOME` so
+`fsize_mb` bounds it on disk and only the first `out_kb` reaches guru. The
+ceilings come from `[tools.limits]` in `settings.toml` (`timeout_s`,
+`cpu_s`, `mem_mb`, `fsize_mb`, `out_kb`) and a project can lower them again
+in its policy file. The runner refuses a working directory outside the read
+allow-list; that refusal is recorded like an access-mode denial.
+
+**Policy file.** A project can narrow the toolset with `.guru/tools.toml`:
+
+```toml
+[tools]
+enabled = ["read_file", "search_code", "run_tests"]   # non-empty: allowlist
+disabled = ["web_search", "web_fetch"]                 # always wins
+
+[tools.tests]
+runner = "pytest"          # pytest | unittest
+
+[tools.limits]
+timeout_s = 60             # per-project subprocess ceilings (see [tools.limits])
+```
+
+No file means everything is enabled. `disabled` wins over `enabled`; a
+non-empty `enabled` list is an allowlist for registry tools. The always-on
+tools (`search_tools`, `use_skill`, `spawn`, `check`, `join`) are never
+subject to it. A disabled tool is not advertised at all — it is not
+pre-activated, `search_tools` does not return it and it is absent from the
+tool schemas the model sees — and if the model names it anyway the call
+answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
+`denied = "policy"`.
+
+**Fail closed.** If the policy file is present but invalid (unknown key,
+unknown runner, bad limit, broken TOML) or unreadable, guru reports the
+problem at startup (naming the file) and disables *every* registry tool
+until it is fixed or removed — only `search_tools`, `use_skill`, `spawn`,
+`check`, `join` remain. A policy meant to restrict tools can never widen
+them by mistake.
+
+**Audit.** Every tool call — allowed, refused or unknown — writes one row to
+the ledger's `tool_events` stream (tool, args head, seconds, bytes produced
+vs shown to the model, files touched, denial: `policy`, `mode` or
+`controller`). `/tools` shows the last turn's rows; `bench/ledger_report.py`
+aggregates them per tool in its **Tools** section.
+
+### Sandbox
+
+The sandbox runs the model's code changes in a container on a **copy** of
+the project, and lets them back into the real tree only through a quality
+gate. Design and plan:
+[`docs/plans/2026-09-24-sandbox-design-and-plan.md`](docs/plans/2026-09-24-sandbox-design-and-plan.md).
+
+**Requirements.** Docker CLI against [Colima](https://github.com/abiosoft/colima)
+(Apple silicon; `docker info` must succeed) and a uv-managed project:
+`pyproject.toml` + `uv.lock`. Only lockfile-declared packages exist in the
+image; the model never installs anything.
+
+**Enable.** Create `.guru/sandbox.toml` in the project (global defaults live
+in `[sandbox]` of `~/.guru/settings.toml`; the project file overrides key by
+key and is the only place `enabled` is read from):
+
+```toml
+[sandbox]
+enabled = true
+# base_image = "python:3.12-slim@sha256:…"   # digest-pinned, or refused
+# cpus = 2.0
+# memory_mb = 2048
+# pids = 256
+# timeout_s = 600                            # wall clock per container run
+```
+
+**Provision.** `/sandbox provision` (or `--force`) generates a Dockerfile
+from `pyproject.toml` + `uv.lock`, asks once to allow `pypi.org` and
+`files.pythonhosted.org` (the normal web-access question), and builds the
+image on an *internal* Docker network whose only other member is a
+digest-pinned tinyproxy with an allow-list generated from
+`.guru/domains_allow.txt` (CONNECT to allow-listed hosts on 443 only; every
+request is logged as `net_events`). The image record lives under
+`~/.guru/sandbox/<project>/`; it is rebuilt only when the lockfile changes.
+The `sandbox_*` verbs are advertised to the model only while that record
+exists — and while it does, the direct write tools (`write_file`,
+`edit_file`, `apply_patch`, `delete_file`) are hidden from the model and
+refused if named anyway: in a sandboxed project the gate is the only write
+path.
+
+**The verbs.**
+
+- `sandbox_run(argv)` — a fixed argv (`argv[0]` one of `python`, `pytest`,
+  `uv`, `ruff`, `mypy`, `flake8`, `make`; shells refused) in the task's
+  copy inside the container: `--network none`, unprivileged user, all
+  capabilities dropped, read-only root, tmpfs `/tmp`, cpu/memory/pid limits,
+  wall-clock kill. Digest: exit code and the first lines of output;
+  `detail` returns the last 4 KB.
+- `sandbox_python(code)` — runs a Python snippet the same way (arbitrary
+  code is fine *inside* the sandbox; that is what it is for).
+- `sandbox_diff()` — per-file `+/-` counts of the copy against the project.
+- `sandbox_submit(intent)` — the only way changes reach the real tree: the
+  copy's diff goes through the gate with the agent's stated intent.
+- `request_dependency(name, constraint)` — records a package request;
+  installs nothing.
+
+**The gate.** Two stages. Deterministic rules first: paths inside the
+project and outside the noise dirs, a size cap, the secret scanner over
+added lines, and red-flag patterns (process/network/eval primitives,
+encoded blobs, skipped tests, removed asserts, CI/config/conftest edits).
+Then an AI reviewer (the configured `gate` judge, else the routing ladder's
+`standard` rung, else the session model) answers a fixed question set over
+the user's request, the task, the intent and the diff. Three verdicts:
+
+- `intended` — applied via `apply_patch` (auto mode; ask mode shows the
+  diff and asks first).
+- `unclear` — the user is asked, with the reviewer's reasons, in every mode
+  (auto never waves it through).
+- `suspicious` — refused; nothing is applied and the reasons are printed.
+
+File deletions go through the same gate: a file deleted in the copy shows
+up as a `delete` flag (`deletes <path> (N lines)`, informational) and in
+the change summary the reviewer sees, and the reviewer answers whether
+every deletion is something the *user's request* asked for
+(`deletions_requested`); a `no` makes the verdict `unclear`, a `yes` with
+an otherwise clean review is applied like any edit. `apply_patch` accepts
+deletions (`+++ /dev/null`) whose body equals the file exactly, inside and
+outside the sandbox — one patch algebra.
+
+In read-only mode a submit reports the diff and stops before the reviewer
+is consulted (nothing could be applied, so the diff never leaves the
+machine for no decision).
+
+Every submit is a `sandbox_events` row and a `decisions` row for the
+reviewer; `/sandbox gate` lists this run's verdicts.
+
+**Dependency requests.** `request_dependency` only records. The user runs
+`/sandbox deps` to list, `/sandbox deps apply <name>` to approve: guru runs
+`uv add` in a provisioning container through the proxy on a copy, shows the
+lockfile diff (packages added/removed/changed), brings `pyproject.toml` +
+`uv.lock` back through `apply_patch`, and rebuilds. If the rebuild fails
+after the lockfile landed, the digest says so and the request stays pending
+for a retry. `/sandbox deps request <spec>` records one by hand.
+
+**What is and is not contained.** Execution has no network at all;
+provisioning reaches only allow-listed hosts through the logged proxy. The
+container sees the copy, never the real tree, your home, your environment
+or any credential; the copy is the `git ls-files` positive list minus noise
+dirs, `.env*` and anything the secret scanner flags. Not contained: a
+kernel escape lands in the Colima VM (accepted for local development); the
+build container runs as root with a writable root, so the proxy allow-list
+and the lockfile are the controls there; the internal network still reaches
+the VM's own gateway-address listeners.
+
+**Commands.** `/sandbox status` (runtime, settings, image, pending
+requests, task copies), `/sandbox provision [--force]`, `/sandbox gate`,
+`/sandbox deps [request <spec> | apply <name>]`. `make test-sandbox` runs
+the container integration tests (skipped without Colima); the eval suite
+has three `sandbox` cases (`python -m guru.evals list --tags sandbox`, see
+`evals/README.md`).
 
 ## Architecture
 
@@ -508,7 +778,9 @@ Provider adapters are configured in `~/.guru/adapters.toml` (see **Providers**).
 
 Make targets (local; there is no CI):
 
-- `make test` — run the test suite (pytest).
+- `make test` — run the test suite (pytest; container tests excluded).
+- `make test-sandbox` — the container integration tests against the
+  local Colima (skipped when `docker info` fails).
 - `make lint` — flake8 over `guru bench tests`.
 - `make typecheck` — mypy over `guru`.
 - `make bench` — run the headless coding-model benchmark, writing

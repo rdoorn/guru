@@ -1,0 +1,14 @@
+name = "find-symbol-outline"
+fixture = "flaskish"
+prompt = "Where is save_upload defined and who calls it? Use the outline/symbol tools; do not read whole files."
+timeout_s = 120
+tags = ["fast", "search"]
+
+[expect.behaviour]
+tools_used_any = ["find_symbol", "outline"]
+tools_used_none = ["read_file"]
+max_seconds = 120
+
+[expect.content]
+answer_contains = ["upload.py", "handlers.py"]
+files_changed = []

@@ -13,6 +13,14 @@ Config (adapters.toml):
     base_url = "https://proxy.example/v1"   # include /v1
     api_key_env = "SBP_LITELLM_KEY"          # env var holding the virtual key
     # models = ["azure/gpt-4.1", "anthropic/claude-..."]  # optional allowlist
+    # cache = true                            # prompt-cache markers (default)
+
+Prompt caching: with ``cache`` on, system messages are sent as content
+parts and the last part and the last tool definition carry
+``cache_control: {type: ephemeral}`` — the OpenAI-compatible shape a LiteLLM
+proxy forwards to Anthropic and Bedrock. Cache usage comes back either as
+Anthropic-style ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+on ``usage`` or as ``prompt_tokens_details.cached_tokens``; both are read.
 """
 import json
 import math
@@ -23,11 +31,12 @@ import requests
 
 from guru import log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import Adapter, ModelInfo
+from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo
 from guru.domain import ledger, pricing, tools
 
 _MAX_TOKENS = 16384   # proxies may enforce a thinking budget above 8k
 _DEFAULT_CONTEXT = 128000
+CACHE_CONTROL = {'type': 'ephemeral'}
 # LiteLLM `mode` values that are not chat models — hidden from /models.
 _NON_CHAT_MODES = {
     'audio_transcription', 'audio_speech', 'embedding',
@@ -96,6 +105,72 @@ def openai_tool_defs(specs: list) -> list:
     return defs
 
 
+def cached_messages(messages: list, cache: bool) -> list:
+    """``messages`` with every system message's text as one content part
+    and the cache marker on the last system message (copies); unchanged
+    when ``cache`` is off or there is no system message."""
+    if not cache:
+        return messages
+    last = max((i for i, m in enumerate(messages)
+                if m.get('role') == 'system'), default=-1)
+    if last < 0:
+        return messages
+    out = []
+    for i, m in enumerate(messages):
+        if m.get('role') != 'system' or not isinstance(m.get('content'), str):
+            out.append(m)
+            continue
+        part: dict = {'type': 'text', 'text': m['content']}
+        if i == last:
+            part['cache_control'] = dict(CACHE_CONTROL)
+        out.append({**m, 'content': [part]})
+    return out
+
+
+def cached_tools(defs, cache: bool):
+    """``defs`` with the cache marker on the last tool (a copy), or ``defs``
+    unchanged when ``cache`` is off or there are no tools."""
+    if not cache or not defs:
+        return defs
+    out = [dict(d) for d in defs]
+    out[-1]['cache_control'] = dict(CACHE_CONTROL)
+    return out
+
+
+def _attr(obj, name: str) -> int:
+    """``int(obj.<name>)`` (or ``obj[name]`` for a dict), 0 when missing
+    or not a number."""
+    value = (obj.get(name) if isinstance(obj, dict)
+             else getattr(obj, name, None))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+def usage_from(usage) -> pricing.Usage:
+    """Token counts of an OpenAI-compatible ``usage`` (object or dict).
+
+    ``prompt_tokens`` is the whole prompt (LiteLLM counts cached tokens in
+    it); cache reads come from Anthropic-style ``cache_read_input_tokens``
+    or ``prompt_tokens_details.cached_tokens``, cache writes from
+    ``cache_creation_input_tokens``. ``input_tokens`` is the uncached
+    remainder so the price table charges each class once.
+    """
+    if usage is None:
+        return pricing.Usage()
+    prompt = _attr(usage, 'prompt_tokens')
+    details = (usage.get('prompt_tokens_details') if isinstance(usage, dict)
+               else getattr(usage, 'prompt_tokens_details', None))
+    read = _attr(usage, 'cache_read_input_tokens')
+    if not read and details is not None:
+        read = _attr(details, 'cached_tokens')
+    write = _attr(usage, 'cache_creation_input_tokens')
+    return pricing.Usage(
+        input_tokens=max(prompt - read - write, 0),
+        output_tokens=_attr(usage, 'completion_tokens'),
+        cache_read_tokens=read, cache_write_tokens=write)
+
+
 def neutral_assistant(text: str, tool_calls: list) -> dict:
     """Build a neutral assistant message from text + [(name, input), ...]."""
     msg: dict = {'role': 'assistant', 'content': text}
@@ -113,12 +188,14 @@ class LiteLLMAdapter(Adapter):
     """OpenAI-compatible provider (e.g. a LiteLLM proxy)."""
 
     def __init__(self, name: str = "LiteLLM", base_url=None,
-                 api_key_env=None, api_key=None, models=None) -> None:
+                 api_key_env=None, api_key=None, models=None,
+                 cache: bool = True) -> None:
         self.name = name
         self.base_url = (base_url or '').rstrip('/')
         self.api_key_env = api_key_env
         self.api_key = api_key
         self.static_models = models or []
+        self.cache = bool(cache)
         self._context_by_model: dict = {}
 
     def _key(self) -> str:
@@ -191,18 +268,15 @@ class LiteLLMAdapter(Adapter):
     # --- ledger --------------------------------------------------------------
 
     def _record_call(self, phase: str, resp, seconds: float,
-                     cost_header=None) -> None:
+                     cost_header=None, model: str = '') -> None:
         """Write one CallRecord. ``cost_header`` is the proxy's per-response
-        cost (from :func:`_complete`); it wins over the price table. Never
+        cost (from :func:`_complete`); it wins over the price table;
+        ``model`` names the model when it is not the session's. Never
         raises into the turn."""
         try:
-            usage = getattr(resp, 'usage', None)
             ledger.record_call(
-                adapter=self.name, model=session.model,
-                usage=pricing.Usage(
-                    input_tokens=getattr(usage, 'prompt_tokens', 0) or 0,
-                    output_tokens=getattr(
-                        usage, 'completion_tokens', 0) or 0),
+                adapter=self.name, model=model or session.model,
+                usage=usage_from(getattr(resp, 'usage', None)),
                 seconds=seconds, phase=phase, cost_header=cost_header)
         except Exception:                                # noqa: BLE001
             log.exc('litellm call record failed')
@@ -212,7 +286,8 @@ class LiteLLMAdapter(Adapter):
     def run_turn(self) -> None:
         client = self._client()
         native = to_openai_messages(session.messages)
-        oa_tools = openai_tool_defs(tools.active_specs())
+        oa_tools = cached_tools(openai_tool_defs(tools.active_specs()),
+                                self.cache)
 
         def step():
             """One chat-completions round; returns (text, [(name, args, id)])
@@ -222,7 +297,7 @@ class LiteLLMAdapter(Adapter):
                 resp, cost = _complete(
                     client,
                     model=session.model,
-                    messages=native,
+                    messages=cached_messages(native, self.cache),
                     tools=oa_tools or None,
                     max_tokens=_MAX_TOKENS,
                 )
@@ -327,6 +402,23 @@ class LiteLLMAdapter(Adapter):
         except Exception as e:
             _note_error(e)
             return f'(summary failed: {e})'
+
+    def complete(self, prompt: str, max_tokens: int = 1024,
+                 model: str = '') -> str:
+        t0 = time.perf_counter()
+        # A proxy that enforces a thinking budget rejects any completion
+        # whose max_tokens sits below it (400 from the rubric judge or the
+        # gate reviewer), so the caller's value is a floor-less hint here:
+        # the request always carries the adapter's ceiling. The model stops
+        # at its own answer length; the cap is not a spend.
+        resp, cost = _complete(
+            self._client(), model=model or session.model,
+            max_tokens=max(int(max_tokens), _MAX_TOKENS),
+            messages=[{'role': 'system', 'content': JSON_ONLY},
+                      {'role': 'user', 'content': prompt}])
+        self._record_call('complete', resp, time.perf_counter() - t0, cost,
+                          model=model)
+        return (resp.choices[0].message.content or '').strip()
 
 
 _COST_HEADER = 'x-litellm-response-cost'

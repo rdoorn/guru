@@ -6,10 +6,14 @@ tags = ["edit"]
 
 [expect.behaviour]
 tools_used_any = ["edit_file", "write_file"]
+tools_used_all = ["run_tests"]
 
 [expect.content]
-files_changed = ["app/session.py"]
+# The fixture test only asserts is_expired returns a bool, so a worker that adds
+# a real expiry test to tests/test_session.py is right (run 69bc45821a7d did);
+# guard the files that must stay untouched instead of an exact set.
+files_unchanged = ["app/handlers.py", "app/upload.py", "tests/test_upload.py"]
 fixture_tests_pass = true
 
 [expect.rubric]
-text = "The comparison in app/session.py::is_expired becomes expires_at < now (or now >= expires_at); guru has no shell tool, so the answer must say the tests were not run by it rather than claim they passed."
+text = "The comparison in app/session.py::is_expired becomes expires_at < now (or now >= expires_at); the answer reports the run_tests digest (all tests passed after the edit) rather than a guess."

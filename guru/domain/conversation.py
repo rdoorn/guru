@@ -256,7 +256,10 @@ _DYN_SEP = "\n\n--- active context ---\n"
 
 def project_block() -> str:
     """The '[project]' block: the working directory's name, absolute path
-    and git branch, plus the rule that requests refer to it.
+    and git branch, plus the rule that requests refer to it; in a
+    sandbox-enabled project also ``config.SANDBOX_RULE`` (the direct write
+    tools are disabled there, edits go through the sandbox verbs and the
+    quality gate).
 
     Rendered for every agent so none of them has to guess which codebase a
     request means; the controller, which has no file tools, relies on it
@@ -271,6 +274,8 @@ def project_block() -> str:
     lines.append(
         "This working directory is the current project; user requests refer"
         " to it unless they say otherwise.")
+    if tools._sandbox_available():
+        lines.append(config.SANDBOX_RULE)
     return "\n".join(lines)
 
 

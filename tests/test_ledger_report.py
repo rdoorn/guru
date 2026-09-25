@@ -453,3 +453,200 @@ class TestChoiceRows:
                                     _label('k3', 'hard'),
                                     {'target_id': 'k4', 'label': ''}])
         assert truth == {'k1': True, 'k2': False, 'k3': 'hard'}
+
+
+def _event(tool: str, *, seconds: float = 1.0, produced: int = 100,
+           shown: int = 50, denied: str = '') -> dict:
+    return {'tool': tool, 'seconds': seconds, 'produced_bytes': produced,
+            'shown_bytes': shown, 'denied': denied, 'ok': not denied,
+            'turn_id': 'turn1', 'args': {}}
+
+
+class TestToolsSummary:
+    def test_per_tool_counts_means_bytes_and_denials(self) -> None:
+        rows = [_event('read_file', seconds=1.0, produced=1000, shown=200),
+                _event('read_file', seconds=3.0, produced=500, shown=500),
+                _event('write_file', seconds=0.5, denied='mode'),
+                _event('web_fetch', seconds=2.0, produced=0, shown=0,
+                       denied='policy')]
+        s = lr.tools_summary(rows)
+        assert list(s) == ['read_file', 'web_fetch', 'write_file']
+        assert s['read_file'] == {'calls': 2, 'mean_seconds': 2.0,
+                                  'produced_bytes': 1500, 'shown_bytes': 700,
+                                  'denials': 0}
+        assert s['write_file']['denials'] == 1
+        assert s['web_fetch'] == {'calls': 1, 'mean_seconds': 2.0,
+                                  'produced_bytes': 0, 'shown_bytes': 0,
+                                  'denials': 1}
+
+    def test_missing_fields_default_to_zero(self) -> None:
+        s = lr.tools_summary([{'tool': 'x'}, {}])
+        assert s['x'] == {'calls': 1, 'mean_seconds': 0.0,
+                          'produced_bytes': 0, 'shown_bytes': 0,
+                          'denials': 0}
+        assert '?' in s
+
+    def test_report_and_markdown_section(self) -> None:
+        rep = lr.build_report(calls=[], tasks=[], turns=[], decisions=[],
+                              labels=[], tool_events=[
+                                  _event('read_file', seconds=2.0,
+                                         produced=1000, shown=250),
+                                  _event('lint', denied='policy')])
+        assert rep['tools']['read_file']['calls'] == 1
+        assert rep['counts']['tool_events'] == 2
+        md = lr.render_markdown(rep)
+        assert '## Tools' in md
+        assert '| read_file | 1 | 2.00 | 250 | 1000 | 25% | 0 |' in md
+        assert '| lint | 1 | 1.00 | 50 | 100 | 50% | 1 |' in md
+
+    def test_report_without_tool_events_still_renders(self) -> None:
+        rep = lr.build_report(calls=[], tasks=[], turns=[], decisions=[],
+                              labels=[])
+        assert rep['tools'] == {} and rep['counts']['tool_events'] == 0
+        assert '## Tools' in lr.render_markdown(rep)
+
+    def test_script_prints_tools_section(self, tmp_path: Path) -> None:
+        d = tmp_path / 'ledger'
+        _write(d, 'tool_events', '2026-09-24',
+               [_event('run_tests', seconds=4.0, produced=8000, shown=400)])
+        proc = subprocess.run([sys.executable, str(SCRIPT), '--dir', str(d)],
+                              capture_output=True, text=True, cwd=REPO_ROOT)
+        assert proc.returncode == 0, proc.stderr
+        assert '## Tools' in proc.stdout
+        assert '| run_tests | 1 | 4.00 | 400 | 8000 | 5% | 0 |' in proc.stdout
+
+
+def _call(tool: str, args: dict, *, task: str = 't1', turn: str = 'turn1',
+          agent: str = 'main', denied: str = '', produced: int = 100,
+          shown: int = 50) -> dict:
+    return {'tool': tool, 'args': args, 'task_id': task, 'turn_id': turn,
+            'agent': agent, 'run_id': 'run1', 'denied': denied,
+            'produced_bytes': produced, 'shown_bytes': shown}
+
+
+PRE = ['list_dir', 'read_file', 'search_code', 'outline', 'run_tests']
+
+
+class TestToolSmells:
+    def test_whole_file_read_after_outline_same_task_only(self) -> None:
+        rows = [_call('outline', {'path': 'a.py'}),
+                _call('read_file', {'path': 'a.py'}),              # smell
+                _call('read_file', {'path': 'a.py', 'lines': '1-20'}),
+                _call('read_file', {'path': 'b.py'}),         # never outlined
+                _call('read_file', {'path': 'a.py'}, task='t2'),  # other task
+                _call('outline', {'path': 'c.py'}, task='t2'),
+                _call('read_file', {'path': 'c.py', 'lines': ''}, task='t2')]
+        s = lr.whole_file_after_outline(rows)
+        assert s['count'] == 2
+        assert s['examples'] == ['read_file(a.py) after outline [task t1]',
+                                 'read_file(c.py) after outline [task t2]']
+
+    def test_read_before_outline_is_not_a_smell(self) -> None:
+        rows = [_call('read_file', {'path': 'a.py'}),
+                _call('outline', {'path': 'a.py'})]
+        assert lr.whole_file_after_outline(rows)['count'] == 0
+
+    def test_main_agent_turns_are_separate_tasks(self) -> None:
+        rows = [_call('outline', {'path': 'a.py'}, task='', turn='u1'),
+                _call('read_file', {'path': 'a.py'}, task='', turn='u2')]
+        assert lr.whole_file_after_outline(rows)['count'] == 0
+        rows[1]['turn_id'] = 'u1'
+        s = lr.whole_file_after_outline(rows)
+        assert s['count'] == 1 and s['examples'][0].endswith('[turn u1]')
+
+    @pytest.mark.parametrize('query, hit', [
+        ('read_file', 'read_file'), ('read a file', 'read_file'),
+        ('readfile', 'read_file'), ('run the tests', 'run_tests'),
+        ('outline a module', 'outline'), ('search the web', ''),
+        ('fetch a url', ''), ('', '')])
+    def test_preactivated_match(self, query: str, hit: str) -> None:
+        assert lr.preactivated_match(query, PRE) == hit
+
+    def test_search_for_preactivated(self) -> None:
+        rows = [_call('search_tools', {'query': 'read a file'}),
+                _call('search_tools', {'query': 'search the web'}),
+                _call('read_file', {'path': 'x'})]
+        s = lr.search_for_preactivated(rows, PRE)
+        assert s['count'] == 1
+        assert s['examples'] == ['search_tools(read a file) -> read_file '
+                                 '[task t1]']
+
+    def test_repeated_identical_calls_within_a_task(self) -> None:
+        rows = [_call('read_file', {'path': 'a.py'}),
+                _call('read_file', {'path': 'a.py'}),
+                _call('read_file', {'path': 'a.py'}),
+                _call('read_file', {'path': 'a.py', 'lines': '1-3'}),
+                _call('read_file', {'path': 'a.py'}, task='t2'),
+                _call('search_code', {'pattern': 'x', 'path': '.'}),
+                _call('search_code', {'path': '.', 'pattern': 'x'})]
+        s = lr.repeated_calls(rows)
+        assert s['count'] == 3          # two surplus reads + one search
+        assert s['examples'] == ['read_file(path=a.py) x3 [task t1]',
+                                 'search_code(pattern=x, path=.) x2 '
+                                 '[task t1]']
+
+    def test_refused_calls_grouped_by_tool_and_reason(self) -> None:
+        rows = [_call('write_file', {'path': 'a'}, denied='mode'),
+                _call('write_file', {'path': 'b'}, denied='mode'),
+                _call('web_fetch', {'url': 'http://x'}, denied='policy'),
+                _call('read_file', {'path': 'c'})]
+        s = lr.refused_calls(rows)
+        assert s['count'] == 3
+        assert s['groups'] == {'web_fetch/policy': 1, 'write_file/mode': 2}
+        assert s['examples'][0] == 'write_file(path=a) denied: mode [task t1]'
+
+    def test_byte_ratio_per_tool(self) -> None:
+        rows = [_call('read_file', {}, produced=1000, shown=200),
+                _call('read_file', {}, produced=1000, shown=300),
+                _call('lint', {}, produced=0, shown=0)]
+        r = lr.byte_ratio(rows)
+        assert r['read_file'] == {'shown': 500, 'produced': 2000,
+                                  'ratio': 0.25}
+        assert r['lint']['ratio'] is None
+
+    def test_examples_are_capped(self) -> None:
+        rows = [_call('write_file', {'path': str(i)}, denied='mode')
+                for i in range(5)]
+        s = lr.refused_calls(rows)
+        assert s['count'] == 5 and len(s['examples']) == lr.SMELL_EXAMPLES
+
+    def test_tool_smells_defaults_to_config_preactivated(self, monkeypatch):
+        from guru import config
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['run_tests'])
+        rows = [_call('search_tools', {'query': 'run tests'})]
+        assert lr.tool_smells(rows)['search_preactivated']['count'] == 1
+        assert lr.tool_smells(rows, [])['search_preactivated']['count'] == 0
+        assert set(lr.tool_smells([])) == {
+            'whole_file_after_outline', 'search_preactivated',
+            'repeated_calls', 'refused', 'byte_ratio'}
+
+    def test_report_and_markdown_section(self) -> None:
+        rows = [_call('outline', {'path': 'a.py'}),
+                _call('read_file', {'path': 'a.py'}, produced=900,
+                      shown=900),
+                _call('search_tools', {'query': 'read file'}),
+                _call('write_file', {'path': 'b'}, denied='mode')]
+        rep = lr.build_report(calls=[], tasks=[], turns=[], decisions=[],
+                              labels=[], tool_events=rows, preactivated=PRE)
+        assert rep['tool_smells']['whole_file_after_outline']['count'] == 1
+        md = lr.render_markdown(rep)
+        section = md.split('## Tool usage smells')[1]
+        assert ('- whole-file read_file after an outline of the same path: 1'
+                in section)
+        assert '    - read_file(a.py) after outline [task t1]' in section
+        assert '- search_tools for a pre-activated tool: 1' in section
+        assert '- identical repeated calls within a task: 0' in section
+        assert '- refused calls: 1' in section
+        assert '| write_file/mode | 1 |' in section
+        assert '| read_file | 900 | 900 | 100% |' in section
+
+    def test_script_prints_smells_section(self, tmp_path: Path) -> None:
+        d = tmp_path / 'ledger'
+        _write(d, 'tool_events', '2026-09-25',
+               [_call('write_file', {'path': 'x'}, denied='policy')])
+        proc = subprocess.run([sys.executable, str(SCRIPT), '--dir', str(d)],
+                              capture_output=True, text=True, cwd=REPO_ROOT)
+        assert proc.returncode == 0, proc.stderr
+        assert '## Tool usage smells' in proc.stdout
+        assert '- refused calls: 1' in proc.stdout
+        assert '| write_file/policy | 1 |' in proc.stdout

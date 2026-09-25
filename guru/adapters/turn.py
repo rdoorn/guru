@@ -188,6 +188,9 @@ def _turn_request() -> str:
     return ''
 
 
+# Public name: the sandbox gate hands the turn's request to the reviewer.
+turn_request = _turn_request
+
 _MAILBOX_PREFIXES = ('[joined results]', '[result from')
 
 

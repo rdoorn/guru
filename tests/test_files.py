@@ -463,3 +463,52 @@ class TestAutoGrantKnob:
         finally:
             files.set_path_asker(None)
         assert ok is True and str(tmp_path) in config.ALLOWED_WRITE_DIRS
+
+
+class TestNoiseDirWrites:
+    """No file tool writes under .git / .venv / caches (security review
+    of chunk B): a model must not plant hooks or config through them."""
+
+    def _writable(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', {str(tmp_path)})
+        monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', {str(tmp_path)})
+        monkeypatch.setattr(files, '_show_change', lambda block: None)
+
+    def test_refuse_noise_write(self, tmp_path) -> None:
+        assert files.refuse_noise_write(tmp_path / 'src' / 'a.py') == ''
+        out = files.refuse_noise_write(tmp_path / '.git' / 'hooks' / 'x')
+        assert out.startswith('Refused:') and "'.git'" in out
+        assert "'.venv'" in files.refuse_noise_write(
+            tmp_path / '.venv' / 'lib' / 'x.py')
+
+    def test_write_edit_delete_refused_in_git_dir(self, tmp_path,
+                                                  monkeypatch) -> None:
+        self._writable(tmp_path, monkeypatch)
+        hooks = tmp_path / '.git' / 'hooks'
+        hooks.mkdir(parents=True)
+        out = files.write_file(str(hooks / 'pre-commit'), '#!/bin/sh\n')
+        assert out.startswith('Refused:')
+        assert not (hooks / 'pre-commit').exists()
+        cfg = tmp_path / '.git' / 'config'
+        cfg.write_text('[core]\n')
+        out = files.edit_file(str(cfg), '[core]', '[core]\nfsmonitor = x',
+                              files._sha('[core]\n'))
+        assert out.startswith('Refused:') and cfg.read_text() == '[core]\n'
+        out = files.delete_file(str(cfg))
+        assert out.startswith('Refused:') and cfg.exists()
+        # ordinary paths are unaffected
+        assert files.write_file(str(tmp_path / 'ok.txt'), 'x').startswith(
+            'Wrote')
+
+    def test_public_helper_aliases(self) -> None:
+        assert files.resolve_path is files._resolve
+        assert files.walk_files is files._walk_files
+        assert files.sha_of is files._sha
+        assert files.remember_sha is files._remember_sha
+        assert files.forget_sha is files._forget_sha
+        assert files.write_detail is files._write_detail
+        assert files.will_prompt_write is files._will_prompt_write
+        assert files.show_change is files._show_change
+        assert files.NOISE_DIRS is files._NOISE_DIRS
+        assert files.MAX_FILE_BYTES == files._MAX_FILE_BYTES

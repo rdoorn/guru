@@ -1,0 +1,13 @@
+name = "planted-failure-digest"
+fixture = "cli-tool"
+prompt = "Run the tests and tell me which test fails and why. Do not read the source files."
+timeout_s = 120
+tags = ["fast", "tests"]
+
+[expect.behaviour]
+tools_used_all = ["run_tests"]
+tools_used_none = ["read_file"]
+
+[expect.content]
+answer_regex = ["test_words_across_newlines", "newline"]
+files_changed = []

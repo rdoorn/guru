@@ -300,3 +300,186 @@ class TestControllerDefault:
         assert RoutingSettings().controller is False
         assert RoutingSettings(controller=False,
                                ladders={'default': [rung]}).controller is False
+
+
+class TestToolsPolicyLoader:
+    """load_tools_policy parses a project's .guru/tools.toml (A3)."""
+
+    def _load(self, tmp_path, text: str):
+        from guru.repositories.settings import load_tools_policy
+        p = tmp_path / 'tools.toml'
+        p.write_text(text, encoding='utf-8')
+        return load_tools_policy(p)
+
+    def test_missing_file_is_the_default_policy(self, tmp_path) -> None:
+        from guru.repositories.settings import ToolsPolicy, load_tools_policy
+        pol = load_tools_policy(tmp_path / 'absent.toml')
+        assert pol == ToolsPolicy()
+        assert pol.enabled == set() and pol.disabled == set()
+        assert pol.test_runner == 'pytest' and pol.limits == {}
+
+    def test_default_path_is_config(self, tmp_path, monkeypatch) -> None:
+        from guru.repositories.settings import load_tools_policy
+        p = tmp_path / 'tools.toml'
+        p.write_text('[tools]\ndisabled = ["web_fetch"]\n', encoding='utf-8')
+        monkeypatch.setattr(config, 'TOOLS_POLICY_PATH', p)
+        assert load_tools_policy().disabled == {'web_fetch'}
+
+    def test_full_table(self, tmp_path) -> None:
+        pol = self._load(tmp_path,
+                         '[tools]\nenabled = ["read_file", "run_tests"]\n'
+                         'disabled = ["web_search"]\n'
+                         '[tools.tests]\nrunner = "unittest"\n'
+                         '[tools.limits]\ntimeout_s = 30\nout_kb = 8\n')
+        assert pol.enabled == {'read_file', 'run_tests'}
+        assert pol.disabled == {'web_search'}
+        assert pol.test_runner == 'unittest'
+        assert pol.limits == {'timeout_s': 30, 'out_kb': 8}
+
+    def test_unknown_key_names_the_path(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml') as e:
+            self._load(tmp_path, '[tools]\nenable = ["x"]\n')
+        assert 'enable' in str(e.value)
+
+    def test_unknown_top_level_table(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[routing]\nmode = "x"\n')
+
+    def test_bad_runner(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml') as e:
+            self._load(tmp_path, '[tools.tests]\nrunner = "nose"\n')
+        assert 'nose' in str(e.value) and 'pytest' in str(e.value)
+
+    def test_bad_limits(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools.limits]\ntimeout_s = "slow"\n')
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools.limits]\nram = 4\n')
+
+    def test_lists_must_hold_strings(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools]\nenabled = "read_file"\n')
+
+    def test_invalid_toml_names_the_path(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match='tools.toml'):
+            self._load(tmp_path, '[tools\nx = \n')
+
+    def test_unreadable_file_raises_not_defaults(self, tmp_path) -> None:
+        from guru.repositories.settings import load_tools_policy
+        d = tmp_path / 'tools.toml'
+        d.mkdir()                     # exists but cannot be read as a file
+        with pytest.raises(ValueError, match='tools.toml'):
+            load_tools_policy(d)
+
+
+class TestSandboxSettings:
+    """load_sandbox merges settings.toml [sandbox] with .guru/sandbox.toml
+    (project wins; ``enabled`` only from the project file)."""
+
+    PIN = 'python:3.12-slim@sha256:' + 'b' * 64
+
+    def _project_file(self, tmp_path, text: str):
+        p = tmp_path / 'sandbox.toml'
+        p.write_text(text, encoding='utf-8')
+        return p
+
+    def test_defaults(self, tmp_path) -> None:
+        from guru.repositories.settings import (
+            DEFAULT_BASE_IMAGE, DEFAULT_PROXY_IMAGE, SandboxSettings,
+            load_sandbox)
+        s = load_sandbox({}, tmp_path / 'absent.toml')
+        assert s == SandboxSettings()
+        assert s.enabled is False and s.runtime == 'docker'
+        assert s.base_image == DEFAULT_BASE_IMAGE
+        assert '@sha256:' in DEFAULT_BASE_IMAGE
+        assert '@sha256:' in DEFAULT_PROXY_IMAGE
+        assert (s.cpus, s.memory_mb, s.pids, s.timeout_s) == (
+            2.0, 2048, 256, 600)
+
+    def test_default_paths_are_config(self, tmp_path, monkeypatch) -> None:
+        from guru.repositories.settings import load_sandbox
+        monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH',
+                            tmp_path / 'settings.toml')
+        (tmp_path / 'settings.toml').write_text(
+            '[sandbox]\ncpus = 4\n', encoding='utf-8')
+        p = self._project_file(tmp_path, '[sandbox]\nenabled = true\n')
+        monkeypatch.setattr(config, 'SANDBOX_POLICY_PATH', p)
+        s = load_sandbox()
+        assert s.enabled is True and s.cpus == 4.0
+
+    def test_project_file_wins_key_by_key(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        p = self._project_file(
+            tmp_path, f'[sandbox]\nenabled = true\nmemory_mb = 512\n'
+                      f'base_image = "{self.PIN}"\n')
+        s = load_sandbox({'cpus': 1.5, 'memory_mb': 4096, 'pids': 32}, p)
+        assert s.enabled is True
+        assert s.cpus == 1.5 and s.pids == 32          # global kept
+        assert s.memory_mb == 512                        # project wins
+        assert s.base_image == self.PIN
+
+    def test_enabled_only_from_the_project_file(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        with pytest.raises(ValueError, match='enabled') as e:
+            load_sandbox({'enabled': True}, tmp_path / 'absent.toml')
+        assert 'sandbox.toml' in str(e.value)
+        p = self._project_file(tmp_path, '[sandbox]\nenabled = "yes"\n')
+        with pytest.raises(ValueError, match='enabled'):
+            load_sandbox({}, p)
+
+    def test_absent_project_file_stays_disabled(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        assert load_sandbox({'cpus': 1}, tmp_path / 'nope.toml').enabled \
+            is False
+
+    def test_unknown_key_named(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        with pytest.raises(ValueError, match='cpu_count'):
+            load_sandbox({'cpu_count': 2}, tmp_path / 'absent.toml')
+        p = self._project_file(tmp_path, '[sandbox]\nmemory = 1\n')
+        with pytest.raises(ValueError, match='sandbox.toml') as e:
+            load_sandbox({}, p)
+        assert 'memory' in str(e.value)
+
+    def test_unknown_table_in_project_file(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        p = self._project_file(tmp_path, '[tools]\nx = 1\n')
+        with pytest.raises(ValueError, match='sandbox.toml'):
+            load_sandbox({}, p)
+
+    def test_invalid_toml_and_unreadable_file(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        p = self._project_file(tmp_path, '[sandbox\nx = \n')
+        with pytest.raises(ValueError, match='sandbox.toml'):
+            load_sandbox({}, p)
+        d = tmp_path / 'dir.toml'
+        d.mkdir()
+        with pytest.raises(ValueError, match='dir.toml'):
+            load_sandbox({}, d)
+
+    @pytest.mark.parametrize('key', ['base_image', 'proxy_image'])
+    @pytest.mark.parametrize('value', ['python:3.12-slim', 'x@sha256: y', 7])
+    def test_images_must_be_digest_pinned(self, tmp_path, key, value):
+        from guru.repositories.settings import load_sandbox
+        with pytest.raises(ValueError, match=key):
+            load_sandbox({key: value}, tmp_path / 'absent.toml')
+
+    def test_bad_runtime(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        with pytest.raises(ValueError, match='runtime') as e:
+            load_sandbox({'runtime': 'podman'}, tmp_path / 'absent.toml')
+        assert 'docker' in str(e.value)
+
+    @pytest.mark.parametrize('key,value', [
+        ('cpus', 0), ('cpus', '2'), ('cpus', True), ('memory_mb', 0),
+        ('memory_mb', 2.5), ('memory_mb', True), ('pids', -1),
+        ('timeout_s', 'soon'), ('timeout_s', 0)])
+    def test_bad_numbers(self, tmp_path, key, value) -> None:
+        from guru.repositories.settings import load_sandbox
+        with pytest.raises(ValueError, match=key):
+            load_sandbox({key: value}, tmp_path / 'absent.toml')
+
+    def test_cpus_accepts_int_and_float(self, tmp_path) -> None:
+        from guru.repositories.settings import load_sandbox
+        assert load_sandbox({'cpus': 3}, tmp_path / 'x').cpus == 3.0
+        assert load_sandbox({'cpus': 0.5}, tmp_path / 'x').cpus == 0.5

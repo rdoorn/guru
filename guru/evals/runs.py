@@ -7,6 +7,8 @@ runner hands over a :class:`Run`.
 from __future__ import annotations
 
 import json
+import math
+import statistics
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 TRAJECTORY_FILE = 'TRAJECTORY.md'
+RUBRIC_MAX = 2                   # points per graded case
 _TRAJECTORY_HEADER = (
     '# Eval trajectory\n\n'
     'One row per recorded run (appended by `python -m guru.evals run`).\n\n'
@@ -35,6 +38,11 @@ class CaseResult:
     # ledger ``tasks`` rows); empty when nothing was spawned or for run
     # files from before this field.
     routes: list[str] = field(default_factory=list)
+    # The rubric judge's grade (0-2) and its one-line reason; None / '' when
+    # the case has no rubric or no judge graded it. A failed grading keeps
+    # ``rubric_score`` None and puts ``error: ...`` in ``rubric_reason``.
+    rubric_score: Optional[int] = None
+    rubric_reason: str = ''
 
     @property
     def seconds(self) -> float:
@@ -61,6 +69,8 @@ class Run:
     # Judges the experiment file's [decisions] table installed for the run,
     # as ``point=judge name`` (empty: none configured or none available).
     judges: list[str] = field(default_factory=list)
+    # The rubric judge's ``Adapter|model`` ('' = no grading this run).
+    rubric: str = ''
 
     def model_label(self) -> str:
         """``Adapter|model`` plus ``@<ctx>`` when the context is known,
@@ -91,6 +101,15 @@ class Run:
         if not self.cases:
             return 0.0
         return sum(c.seconds for c in self.cases) / len(self.cases)
+
+    def rubric_total(self) -> Optional[tuple[int, int]]:
+        """``(points, maximum)`` over the graded cases (two points per
+        case); None when no case was graded."""
+        graded = [c.rubric_score for c in self.cases
+                  if c.rubric_score is not None]
+        if not graded:
+            return None
+        return sum(graded), RUBRIC_MAX * len(graded)
 
 
 def ctx_label(num_ctx: int) -> str:
@@ -187,6 +206,61 @@ def compare(old: Run, new: Run) -> dict[str, Any]:
                        'cost_usd': _delta(o[c].cost_usd, n[c].cost_usd)}
                    for c in both},
     }
+
+
+# --- repeated runs -----------------------------------------------------------
+
+def _mean_spread(values: list[float]) -> tuple[float, float]:
+    """``(mean, sample standard deviation)``; the spread is 0.0 for fewer
+    than two values."""
+    mean = statistics.fmean(values)
+    spread = statistics.stdev(values) if len(values) > 1 else 0.0
+    return mean, spread
+
+
+def required_passes(repeats: int) -> int:
+    """How often a case must pass over ``repeats`` runs: ``ceil(N/2)``
+    (1 of 1, 2 of 3, 3 of 5)."""
+    return math.ceil(max(int(repeats), 0) / 2)
+
+
+def aggregate(run_list: list[Run]) -> dict[str, dict[str, Any]]:
+    """Per case over several runs of the same selection.
+
+    ``{case: {'passes', 'runs', 'seconds': (mean, spread), 'cost_usd':
+    (mean, spread) | None, 'rubric_mean': float | None}}`` in the order
+    the cases first appear. ``runs`` counts the runs the case appears in
+    (a case missing from a run is not a failure, it is absent); the cost
+    is None when any of its runs has no known cost; ``rubric_mean``
+    averages the graded runs only. The spread is the sample standard
+    deviation (0.0 for a single run).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    per_case: dict[str, list[CaseResult]] = {}
+    for run in run_list:
+        for c in run.cases:
+            per_case.setdefault(c.case, []).append(c)
+    for name, results in per_case.items():
+        costs = [c.cost_usd for c in results]
+        graded = [float(c.rubric_score) for c in results
+                  if c.rubric_score is not None]
+        out[name] = {
+            'passes': sum(1 for c in results if c.passed),
+            'runs': len(results),
+            'seconds': _mean_spread([c.seconds for c in results]),
+            'cost_usd': (None if any(v is None for v in costs)
+                         else _mean_spread([float(v) for v in costs
+                                            if v is not None])),
+            'rubric_mean': (statistics.fmean(graded) if graded else None),
+        }
+    return out
+
+
+def aggregate_ok(agg: dict[str, dict[str, Any]], repeats: int) -> bool:
+    """True when every case passed at least :func:`required_passes` times
+    (vacuously for an empty aggregate, as ``all`` over no cases)."""
+    need = required_passes(repeats)
+    return all(v['passes'] >= need for v in agg.values())
 
 
 def _cell(text: str) -> str:

@@ -1385,3 +1385,280 @@ class TestLabelsTieBreaker:
         o._make_child(main, 'review it', kind='review', complexity='standard')
         assert [(s[0], s[1], s[4]) for s in seen] == [
             ('labels', ['complexity', 'kind'], ['standard', 'review'])]
+
+
+def _tiers_orch(type_router: bool = True):
+    """An orchestrator over the default block's ladders (Haiku / Sonnet /
+    Opus plus the review ladder) on one remote adapter, spend pre-granted;
+    the main agent runs Haiku on the same adapter."""
+    import tomllib
+    from guru.orchestrator import Orchestrator
+    from guru.repositories import settings as rs
+    from guru.repositories.adapters import AdapterRegistry
+    text = rs.default_routing_toml('SBP Litellm', 'litellm',
+                                   judges_available=True)
+    settings = rs.load_routing(tomllib.loads(text)['routing'])
+    settings.spend_confirm = 'auto'
+    settings.type_router = type_router
+    registry = AdapterRegistry([_fake_adapter('SBP Litellm', True)])
+    o = Orchestrator(registry=registry, routing=settings)
+    main = o.manager.active
+    main.busy = True
+    main.state.adapter = registry.get('SBP Litellm')
+    main.state.model = 'aws/claude-4-5-haiku'
+    main.state.turn_id = 'T1'
+    return o, main
+
+
+class TestReviewLadder:
+    """Item 6: review-kind tasks resolve on the ``review`` ladder of the
+    default block (type_router on); every other kind on the default."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch, labels_isolated):
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
+
+    @pytest.mark.parametrize('complexity, model', [
+        ('trivial', 'aws/claude-5-sonnet'),
+        ('standard', 'aws/claude-5-sonnet'),
+        ('hard', 'aws/claude-5-5-opus')])
+    def test_review_never_runs_on_haiku(self, fake_repo, complexity,
+                                        model) -> None:
+        o, main = _tiers_orch()
+        child = o._make_child(main, 'review the adapters', kind='review',
+                              complexity=complexity)
+        assert child.state.model == model
+        assert child.task_rec.route['ladder'] == 'review'
+
+    def test_spawn_panel_tasks_take_the_review_ladder(self, fake_repo):
+        o, main = _tiers_orch()
+        o.loop = _FakeLoop()
+        o.launch = lambda a: None                       # type: ignore
+        o.spawn_panel(main, config.review_tasks('X'))
+        ledger.flush()
+        rows = fake_repo.stream('tasks')
+        assert len(rows) == 2
+        assert {r['route']['ladder'] for r in rows} == {'review'}
+        assert {r['model'] for r in rows} == {'aws/claude-5-sonnet'}
+
+    def test_other_kinds_use_the_default_ladder(self, fake_repo) -> None:
+        o, main = _tiers_orch()
+        child = o._make_child(main, 'where is X defined', kind='explain',
+                              complexity='trivial')
+        assert child.state.model == 'aws/claude-4-5-haiku'
+        assert child.task_rec.route['ladder'] == 'default'
+
+    def test_type_router_off_ignores_the_review_ladder(self, fake_repo):
+        o, main = _tiers_orch(type_router=False)
+        child = o._make_child(main, 'review it', kind='review',
+                              complexity='trivial')
+        assert child.state.model == 'aws/claude-4-5-haiku'
+        assert child.task_rec.route['ladder'] == 'default'
+
+    def test_set_routing_rebuilds_the_ladders(self, fake_repo) -> None:
+        from guru.repositories import settings as rs
+        o, main = _tiers_orch()
+        assert set(o.ladders()) == {'default', 'review'}
+        o.set_routing(rs.RoutingSettings(off=True))
+        assert o.ladders() == {}
+        child = o._make_child(main, 'review it', kind='review')
+        assert child.state.model == 'aws/claude-4-5-haiku'    # parent's
+        assert child.task_rec.route['ladder'] == ''
+
+
+class _FakeLoop:
+    """Runs ``call_soon_threadsafe`` callbacks inline."""
+
+    def call_soon_threadsafe(self, fn, *args) -> None:
+        fn(*args)
+
+
+class _SecurityJudge:
+    """Noul judge answering P(yes) = ``p`` to every question; records
+    the question ids it saw."""
+    name = 'sec'
+
+    def __init__(self, p: float) -> None:
+        self.p, self.seen = p, []
+
+    def ask(self, questions):
+        from guru.domain import decisions
+        self.seen.extend(q.id for q in questions)
+        return [decisions.Answer(chosen=self.p >= 0.5,
+                                 dist={'yes': self.p, 'no': 1 - self.p},
+                                 confidence=1.0, judge=self.name, ms=1)
+                for _ in questions]
+
+
+class TestPanelSecurityWorker:
+    """With ``panel`` active, a review-kind spawn without a security
+    reviewer gets one extra security-engineer worker when the judge says
+    ``needs_security``; once per parent turn, marked ``origin:panel``."""
+
+    @pytest.fixture(autouse=True)
+    def _active(self, monkeypatch, labels_isolated):
+        from guru.domain import decisions
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'active')
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'panel': True})
+        monkeypatch.setattr(config, 'DECISIONS_THRESHOLDS', {})
+        monkeypatch.setattr(config, 'DECISIONS_TIMEOUT_MS', 1000)
+        decisions.reset_breakers()
+
+    def _spawn(self, o, main, task: str, **kw) -> str:
+        if not hasattr(o, 'launched'):
+            o.loop = _FakeLoop()
+            o.launched = []
+            o.launch = o.launched.append                   # type: ignore
+        token = session.use(main.state)
+        try:
+            return o.spawn(task, **kw)
+        finally:
+            session.reset(token)
+
+    def _rows(self, fake_repo) -> list:
+        from guru.domain import decisions
+        decisions.flush()
+        ledger.flush()
+        return fake_repo.stream('tasks')
+
+    def test_yes_adds_one_security_worker(self, fake_repo) -> None:
+        from guru.domain import decisions
+        from guru.orchestrator import PANEL_ORIGIN
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        out = self._spawn(o, main, 'review upload.py', kind='review',
+                          complexity='hard', role='developer',
+                          skill='code-review')
+        assert judge.seen == ['needs_security']
+        assert [a.title for a in o.launched] == ['agent1', 'agent2']
+        assert o.manager.agents[1:] == o.launched
+        extra = o.launched[1]
+        assert extra.state.active_role == 'security-engineer'
+        assert extra.state.active_skill == 'code-review'
+        assert extra.parent is main and extra.task.startswith(
+            'review upload.py')
+        assert 'security' in extra.task
+        assert extra.state.model == 'aws/claude-5-5-opus'   # same complexity
+        assert 'agent2 (security-engineer)' in out and 'join it' in out
+        rows = self._rows(fake_repo)
+        assert [r['role'] for r in rows] == ['developer', 'security-engineer']
+        assert rows[1]['reason'][0] == PANEL_ORIGIN
+        assert rows[1]['origin'] == 'panel' and rows[0]['origin'] == ''
+        assert extra.task_rec.origin == 'panel'
+        assert rows[1]['kind'] == 'review' and rows[1]['complexity'] == 'hard'
+        assert rows[1]['route']['ladder'] == 'review'
+        assert PANEL_ORIGIN not in rows[0]['reason']
+        decision = [r for r in fake_repo.stream('decisions')
+                    if r['point'] == 'panel']
+        assert decision and decision[0]['used'] == 'judge'
+
+    def test_no_means_no_extra(self, fake_repo) -> None:
+        from guru.domain import decisions
+        decisions.set_judge('panel', _SecurityJudge(0.1))
+        o, main = _tiers_orch()
+        out = self._spawn(o, main, 'review docs', kind='review')
+        assert [a.title for a in o.launched] == ['agent1']
+        assert 'security-engineer' not in out
+
+    def test_only_review_kind_is_asked(self, fake_repo) -> None:
+        from guru.domain import decisions
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'fix the auth bug', kind='debug')
+        assert judge.seen == [] and len(o.launched) == 1
+
+    def test_security_role_already_spawned_skips_the_judge(self, fake_repo):
+        from guru.domain import decisions
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'review auth for security', kind='review',
+                    role='security-engineer', skill='code-review')
+        self._spawn(o, main, 'review auth for correctness', kind='review',
+                    role='developer')
+        assert judge.seen == [] and len(o.launched) == 2
+
+    def test_security_skill_counts_too(self, fake_repo) -> None:
+        from guru.domain import decisions
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'review auth', kind='review', role='developer',
+                    skill='security-review')
+        assert judge.seen == [] and len(o.launched) == 1
+
+    def test_at_most_one_extra_per_turn(self, fake_repo) -> None:
+        from guru.domain import decisions
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'review a.py', kind='review')
+        self._spawn(o, main, 'review b.py', kind='review')
+        assert judge.seen == ['needs_security']
+        assert len(o.launched) == 3
+        main.state.turn_id = 'T2'                    # a new turn asks again
+        self._spawn(o, main, 'review c.py', kind='review')
+        assert judge.seen == ['needs_security', 'needs_security']
+        assert len(o.launched) == 5
+
+    def test_earlier_security_child_in_the_turn_is_seen(self, fake_repo):
+        from guru.domain import decisions
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        earlier = o._make_child(main, 'review auth', role='security-engineer',
+                                skill='code-review', kind='review')
+        o.manager.agents.append(earlier)
+        self._spawn(o, main, 'review api', kind='review')
+        assert judge.seen == [] and len(o.launched) == 1
+
+    def test_shadow_mode_changes_nothing(self, monkeypatch, fake_repo):
+        from guru.domain import decisions
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'review upload.py', kind='review')
+        decisions.flush()
+        assert judge.seen == [] and len(o.launched) == 1
+
+    def test_panel_not_active_changes_nothing(self, monkeypatch, fake_repo):
+        from guru.domain import decisions
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'labels': True})
+        judge = _SecurityJudge(0.9)
+        decisions.set_judge('panel', judge)
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'review upload.py', kind='review')
+        decisions.flush()
+        assert judge.seen == [] and len(o.launched) == 1
+
+    def test_no_judge_installed_adds_nothing(self, fake_repo) -> None:
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'review upload.py', kind='review')
+        assert len(o.launched) == 1
+
+    def test_judge_error_adds_nothing(self, fake_repo) -> None:
+        from guru.domain import decisions
+
+        class Boom:
+            name = 'boom'
+
+            def ask(self, questions):
+                raise RuntimeError('no judge today')
+        decisions.set_judge('panel', Boom())
+        o, main = _tiers_orch()
+        self._spawn(o, main, 'review upload.py', kind='review')
+        assert len(o.launched) == 1
+
+    def test_inert_routing_still_adds_the_worker(self, fake_repo) -> None:
+        from guru.domain import decisions
+        from guru.orchestrator import Orchestrator
+        decisions.set_judge('panel', _SecurityJudge(0.9))
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        self._spawn(o, main, 'review upload.py', kind='review')
+        assert [a.state.active_role for a in o.launched] == [
+            None, 'security-engineer']

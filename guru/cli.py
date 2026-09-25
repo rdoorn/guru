@@ -5,6 +5,7 @@ buffer, sub-agents in a full-screen viewer). The slash-command helpers here are
 reused by that UI.
 """
 import argparse
+from pathlib import Path
 from typing import Optional
 
 from guru import config, judges, session, ui
@@ -45,6 +46,7 @@ def _instantiate(cfg: dict):
             profile=cfg.get('profile'),
             models=cfg.get('models'),
             thinking=cfg.get('thinking', True),
+            cache=cfg.get('cache', True),
         )
     if kind == 'litellm':
         return LiteLLMAdapter(
@@ -53,6 +55,7 @@ def _instantiate(cfg: dict):
             api_key_env=cfg.get('api_key_env'),
             api_key=cfg.get('api_key'),
             models=cfg.get('models'),
+            cache=cfg.get('cache', True),
         )
     return None
 
@@ -101,6 +104,26 @@ def load_routing() -> routing_settings.RoutingSettings:
     config.SECRET_SCAN = scan
     policy.set_scanner(load_project_scanner() if scan else None)
     return routing
+
+
+def load_tools_policy() -> tools.ToolsPolicy:
+    """The project's ``.guru/tools.toml`` policy.
+
+    An absent file is the default (everything enabled). A file that is
+    present but invalid or unreadable FAILS CLOSED: every registry tool is
+    disabled (the always-on tools stay) and a warning names the file, so a
+    typo in a policy meant to restrict tools never widens them.
+    """
+    from guru import log
+    try:
+        return routing_settings.load_tools_policy()
+    except ValueError as e:
+        log.warning('%s; failing closed: every registry tool disabled', e)
+        ui.console.print(
+            f"[yellow]{e}; every registry tool is disabled until the file "
+            "is fixed or removed.[/yellow]")
+        return tools.ToolsPolicy(enabled=set(),
+                                 disabled=set(tools.TOOL_REGISTRY))
 
 
 def _enabled_adapters() -> list:
@@ -271,6 +294,7 @@ def _adapters_command() -> None:
 
     ADAPTERS = _build_adapters()
     REGISTRY = build_registry(ADAPTERS)
+    judges.set_registry(REGISTRY)
     for adapter in ADAPTERS:
         if not adapter.enabled:
             continue
@@ -358,6 +382,22 @@ def _label_command(label: str, note: str = '') -> None:
         + (f": {note}" if note else ''))
 
 
+def _turn_line(turn_id: str) -> str:
+    """The per-turn cost line for ``turn_id`` (``ledger.format_turn_line``
+    over this process's call rows), or ``''`` when ``[ledger] turn_line``
+    is off or the turn made no calls."""
+    if not config.LEDGER_TURN_LINE or not turn_id:
+        return ''
+    return ledger.format_turn_line(ledger.turn_summary(turn_id))
+
+
+def _session_line() -> str:
+    """The exit summary: every call this process made, or ``''``."""
+    if not config.LEDGER_TURN_LINE:
+        return ''
+    return ledger.format_turn_line(ledger.session_summary(), 'session')
+
+
 def _format_run_summary(summary: dict) -> str:
     """Plain-text rendering of :func:`ledger.run_summary` for ``/ledger``."""
     def money(v: Optional[float]) -> str:
@@ -407,6 +447,342 @@ def _ledger_command() -> None:
                                  ledger.RUN_ID)
     ui.console.print(_format_run_summary(summary), markup=False,
                      highlight=False)
+
+
+_ARGS_COL = 44                       # width of the args column in /tools
+
+
+def _args_head(args: object) -> str:
+    """``k=v`` pairs of a tool_events ``args`` dict, cut to the column."""
+    if not isinstance(args, dict):
+        return str(args or '')[:_ARGS_COL]
+    text = ' '.join(f"{k}={' '.join(str(v).split())}" for k, v in args.items())
+    return text if len(text) <= _ARGS_COL else text[:_ARGS_COL - 1] + '…'
+
+
+def _format_tool_events(rows: list) -> str:
+    """Plain-text table of tool_events rows for ``/tools``: tool, args
+    head, seconds, bytes shown/produced and the denial (if any)."""
+    header = f"{'tool':<22} {'args':<{_ARGS_COL}} {'secs':>7}  " \
+             f"{'shown/produced':>16}  denied"
+    lines = [header]
+    for r in rows:
+        secs = r.get('seconds')
+        ratio = f"{r.get('shown_bytes') or 0}/{r.get('produced_bytes') or 0}"
+        lines.append(
+            f"{str(r.get('tool') or '?'):<22} "
+            f"{_args_head(r.get('args')):<{_ARGS_COL}} "
+            f"{('?' if secs is None else f'{float(secs):.2f}'):>7}  "
+            f"{ratio:>16}  {r.get('denied') or ''}".rstrip())
+    return '\n'.join(lines)
+
+
+def _tools_command() -> None:
+    """``/tools``: print the last turn's tool calls from the audit stream."""
+    repo = ledger.repository()
+    rows_fn = getattr(repo, 'rows', None)
+    if repo is None or not callable(rows_fn) or not config.LEDGER_ENABLED:
+        ui.console.print('[yellow]No readable ledger repository.[/yellow]')
+        return
+    turn_id = session.turn_id
+    ledger.flush()                       # queued rows land before we read
+    rows = [r for r in rows_fn('tool_events', run_id=ledger.RUN_ID)
+            if turn_id and r.get('turn_id') == turn_id]
+    if not rows:
+        ui.console.print('[dim]No tool calls in the last turn.[/dim]')
+        return
+    ui.console.print(_format_tool_events(rows), markup=False,
+                     highlight=False)
+
+
+def _sandbox_status(project: Optional[Path] = None) -> str:
+    """Plain-text ``/sandbox status``: runtime availability, the project's
+    sandbox settings/spec, and the recorded image (tag, digest, built_at,
+    whether a build is needed). Never raises: each broken part is one
+    line."""
+    from guru.domain import sandbox as sb
+    from guru.repositories import sandbox_images as images
+    from guru.repositories.settings import load_sandbox
+    from guru.sandbox import colima
+    root = Path(project) if project is not None \
+        else config.PROJECT_GURU_DIR.parent
+    lines = ['sandbox status']
+    lines.append('runtime: docker '
+                 + ('available' if colima.available(root) else
+                    'unavailable (docker info failed; is Colima running?)'))
+    policy_path = config.SANDBOX_POLICY_PATH
+    try:
+        settings = load_sandbox()
+    except ValueError as e:
+        lines.append(f'settings: invalid: {e}')
+        return '\n'.join(lines)
+    lines.append(f"project file: {policy_path} "
+                 f"{'present' if policy_path.is_file() else 'absent'}; "
+                 f"enabled: {'yes' if settings.enabled else 'no'}")
+    try:
+        spec = sb.spec_from(root, settings)
+    except ValueError as e:
+        lines.append(f'spec: none ({e})')
+        return '\n'.join(lines)
+    lines.append(f'spec: {sb.spec_summary(spec)}')
+    lines.append(f'base image: {spec.base_image}')
+    try:
+        dockerfile = sb.dockerfile_for(spec.project, spec.base_image)
+    except ValueError as e:
+        lines.append(f'dockerfile: cannot generate ({e})')
+        return '\n'.join(lines)
+    rec = images.load_record(spec)
+    if rec is None:
+        lines.append('image: not built (records in '
+                     f'{images.record_dir(spec)})')
+    else:
+        lines.append(f'image: {rec.tag} digest {rec.digest} '
+                     f'built {rec.built_at}')
+    lines.append('needs build: '
+                 + ('yes' if images.needs_build(spec, dockerfile) else 'no'))
+    pending = images.pending_requests(spec)
+    lines.append('pending dependency requests: '
+                 + (', '.join(r.spec for r in pending) if pending
+                    else 'none'))
+    lines.extend(_sandbox_copies(spec))
+    return '\n'.join(lines)
+
+
+def _sandbox_copies(spec) -> list:
+    """``task copies`` lines: the live per-task working copies of this
+    process, then any other copy directory left under the work root."""
+    from guru.repositories import sandbox_images as images
+    from guru.sandbox import colima, verbs
+    live = {path.resolve(): key for key, path in verbs.copies().items()
+            if key[0] == str(spec.project)}
+    rows = [f'  {path} (task {key[1]})' for path, key in live.items()]
+    root = images.work_root(spec)
+    if root.is_dir():
+        for child in sorted(root.iterdir()):
+            if (child.resolve() not in live
+                    and (child / colima.COPY_MARKER).is_file()):
+                rows.append(f'  {child} (stale; safe to delete)')
+    return ['task copies: ' + ('none' if not rows else '')] + rows
+
+
+_GATE_ROWS = 10
+
+
+def _sandbox_gate() -> str:
+    """Plain-text ``/sandbox gate``: this run's last submit verdicts
+    (``sandbox_events`` kind ``submit``) and the reviewer's ``decisions``
+    rows for the ``gate`` point."""
+    repo = ledger.repository()
+    rows_fn = getattr(repo, 'rows', None)
+    if repo is None or not callable(rows_fn) or not config.LEDGER_ENABLED:
+        return 'sandbox gate: no readable ledger repository'
+    ledger.flush()
+    submits = [r for r in rows_fn('sandbox_events', run_id=ledger.RUN_ID)
+               if r.get('kind') == 'submit'][-_GATE_ROWS:]
+    reviews = [r for r in rows_fn('decisions', run_id=ledger.RUN_ID)
+               if r.get('point') == 'gate'][-_GATE_ROWS:]
+    lines = ['gate verdicts (last submits):']
+    if not submits:
+        lines.append('  none this run')
+    for r in submits:
+        argv = r.get('argv') or []
+        intent = argv[1] if len(argv) > 1 else ''
+        lines.append(f"  {r.get('ts', '?')} agent {r.get('agent', '?')}: "
+                     f"{r.get('detail', '')}  [intent: {intent}]")
+    lines.append('reviewer rows (decisions/gate):')
+    if not reviews:
+        lines.append('  none this run')
+    for r in reviews:
+        dist = r.get('dist') or {}
+        answers = ', '.join(f'{k}={v}' for k, v in dist.items()
+                            if k != 'notes')
+        lines.append(f"  {r.get('ts', '?')} {r.get('judge', '?')}: "
+                     f"used={r.get('used')} chosen={r.get('chosen')}"
+                     + (f" fallback={r['fallback_reason']}"
+                        if r.get('fallback_reason') else '')
+                     + (f' ms={r["ms"]}' if r.get('ms') is not None else '')
+                     + (f'  {answers}' if answers else '')
+                     + (f"  error={r['error']}" if r.get('error') else ''))
+    return '\n'.join(lines)
+
+
+_SANDBOX_USAGE = ('usage: /sandbox status | provision [--force] | gate | deps '
+                  '| deps request <name>[<constraint>] | deps apply <name>')
+
+
+def _sandbox_provision(force: bool = False) -> str:
+    """Plain-text ``/sandbox provision``: build the project's sandbox image
+    through the provisioning proxy (or confirm the recorded one)."""
+    from guru.repositories.settings import load_sandbox
+    from guru.sandbox import provision
+    root = config.PROJECT_GURU_DIR.parent
+    try:
+        settings = load_sandbox()
+        rec = provision.provision(root, settings, force=force)
+    except (ValueError, provision.ProvisionError) as e:
+        return f'sandbox provision failed: {e}'
+    return (f'sandbox image {rec.tag} digest {rec.digest} built '
+            f'{rec.built_at} (lockfile {rec.lockfile_sha[:12]})')
+
+
+def _split_requirement(text: str) -> tuple:
+    """``('six', '>=1.16')`` from ``six>=1.16``: the name ends at the first
+    version operator character."""
+    spec = text.strip().strip('"\'')
+    for i, ch in enumerate(spec):
+        if ch in '=<>!~':
+            return spec[:i], spec[i:]
+    return spec, ''
+
+
+def _sandbox_deps(args: str) -> str:
+    """Plain-text ``/sandbox deps [request <spec> | apply <name>]``."""
+    from guru.domain import sandbox as sb
+    from guru.repositories import sandbox_images as images
+    from guru.repositories.settings import load_sandbox
+    from guru.sandbox import provision
+    root = config.PROJECT_GURU_DIR.parent
+    words = args.split(None, 1)
+    verb = words[0] if words else ''
+    rest = words[1].strip() if len(words) > 1 else ''
+    try:
+        settings = load_sandbox()
+        spec = sb.spec_from(root, settings)
+        if verb == '':
+            pending = images.pending_requests(spec)
+            if not pending:
+                return 'sandbox deps: no pending dependency requests'
+            return 'pending dependency requests:\n' + '\n'.join(
+                f'  {r.spec}  (requested {r.requested_at}; apply with '
+                f'/sandbox deps apply {r.name})' for r in pending)
+        if verb == 'request' and rest:
+            name, constraint = _split_requirement(rest)
+            return provision.request_dependency(name, constraint,
+                                                project=root,
+                                                settings=settings)
+        if verb == 'apply' and rest:
+            from guru.domain import deps
+            key = deps.normalise(rest)
+            match = [r for r in images.pending_requests(spec)
+                     if r.key == key]
+            if not match:
+                return f"sandbox deps: no pending request named '{rest}'"
+            return provision.apply_dependency(root, match[0], settings)
+    except (ValueError, OSError, RuntimeError,
+            provision.ProvisionError) as e:
+        # One line, never a traceback: bad settings/lockfile, an
+        # unreadable store, a copy or docker failure.
+        return f'sandbox deps: {verb or "list"} failed: {e}'
+    return _SANDBOX_USAGE
+
+
+def _sandbox_command(args: str = '') -> None:
+    """``/sandbox status | provision [--force] | gate | deps …``."""
+    words = (args or '').split()
+    sub = words[0] if words else 'status'
+    rest = ' '.join(words[1:])
+    if sub == 'status' and not rest:
+        text = _sandbox_status()
+    elif sub == 'gate' and not rest:
+        text = _sandbox_gate()
+    elif sub == 'provision' and rest in ('', '--force'):
+        text = _sandbox_provision(force=rest == '--force')
+    elif sub == 'deps':
+        text = _sandbox_deps(rest)
+    else:
+        text = f"Unknown /sandbox command '{args.strip()}'; {_SANDBOX_USAGE}"
+    ui.console.print(text, markup=False, highlight=False)
+
+
+_ROUTING_USAGE = 'usage: /routing [on | off]'
+
+
+def _format_routing(settings: routing_settings.RoutingSettings,
+                    path: Path) -> str:
+    """Plain-text ``/routing``: mode and flags, every ladder's rungs, and
+    the judge per decision point with its mode (active / shadow) and
+    whether it is installed. ``settings`` is the ``full`` load, so an
+    ``off`` table still lists its ladders."""
+    from guru.domain import decisions
+    if not settings.present:
+        return (f'routing: not configured (no [routing] table in {path}); '
+                'guru writes the default block at startup when a remote '
+                'adapter is enabled')
+    if settings.off:
+        head = f'routing: off (mode = "off" in {path}; /routing on to enable)'
+    else:
+        head = f'routing: on (mode {settings.mode})'
+    flag = {True: 'on', False: 'off'}
+    lines = [head,
+             f"controller {flag[bool(settings.controller)]} · complexity "
+             f"router {flag[settings.complexity_router]} · type router "
+             f"{flag[settings.type_router]} · spend {settings.spend_confirm}"
+             f" · secret scan {flag[settings.secret_scan]}"]
+    for name, specs in settings.ladders.items():
+        kind = '' if name == 'default' else f' (kind {name})'
+        lines.append(f'ladder {name}{kind}:')
+        width = max((len(f'{r.adapter} | {r.model}') for r in specs),
+                    default=0)
+        for r in specs:
+            lines.append(f"  {f'{r.adapter} | {r.model}':<{width}}  up to "
+                         f"{r.max_complexity}"
+                         + ('  (default rung)' if r.default else ''))
+    if not settings.ladders:
+        lines.append('ladders: none')
+    if config.DECISIONS_MODE not in config.JUDGING_MODES:
+        lines.append(f'judges: off (decisions mode {config.DECISIONS_MODE})')
+    else:
+        parts = []
+        for point, spec in config.DECISIONS_POINTS.items():
+            state = 'active' if decisions.active(point) else 'shadow'
+            have = ('installed' if decisions.judge_for(point) is not None
+                    else 'not installed')
+            parts.append(f'{point} {state} ({spec}, {have})')
+        lines.append(f'judges: decisions mode {config.DECISIONS_MODE}'
+                     + (' · ' + ' · '.join(parts) if parts else
+                        ' · no points configured'))
+    lines.append(f'file: {path}')
+    return '\n'.join(lines)
+
+
+def _routing_command(args: str = ''
+                     ) -> Optional[routing_settings.RoutingSettings]:
+    """``/routing`` prints the routing in force; ``/routing off`` and
+    ``/routing on`` flip ``mode`` in the settings file
+    (:func:`routing_settings.switch_routing`) and reload it into the
+    process (scanner, ``config.SECRET_SCAN``, the judges' registry).
+
+    Returns the reloaded RoutingSettings after a switch, so the caller can
+    hand it to the orchestrator (``Orchestrator.set_routing``); None when
+    nothing changed.
+    """
+    word = (args or '').strip().lower()
+    path = config.GLOBAL_SETTINGS_PATH
+    reloaded = None
+    if word in ('on', 'off'):
+        try:
+            mode = routing_settings.switch_routing(word == 'on', path)
+        except ValueError as e:
+            ui.console.print(str(e), style='yellow', markup=False,
+                             highlight=False, soft_wrap=True)
+            return None
+        reloaded = load_routing()
+        judges.set_registry(REGISTRY, reloaded)
+        ui.console.print(f'[green]routing {word}[/green] · mode = "{mode}"'
+                         f' written to {path}', markup=True, highlight=False)
+    elif word:
+        ui.console.print(f"Unknown /routing command '{word}'; "
+                         f"{_ROUTING_USAGE}", markup=False)
+        return None
+    try:
+        full = routing_settings.load_routing(
+            config.settings_section('routing'), full=True)
+    except ValueError as e:
+        ui.console.print(f'[yellow]{e}; using routing defaults.[/yellow]')
+        full = routing_settings.RoutingSettings()
+    ui.console.print(_format_routing(full, path), markup=False,
+                     highlight=False)
+    return reloaded
 
 
 def _handle_slash_search(query: str) -> None:
@@ -470,12 +846,18 @@ def main() -> None:
     skills.setup(reset=args.reset_skills)
 
     ledger.set_repository(JsonlLedger(config.LEDGER_DIR))
+    tools.set_policy(load_tools_policy())
 
     session.num_ctx_override = args.num_ctx
     global ADAPTERS, REGISTRY
     ADAPTERS = _build_adapters()
     REGISTRY = build_registry(ADAPTERS)
+    if routing_settings.ensure_default_routing(ADAPTER_CONFIGS) == 'written':
+        ui.console.print(
+            "[yellow]routing: wrote the default Claude-tier configuration to"
+            " settings.toml; /routing to inspect or turn off[/yellow]")
     routing = load_routing()
+    judges.set_registry(REGISTRY, routing)     # llm: judges, gate reviewer
     installed = judges.install()
     if installed:
         log.info('shadow judges: %s', installed)
@@ -489,6 +871,9 @@ def main() -> None:
 
     from guru import tui
     tui.run(registry=REGISTRY, routing=routing)
+    line = _session_line()
+    if line:
+        ui.console.print(f'[dim]{line}[/dim]', highlight=False)
     # Remember the context the (final) model ran at, so the next launch loads
     # it directly instead of recomputing the GPU fit.
     config.save_model_ctx(session.model, session.num_ctx)

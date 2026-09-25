@@ -111,6 +111,8 @@ def run(registry=None, routing=None) -> None:
     tools.set_domain_asker(_access_asker)
     files.set_path_asker(_access_asker)
     spend.set_spend_asker(_access_asker)    # once per run, same prompt style
+    from guru.sandbox import provision      # sandbox deps / gate approvals
+    provision.set_approve_asker(_access_asker)
 
     # --- per-agent output (sub-agents use buffer consoles) ------------------
 
@@ -164,6 +166,16 @@ def run(registry=None, routing=None) -> None:
             verb = ('stopped after' if agent.state.cancel_requested
                     else 'answered in')
             agent.console.print(f"[dim]({verb} {elapsed:.1f}s)[/dim]")
+            # The per-turn cost line ([ledger] turn_line): once per user
+            # turn, on the agent that owns it — a sub-agent's calls are
+            # already counted under its parent's turn_id, and a turn parked
+            # on join/check is finished by the mailbox later.
+            if agent.state.task_id or agent.state.turn_waiting:
+                return
+            import guru.cli as cli
+            line = cli._turn_line(agent.state.turn_id)
+            if line:
+                agent.console.print(f"[dim]{line}[/dim]", highlight=False)
 
         def on_worker_error(self, agent, exc) -> None:
             agent.append(f"[error] {exc}")
@@ -481,6 +493,20 @@ def run(registry=None, routing=None) -> None:
             import guru.cli as cli
             cli._ledger_command()
             return True
+        if text == '/tools':
+            import guru.cli as cli
+            cli._tools_command()
+            return True
+        if text == '/sandbox' or text.startswith('/sandbox '):
+            import guru.cli as cli
+            await _in_terminal(cli._sandbox_command, text[8:].strip())
+            return True
+        if text == '/routing' or text.startswith('/routing '):
+            import guru.cli as cli
+            new_routing = cli._routing_command(text[8:].strip())
+            if new_routing is not None:
+                orch.set_routing(new_routing)
+            return True
         if text == '/review' or text.startswith('/review '):
             area = text[7:].strip() or 'the repository'
             tasks = config.review_tasks(area)
@@ -558,7 +584,7 @@ def run(registry=None, routing=None) -> None:
             " · Shift+Tab cycle access mode · double Ctrl+C exit")
         main.console.print(
             "[dim]/mode /role /skill /review /models /context /adapters /save"
-            " /resume /compact /search[/dim]\n")
+            " /resume /compact /search /sandbox /routing[/dim]\n")
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()

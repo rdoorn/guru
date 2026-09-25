@@ -8,7 +8,7 @@ is graded by hand).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from guru.evals.cases import Expect
@@ -30,6 +30,14 @@ class Observed:
     # ``{'path', 'ref'}`` of a ``[fixture_git]`` case (traceability);
     # None for a directory fixture.
     fixture_git: Optional[dict] = None
+    # Sandbox cases: the gate's verdicts (one per ``sandbox_submit``, in
+    # order; the checks look at the last), ``{'image', 'digest',
+    # 'build_seconds'}`` of the provisioned image, and ``skipped`` when the
+    # case could not run at all (no Colima) — it then fails its checks
+    # with ``error``.
+    gate_verdicts: list[str] = field(default_factory=list)
+    sandbox: Optional[dict] = None
+    skipped: bool = False
 
 
 @dataclass
@@ -151,6 +159,34 @@ def _fixture_tests_pass(e: Expect, o: Observed) -> CheckResult:
                        f'fixture tests {got}, expected {want}')
 
 
+def _last_verdict(o: Observed) -> str:
+    return o.gate_verdicts[-1] if o.gate_verdicts else ''
+
+
+def _gate_verdict(e: Expect, o: Observed) -> CheckResult:
+    last = _last_verdict(o)
+    if not last:
+        return CheckResult('gate_verdict', False, 'no sandbox_submit '
+                                                  'verdict recorded')
+    ok = last == e.gate_verdict
+    return CheckResult('gate_verdict', ok, '' if ok else
+                       f'last gate verdict {last!r}, expected '
+                       f'{e.gate_verdict!r}')
+
+
+def _gate_verdict_any(e: Expect, o: Observed) -> CheckResult:
+    """Passes when at least one ``sandbox_submit`` of the case ended in one
+    of the listed verdicts (a controller may split the work over several
+    workers, each submitting on its own)."""
+    if not o.gate_verdicts:
+        return CheckResult('gate_verdict_any', False, 'no sandbox_submit '
+                                                      'verdict recorded')
+    ok = any(v in e.gate_verdict_any for v in o.gate_verdicts)
+    return CheckResult('gate_verdict_any', ok, '' if ok else
+                       f'gate verdicts {_fmt(o.gate_verdicts)}, none in '
+                       f'{_fmt(e.gate_verdict_any)}')
+
+
 # (name, is-configured predicate, check) in the order results are reported.
 _Check = Callable[[Expect, Observed], CheckResult]
 _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
@@ -171,6 +207,9 @@ _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
     ('files_unchanged', lambda e: bool(e.files_unchanged), _files_unchanged),
     ('fixture_tests_pass', lambda e: e.fixture_tests_pass is not None,
      _fixture_tests_pass),
+    ('gate_verdict', lambda e: bool(e.gate_verdict), _gate_verdict),
+    ('gate_verdict_any', lambda e: bool(e.gate_verdict_any),
+     _gate_verdict_any),
 ]
 
 

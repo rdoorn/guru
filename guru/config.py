@@ -31,6 +31,16 @@ PROJECT_MEMORY_DIR = PROJECT_GURU_DIR / 'memory'     # saved conversations
 # matches suppress a finding (known test fixtures, sample keys).
 SENSITIVE_MARKERS_PATH = PROJECT_GURU_DIR / 'sensitive_markers.txt'
 SCAN_ALLOW_PATH = PROJECT_GURU_DIR / 'scan_allow.txt'
+# Tool policy (guru/repositories/settings.py load_tools_policy): which
+# registry tools a project enables/disables, its test runner and any
+# subprocess-limit overrides. Missing file = everything enabled.
+TOOLS_POLICY_PATH = PROJECT_GURU_DIR / 'tools.toml'
+# Sandbox (guru/repositories/settings.py load_sandbox): a project opts in
+# to sandboxed execution with .guru/sandbox.toml; image records, generated
+# Dockerfiles and the working copies live under ~/.guru/sandbox/<project>/
+# (a path Colima mounts into its VM — a macOS temp dir is not).
+SANDBOX_POLICY_PATH = PROJECT_GURU_DIR / 'sandbox.toml'
+SANDBOX_HOME = GURU_HOME / 'sandbox'
 
 # Access mode (session-level policy). Separate from the allow-lists: it decides
 # whether we prompt, auto-approve, or refuse. read-only refuses writes; ask
@@ -71,7 +81,8 @@ OUTLINE_FILE_OVER_CHARS = 8000
 # Tools pre-activated on every agent so weaker models can call them directly
 # without first calling search_tools (which they often "announce" instead of
 # doing). Overridable via settings.toml's [tools] preactivate = [...].
-PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
+PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code',
+                     'outline', 'find_symbol', 'run_tests', 'check_syntax']
 
 # Flat toolset: when true, EVERY registry tool is pre-activated on each agent,
 # so a capable model gets the whole toolset up front and never needs the
@@ -79,6 +90,18 @@ PREACTIVATE_TOOLS = ['list_dir', 'list_tree', 'read_file', 'search_code']
 # are always sent), so it's off by default and best for large-context models.
 # Overridable via settings.toml's [tools] flat = true.
 FLAT_TOOLS = False
+
+# Subprocess ceilings for the audited tools (guru/domain/procs.py): wall-clock
+# timeout, CPU seconds, address space, largest file a child may write, and
+# how much of each output stream is kept. Overridable via settings.toml's
+# [tools.limits] table (timeout_s, cpu_s, mem_mb, fsize_mb, out_kb); a
+# project's .guru/tools.toml [tools.limits] overrides again per project.
+PROC_TIMEOUT_S = 120
+PROC_CPU_S = 120
+PROC_MEM_MB = 2048
+PROC_FSIZE_MB = 64
+PROC_OUT_KB = 256
+PROC_LIMIT_KEYS = ('timeout_s', 'cpu_s', 'mem_mb', 'fsize_mb', 'out_kb')
 
 # Sampling overrides applied on top of a model's own modelfile defaults (the
 # authoritative per-model source). Empty by default so each model keeps its
@@ -129,6 +152,9 @@ DECISIONS_POINTS: dict = {}
 DECISIONS_ACTIVE: dict = {}
 DECISIONS_THRESHOLDS: dict = {}
 DECISIONS_TIMEOUT_MS = 1500
+# The sandbox quality gate's reviewer (guru.domain.gate) reads a whole
+# diff and answers six questions; it gets its own, generous budget.
+DECISIONS_GATE_TIMEOUT_MS = 60000
 DECISIONS_BREAKER_TIMEOUTS = 5
 DECISIONS_BREAKER_COOLDOWN_S = 60.0
 DECISIONS_LABELS_MARGIN = 0.15
@@ -142,11 +168,13 @@ SECRET_SCAN = False
 
 # Ledger (guru/domain/ledger.py): append-only JSONL streams of every model
 # call, turn and sub-agent task under ~/.guru/ledger/. [ledger] enabled=false
-# turns it off. [pricing."<model>"] overrides the bundled price table
+# turns it off; [ledger] turn_line=false hides the per-turn cost line and
+# the exit summary. [pricing."<model>"] overrides the bundled price table
 # (input_per_m, output_per_m, cache_write_5m_per_m, cache_write_1h_per_m,
 # cache_read_per_m; USD per million tokens).
 LEDGER_DIR = GURU_HOME / 'ledger'
 LEDGER_ENABLED = True
+LEDGER_TURN_LINE = True
 PRICING_OVERRIDES: dict = {}
 
 # Eval suite (guru/evals): the default ``Adapter|model`` spec ('' = guru's
@@ -225,15 +253,16 @@ url  = "http://localhost:11434"
 """
 
 SYSTEM_PROMPT = """
-You are a helpful assistant with a tool directory. Each turn you begin with a
-single tool: search_tools. To do anything else, call search_tools with a short
-phrase naming the ACTION you want — not the user's question. It returns
-matching tools; call those directly by name, and never call a tool it has not
-returned.
+You are a helpful assistant with a tool directory. The tools already listed
+in your tool set are directly callable — use them without searching. Call
+search_tools only for a capability that is not listed (for example editing
+or web access), with a short phrase naming the ACTION you want — not the
+user's question. It returns matching tools; call those directly by name.
 
 You DO have web and local filesystem access, through these tools. Never say
-you cannot access the internet or files — call search_tools for the capability
-first, then use the tool it returns. Act rather than explaining how.
+you cannot access the internet or files — use the listed tool, or call
+search_tools for the capability and then use the tool it returns. Act rather
+than explaining how.
 
 Examples (question → search_tools phrase):
   list files here → "list directory files"
@@ -250,6 +279,10 @@ the results show. If a needed detail (a name, a location) is missing, ask.
 Before concluding code or a feature is missing, grep for its definition and
 read the file that defines it; when reviewing a file, follow its local
 imports. Never infer that something is absent from a single file.
+Prefer outline (a file's def/class map with line ranges) and find_symbol
+(where a name is defined and used) over read_file on a whole file; then
+read_file only the line range you need. After editing a .py file, verify with
+check_syntax and run_tests before you report the change.
 
 To create, change, or delete a file you MUST call write_file, edit_file, or
 delete_file in this turn and wait for it to return success — never state that
@@ -264,6 +297,17 @@ shas for files you have touched; reuse those directly for edit_file. If
 edit_file reports a sha mismatch, the file changed underneath you; read it
 again to refresh the sha, then retry.
 """
+
+# Appended to the [project] block while the project has a provisioned
+# sandbox image: the quality gate is the only write path there, so the
+# generic "you MUST call write_file/edit_file" rule above does not apply.
+SANDBOX_RULE = (
+    "This project runs in a SANDBOX: write_file, edit_file, apply_patch and"
+    " delete_file are disabled here. Edit your task's copy inside the"
+    " container with sandbox_python or sandbox_run, verify with sandbox_run"
+    " (e.g. [\"python\", \"-m\", \"pytest\", \"-q\"]), check sandbox_diff,"
+    " then call sandbox_submit with a one-line intent; a reviewer gates what"
+    " reaches the real tree. Missing packages: request_dependency.")
 
 # Appended to the system prompt of delegation-capable agents (TUI only), to
 # steer heavy tool output out of the main context and into sub-agents.
@@ -284,6 +328,8 @@ DELEGATION_HINT = (
     " (design) or SRE (reliability) sub-agent when those concerns apply."
     " Use check to poll and join to be resumed when a group finishes."
     " Prefer delegating a domain panel over reading many files yourself."
+    " Prefer outline and find_symbol over read_file on whole files, and"
+    " verify edits with check_syntax/run_tests before reporting them."
 )
 
 # Appended instead of DELEGATION_HINT when [routing] controller = true: the
@@ -307,6 +353,9 @@ CONTROLLER_HINT = (
     " refactor, review, explain, docs, ops, other and complexity as one of"
     " trivial, standard, hard (the labels pick the model that runs it);"
     " add the role (persona) and skill (method) from the catalog that fit."
+    " Every task that edits code must say: verify with run_tests/"
+    "check_syntax before reporting; tell workers to prefer outline/"
+    "find_symbol over reading whole files."
     " Complexity: " + '; '.join(
         f'{tier} = {desc}'
         for tier, desc in _routing.COMPLEXITY_DESCRIPTIONS.items())
@@ -335,7 +384,8 @@ REVIEW_PANEL = [
 # once to decompose into a parallel domain panel. Never for a controller.
 # Set 0 to disable the nudge.
 DELEGATION_NUDGE_MIN_READS = 3
-DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree'}
+DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree',
+                         'outline', 'find_symbol'}
 # Over-read guard (turn._drive): a delegation-capable MAIN agent that reads
 # this many DISTINCT paths in one turn without spawning is nudged to
 # delegate right away, mid-turn, once per turn (triage 2026-09-24: plain
@@ -519,11 +569,13 @@ def _apply_settings() -> None:
     global EVALS_MODEL, EVALS_NUM_CTX
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
     global BENCH_MODEL_TIMEOUT, FLAT_TOOLS
+    global PROC_TIMEOUT_S, PROC_CPU_S, PROC_MEM_MB, PROC_FSIZE_MB, PROC_OUT_KB
     global DECISIONS_MODE, DECISIONS_SIDECAR_MODEL, DECISIONS_SIDECAR_URL
     global DECISIONS_POINTS, DECISIONS_ACTIVE, DECISIONS_THRESHOLDS
-    global DECISIONS_TIMEOUT_MS, DECISIONS_BREAKER_TIMEOUTS
+    global DECISIONS_TIMEOUT_MS, DECISIONS_GATE_TIMEOUT_MS
+    global DECISIONS_BREAKER_TIMEOUTS
     global DECISIONS_BREAKER_COOLDOWN_S, DECISIONS_LABELS_MARGIN
-    global LEDGER_ENABLED, PRICING_OVERRIDES
+    global LEDGER_ENABLED, LEDGER_TURN_LINE, PRICING_OVERRIDES
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -537,6 +589,14 @@ def _apply_settings() -> None:
     if isinstance(pre, list):
         PREACTIVATE_TOOLS = [str(x) for x in pre]
     FLAT_TOOLS = bool(tl.get('flat', FLAT_TOOLS))
+    limits = tl.get('limits')
+    if isinstance(limits, dict):
+        parsed = _proc_limits(limits)
+        PROC_TIMEOUT_S = parsed.get('timeout_s', PROC_TIMEOUT_S)
+        PROC_CPU_S = parsed.get('cpu_s', PROC_CPU_S)
+        PROC_MEM_MB = parsed.get('mem_mb', PROC_MEM_MB)
+        PROC_FSIZE_MB = parsed.get('fsize_mb', PROC_FSIZE_MB)
+        PROC_OUT_KB = parsed.get('out_kb', PROC_OUT_KB)
     sampling = settings_section('sampling')
     # Scalar keys are global overrides; sub-tables are per-model overrides.
     SAMPLING = {k: v for k, v in sampling.items()
@@ -575,6 +635,11 @@ def _apply_settings() -> None:
     except (TypeError, ValueError):
         pass
     try:
+        DECISIONS_GATE_TIMEOUT_MS = int(
+            dec.get('gate_timeout_ms', DECISIONS_GATE_TIMEOUT_MS))
+    except (TypeError, ValueError):
+        pass
+    try:
         DECISIONS_BREAKER_TIMEOUTS = int(
             dec.get('breaker_timeouts', DECISIONS_BREAKER_TIMEOUTS))
         DECISIONS_BREAKER_COOLDOWN_S = float(
@@ -596,12 +661,35 @@ def _apply_settings() -> None:
     if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) \
             and num_ctx >= 0:
         EVALS_NUM_CTX = num_ctx
-    LEDGER_ENABLED = bool(settings_section('ledger').get('enabled', True))
+    ledger = settings_section('ledger')
+    LEDGER_ENABLED = bool(ledger.get('enabled', True))
+    LEDGER_TURN_LINE = bool(ledger.get('turn_line', True))
     PRICING_OVERRIDES = {
         str(k): {str(f): float(v) for f, v in tbl.items()
                  if isinstance(v, (int, float))}
         for k, tbl in settings_section('pricing').items()
         if isinstance(tbl, dict)}
+
+
+def _proc_limits(table: dict) -> dict:
+    """The valid ``[tools.limits]`` entries of ``table`` as ``{key: int}``.
+
+    A key outside ``PROC_LIMIT_KEYS`` or a value that is not a positive
+    number is logged and skipped, so a typo never disables a ceiling.
+    """
+    out: dict = {}
+    for key, value in table.items():
+        if key not in PROC_LIMIT_KEYS:
+            log.info('ignoring unknown [tools.limits] key %r; expected one '
+                     'of %s', key, ', '.join(PROC_LIMIT_KEYS))
+            continue
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or value <= 0):
+            log.info('ignoring [tools.limits] %s = %r; expected a positive '
+                     'number', key, value)
+            continue
+        out[str(key)] = int(value)
+    return out
 
 
 def _toml_value(value: object) -> str:
