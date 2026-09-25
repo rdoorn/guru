@@ -1,7 +1,13 @@
 """``python -m guru.evals``: run the suite, compare two runs, list cases.
 
 Plain-text output (like ``guru.bench``); ``run`` exits 1 when any case
-failed so it can gate a script.
+failed so it can gate a script. ``--repeat N`` runs the selection N times
+(one run file each) and prints an aggregate; the gate is then that every
+case passed at least ``ceil(N/2)`` times. ``--rubric 'Adapter|model'``
+grades the rubric cases with a model (default with ``--allow-spend`` and
+``--routing``: the routing file's cheapest rung; ``--rubric none`` turns
+that off); a grade is reported, and fails the case only under
+``--rubric-min N``.
 """
 from __future__ import annotations
 
@@ -13,8 +19,10 @@ from typing import Optional
 from guru import config
 from guru.evals import cases, runner, runs
 from guru.evals.runs import CaseResult, Run
+from guru.repositories.settings import RoutingSettings
 
 DEFAULT_OUT = cases.REPO_ROOT / 'evals' / 'runs'
+RUBRIC_OFF = 'none'           # --rubric none: no grading, even with a default
 
 
 def _fmt_cost(cost: Optional[float]) -> str:
@@ -66,7 +74,7 @@ def _row(res: CaseResult, routed: bool = False) -> list:
         if failed:
             parts.append(', '.join(failed))
     if res.rubric:
-        parts.append('rubric: grade by hand')
+        parts.append(_rubric_detail(res))
     if routed or res.routes:
         parts.append('routes: ' + (', '.join(res.routes) or '-'))
     verdicts = res.observed.get('gate_verdicts') or []
@@ -74,6 +82,16 @@ def _row(res: CaseResult, routed: bool = False) -> list:
         parts.append('gate: ' + ', '.join(verdicts))
     return [res.case, 'PASS' if res.passed else 'FAIL',
             f'{res.seconds:.1f}', _fmt_cost(res.cost_usd), '; '.join(parts)]
+
+
+def _rubric_detail(res: CaseResult) -> str:
+    """``rubric: 2/2`` when graded, ``rubric: error`` when the judge
+    failed, ``rubric: grade by hand`` when nothing graded it."""
+    if res.rubric_score is not None:
+        return f'rubric: {res.rubric_score}/{runs.RUBRIC_MAX}'
+    if res.rubric_reason.startswith('error:'):
+        return 'rubric: error'
+    return 'rubric: grade by hand'
 
 
 def _gate_counts(run: Run) -> list:
@@ -102,6 +120,9 @@ def _print_run(run: Run, out_root: Path) -> None:
             summary += ' (controller)'
     if run.judges:
         summary += ' · judges ' + ', '.join(run.judges)
+    total = run.rubric_total()
+    if total is not None:
+        summary += f' · rubric {total[0]}/{total[1]}'
     counts = _gate_counts(run)
     if counts:
         summary += ' · gate ' + ' '.join(f'{k}={v}' for k, v in counts)
@@ -125,6 +146,48 @@ def _load_suite(args: argparse.Namespace) -> list:
                             tags=_csv(args.tags))
 
 
+def _pm(pair: Optional[tuple], fmt: str) -> str:
+    """``mean ± spread`` with ``fmt`` applied to both; ``n/a`` for None."""
+    if pair is None:
+        return 'n/a'
+    mean, spread = pair
+    return f'{fmt.format(mean)} ± {fmt.format(spread)}'
+
+
+def _print_aggregate(run_list: list, repeats: int) -> None:
+    """The ``--repeat`` table: per case the pass count, cost and seconds
+    as mean ± spread (sample standard deviation) and the mean rubric."""
+    agg = runs.aggregate(run_list)
+    rows = []
+    for name, v in agg.items():
+        mean_rubric = v['rubric_mean']
+        rows.append([name, f"{v['passes']}/{v['runs']}",
+                     _pm(v['cost_usd'], '${:.3f}'),
+                     _pm(v['seconds'], '{:.1f}'),
+                     '-' if mean_rubric is None
+                     else f'{mean_rubric:.1f}/{runs.RUBRIC_MAX}'])
+    need = runs.required_passes(repeats)
+    weak = [n for n, v in agg.items() if v['passes'] < need]
+    print(f'\naggregate over {len(run_list)} run(s):')
+    print(_table(['case', 'passes', 'cost', 'seconds', 'rubric'], rows))
+    print(f'gate: every case must pass at least {need}/{repeats}'
+          + (f' — below: {", ".join(weak)}' if weak else ' — ok'))
+    print('runs: ' + ', '.join(r.run_id for r in run_list))
+
+
+def _resolve_rubric(args: argparse.Namespace,
+                    routing: Optional[RoutingSettings]) -> str:
+    """The rubric judge spec for the run: the flag, else (with
+    ``--allow-spend`` and a routing file) the file's cheapest rung; ``''``
+    for no grading (``--rubric none`` or no default)."""
+    if args.rubric is not None:
+        spec = args.rubric.strip()
+        return '' if spec.lower() == RUBRIC_OFF else spec
+    if args.allow_spend and routing is not None:
+        return runner.default_rubric_spec(routing)
+    return ''
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     try:
         suite = _load_suite(args)
@@ -141,6 +204,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print('error: --num-ctx must be 0 (auto-fit) or positive',
               file=sys.stderr)
         return 2
+    if args.repeat < 1:
+        print('error: --repeat must be at least 1', file=sys.stderr)
+        return 2
+    if args.rubric_min is not None and \
+            args.rubric_min not in range(runs.RUBRIC_MAX + 1):
+        print(f'error: --rubric-min must be 0..{runs.RUBRIC_MAX}',
+              file=sys.stderr)
+        return 2
     out_root = Path(args.out)
     routing = None
     routing_name = ''
@@ -153,25 +224,46 @@ def _cmd_run(args: argparse.Namespace) -> int:
             print(f'error: {e}', file=sys.stderr)
             return 2
         routing_name = Path(args.routing).stem
+    rubric_spec = _resolve_rubric(args, routing)
+    if args.rubric_min is not None and not rubric_spec:
+        print('error: --rubric-min needs a rubric judge (--rubric, or '
+              '--allow-spend with --routing)', file=sys.stderr)
+        return 2
 
     def progress(res: CaseResult) -> None:
         flags = ', timed out' if res.observed.get('timed_out') else ''
         if res.observed.get('skipped'):
             flags += f', skipped: {res.observed.get("error", "")}'
+        if res.rubric_score is not None:
+            flags += f', rubric {res.rubric_score}/{runs.RUBRIC_MAX}'
         print(f'[evals] {res.case}: {"PASS" if res.passed else "FAIL"}'
               f' ({res.seconds:.1f}s{flags})', flush=True)
 
-    try:
-        run = runner.run_suite(suite, model, out_root, note=args.note,
-                               on_result=progress, num_ctx=num_ctx,
-                               routing=routing, routing_name=routing_name,
-                               allow_spend=args.allow_spend,
-                               decisions=decisions)
-    except ValueError as e:
-        print(f'error: {e}', file=sys.stderr)
-        return 2
-    _print_run(run, out_root)
-    return 0 if all(c.passed for c in run.cases) else 1
+    run_list: list = []
+    for i in range(1, args.repeat + 1):
+        note = args.note
+        if args.repeat > 1:
+            note = f'{note} (repeat {i}/{args.repeat})' if note \
+                else f'repeat {i}/{args.repeat}'
+            print(f'[evals] repeat {i}/{args.repeat}', flush=True)
+        try:
+            run = runner.run_suite(suite, model, out_root, note=note,
+                                   on_result=progress, num_ctx=num_ctx,
+                                   routing=routing,
+                                   routing_name=routing_name,
+                                   allow_spend=args.allow_spend,
+                                   decisions=decisions,
+                                   rubric_spec=rubric_spec,
+                                   rubric_min=args.rubric_min)
+        except ValueError as e:
+            print(f'error: {e}', file=sys.stderr)
+            return 2
+        _print_run(run, out_root)
+        run_list.append(run)
+    if args.repeat > 1:
+        _print_aggregate(run_list, args.repeat)
+    return 0 if runs.aggregate_ok(runs.aggregate(run_list),
+                                  args.repeat) else 1
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
@@ -249,6 +341,18 @@ def _parser() -> argparse.ArgumentParser:
                             '(default: deny, so remote rungs are skipped) '
                             'and let sandbox cases apply an "intended" '
                             'submit (default: deny, nothing is applied)')
+    run_p.add_argument('--rubric', default=None, metavar='SPEC',
+                       help="'Adapter|model' that grades the rubric cases "
+                            "0-2 (default: with --allow-spend and "
+                            "--routing, the routing file's cheapest rung; "
+                            f"'{RUBRIC_OFF}' turns grading off)")
+    run_p.add_argument('--rubric-min', type=int, default=None, metavar='N',
+                       help='fail a rubric case graded below N (default: '
+                            'a grade is reported only)')
+    run_p.add_argument('--repeat', type=int, default=1, metavar='N',
+                       help='run the selection N times (one run file each) '
+                            'and print an aggregate; exit 1 when a case '
+                            'passed fewer than ceil(N/2) times (default 1)')
     run_p.add_argument('--cases-dir', default=str(cases.CASES_DIR),
                        help=argparse.SUPPRESS)
     run_p.set_defaults(func=_cmd_run)

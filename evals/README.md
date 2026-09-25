@@ -25,6 +25,8 @@ evals/
 .venv/bin/python -m guru.evals run --model 'Ollama|qwen3:14b' --num-ctx 16384 --note 'after nudge fix'
 .venv/bin/python -m guru.evals compare evals/runs/<old>.json evals/runs/<new>.json
 .venv/bin/python -m guru.evals run --routing evals/routing/<file>.toml --allow-spend
+.venv/bin/python -m guru.evals run --tags fast --repeat 3                 # the x3 gate (make eval-fast)
+.venv/bin/python -m guru.evals run --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric-min 1
 ```
 
 `--routing FILE` routes sub-agents through a `[routing]` table (same shape
@@ -59,6 +61,46 @@ run JSON. It writes:
   cost is the sum of its `calls` rows (n/a for local models or when a price is
   unknown);
 - a row in `evals/TRAJECTORY.md` (`--note` lands in the last column).
+
+### Rubric grading
+
+Every case may carry an `[expect.rubric]` text; until now it was graded
+by hand (0-2) during triage. `--rubric 'Adapter|model'` has a model grade
+it instead: after the case's deterministic checks the runner sends the
+prompt, the rubric and the answer to `Adapter.complete()` with a fixed
+instruction (score 2 = fully meets the rubric, 1 = partly, 0 = not; strict
+JSON `{"score", "reason"}`), the answer fenced between per-call nonce
+markers and declared untrusted, exactly as the sandbox gate fences the
+diff. The grade lands in the case result (`rubric_score`,
+`rubric_reason`), in the run file, in the table's detail column
+(`rubric: 2/2`; `rubric: error` when the judge's reply was unusable;
+`rubric: grade by hand` without a judge) and in the summary line
+(`rubric 5/6` = points over two per graded case). Each grade is also a
+`labels` row in the run's ledger (`target_id = <run_id>:<case>`,
+`labeller = rubric:<model>`, `label = "0" | "1" | "2"`, `note` = the
+reason), so the judge can later be scored against hand labels.
+
+The default: with `--allow-spend` and `--routing FILE`, the file's
+cheapest rung (the lowest rung of its `default` ladder — Haiku in the
+measured configuration) grades; `--rubric none` turns that off; without
+either flag nothing is graded. A grade never fails a case by itself:
+`--rubric-min N` makes a score below N (or a failed grading) fail the
+case with a `rubric_min` check row. An empty answer scores 0 without a
+model call. The grading call's own cost goes to the run's ledger, not to
+the case's cost column. The judge resolves through the same adapter
+registry as the gate reviewer, so its adapter must be one of the suite's.
+
+### Repeats and the x3 gate
+
+`--repeat N` runs the selection N times — a fresh fixture copy per case
+per run, one run file and one trajectory row per repeat (the note gains
+`(repeat i/N)`) — then prints an aggregate table: per case the pass
+count `x/N`, cost and seconds as `mean ± spread` (the sample standard
+deviation; 0.0 for one run) and the mean rubric. The exit code is 1 when
+any case passed fewer than `ceil(N/2)` times (2 of 3, 3 of 5); cost,
+time and rubric never fail the gate. `make eval-fast` is
+`run --tags fast --repeat 3`; pass extra flags with
+`EVAL_ARGS='--routing evals/routing/<file>.toml --allow-spend'`.
 
 Each case runs in a fresh copy of its fixture under a temp dir: the copy is
 `git init`-ed so `files_changed` is `git status --porcelain`; guru's cwd,
@@ -164,14 +206,14 @@ files_changed = []                   # exact set; omit to not check
 files_unchanged = ["tests/test_upload.py"]
 fixture_tests_pass = true            # runs the fixture's own pytest after
 
-[expect.rubric]                # graded by hand during triage (0-2)
+[expect.rubric]                # graded 0-2: by --rubric, else by hand
 text = "Names the unchecked user path in upload.py."
 ```
 
 Every key is validated at load; an unknown key or a wrong type is an error,
 so a typo cannot silently disable a check. Only configured expectations
 produce results; a case with just a rubric passes trivially and is graded
-during triage. Keep `answer_contains` to short, robust substrings (the
+by the rubric judge (`--rubric`) or during triage. Keep `answer_contains` to short, robust substrings (the
 planted strings in `FIXTURE.md`, file names) — the model's wording varies.
 
 3. `.venv/bin/python -m guru.evals list` must show it; `run --cases <name>`
@@ -297,7 +339,9 @@ the failure taxonomy, so fixes can be traced to causes:
 
 A triage file has, per failing case: the tag, one line of evidence (quote
 from the transcript), and the proposed fix (prompt text, config default, or
-code) with the cases it targets. Rubric cases get their 0-2 grade there too.
+code) with the cases it targets. Rubric cases get their 0-2 grade there too
+(the judge's grade when `--rubric` ran, checked by hand where it looks
+wrong — a disagreement is a `labels` row worth keeping).
 
 ## The loop
 
@@ -314,6 +358,7 @@ code) with the cases it targets. Rubric cases get their 0-2 grade there too.
 
 - `guru/evals/cases.py` — TOML case format (domain)
 - `guru/evals/checks.py` — pure assertions, `Observed` -> `CheckResult` rows (domain)
-- `guru/evals/runs.py` — run files, `compare`, trajectory table (repository)
+- `guru/evals/rubric.py` — the rubric judge: fixed prompt, nonce-fenced answer, strict JSON grade (domain)
+- `guru/evals/runs.py` — run files, `compare`, `--repeat` aggregate, trajectory table (repository)
 - `guru/evals/runner.py` — fixture copy, sandbox, `BenchRun`, `Observed` (endpoint)
 - `guru/evals/__main__.py` — the CLI

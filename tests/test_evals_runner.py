@@ -647,9 +647,10 @@ class TestCli:
         def fake_suite(suite, model_spec, out_root, base_state=None,
                        adapters=None, note='', on_result=None, num_ctx=0,
                        routing=None, routing_name='', allow_spend=False,
-                       decisions=None):
+                       decisions=None, rubric_spec='', rubric_min=None):
             assert [c.name for c in suite] == ['a']
             assert decisions is None
+            assert rubric_spec == '' and rubric_min is None
             assert callable(on_result)
             assert model_spec == 'Fake|m'
             assert note == 'n1'
@@ -1918,3 +1919,426 @@ class TestCliSandbox:
         assert 'gate intended=1 unclear=1' in out
         assert '[evals] b: FAIL (0.0s, skipped: sandbox unavailable)' in out
         assert 'gate_verdict' in out
+
+
+# --- rubric grading and repeats ---------------------------------------------
+
+from guru.evals import rubric as rubric_mod                     # noqa: E402
+from guru.judges import llm as judges_llm                       # noqa: E402
+from guru.repositories.settings import RungSpec                 # noqa: E402
+
+
+class GradingAdapter(FakeAdapter):
+    """A FakeAdapter whose ``complete`` grades with a canned reply."""
+
+    reply = '{"score": 2, "reason": "names the bug"}'
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.completions: list = []
+
+    def complete(self, prompt, max_tokens=1024, model=''):
+        self.completions.append((prompt, max_tokens, model))
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+class FakeJudge:
+    def __init__(self, reply: str, model: str = 'judge-model') -> None:
+        self.reply, self.model, self.prompts = reply, model, []
+
+    def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def _result(case: str = 'a', answer: str = 'the answer',
+            passed: bool = True) -> runs.CaseResult:
+    return runs.CaseResult(case=case, passed=passed, checks=[],
+                           observed={'answer': answer, 'seconds': 1.0},
+                           rubric='the rubric', transcript_path='t',
+                           cost_usd=0.1)
+
+
+class TestDefaultRubricSpec:
+    def test_lowest_rung_of_default_ladder(self) -> None:
+        settings = RoutingSettings(present=True, ladders={
+            'review': [RungSpec('B', 'big', 'hard')],
+            'default': [RungSpec('A', 'haiku', 'simple'),
+                        RungSpec('A', 'sonnet', 'standard')]})
+        assert runner.default_rubric_spec(settings) == 'A|haiku'
+
+    def test_first_ladder_when_no_default(self) -> None:
+        settings = RoutingSettings(present=True, ladders={
+            'review': [RungSpec('B', 'small', 'simple'),
+                       RungSpec('B', 'big', 'hard')]})
+        assert runner.default_rubric_spec(settings) == 'B|small'
+
+    def test_empty_without_rungs(self) -> None:
+        assert runner.default_rubric_spec(RoutingSettings()) == ''
+        assert runner.default_rubric_spec(
+            RoutingSettings(present=True, ladders={'default': []})) == ''
+
+
+class TestGradeCase:
+    def _repo(self, tmp_path: Path) -> JsonlLedger:
+        return JsonlLedger(tmp_path / 'ledger')
+
+    def test_grades_records_label_and_keeps_verdict(self, tmp_path,
+                                                    monkeypatch) -> None:
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        case = _case(name='a')
+        case.expect.rubric = 'names the bug'
+        case.prompt = 'find the bug'
+        res = _result()
+        judge = FakeJudge('{"score": 0, "reason": "misses it"}')
+        repo = self._repo(tmp_path)
+        runner.grade_case(case, res, judge, repo, 'run1:a')
+        assert (res.rubric_score, res.rubric_reason) == (0, 'misses it')
+        assert res.passed is True and res.checks == []    # report only
+        rows = repo.rows('labels')
+        assert len(rows) == 1
+        assert rows[0]['target_id'] == 'run1:a'
+        assert rows[0]['labeller'] == 'rubric:judge-model'
+        assert rows[0]['label'] == '0' and rows[0]['note'] == 'misses it'
+        assert 'find the bug' in judge.prompts[0]
+        assert 'names the bug' in judge.prompts[0]
+        assert 'the answer' in judge.prompts[0]
+        assert config.LEDGER_ENABLED is False             # restored
+        assert ledger.repository() is not repo
+
+    def test_no_rubric_no_call(self, tmp_path: Path) -> None:
+        judge = FakeJudge('{"score": 2}')
+        res = _result()
+        runner.grade_case(_case(name='a'), res, judge, self._repo(tmp_path),
+                          'r:a')
+        assert judge.prompts == [] and res.rubric_score is None
+
+    def test_empty_answer_scores_zero_without_a_call(self, tmp_path):
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        judge = FakeJudge('{"score": 2}')
+        res = _result(answer='  ')
+        repo = self._repo(tmp_path)
+        runner.grade_case(case, res, judge, repo, 'r:a')
+        assert (res.rubric_score, res.rubric_reason) == (0, 'empty answer')
+        assert judge.prompts == []
+        assert repo.rows('labels')[0]['label'] == '0'
+
+    @pytest.mark.parametrize('reply', ['garbage', RuntimeError('down')])
+    def test_failed_grading_is_an_error_reason_no_label(self, tmp_path,
+                                                        reply) -> None:
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        res = _result()
+        repo = self._repo(tmp_path)
+        runner.grade_case(case, res, FakeJudge(reply), repo, 'r:a')
+        assert res.rubric_score is None
+        assert res.rubric_reason.startswith('error: ')
+        assert repo.rows('labels') == []
+        assert res.passed is True
+
+    def test_rubric_min_fails_low_grade_and_missing_grade(self, tmp_path):
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        repo = self._repo(tmp_path)
+        low = _result()
+        runner.grade_case(case, low, FakeJudge('{"score": 1}'), repo, 'r:a',
+                          rubric_min=2)
+        assert low.passed is False
+        assert low.checks == [{'name': 'rubric_min', 'passed': False,
+                               'detail': 'rubric 1 < 2'}]
+        ok = _result()
+        runner.grade_case(case, ok, FakeJudge('{"score": 2}'), repo, 'r:a',
+                          rubric_min=2)
+        assert ok.passed is True
+        assert ok.checks == [{'name': 'rubric_min', 'passed': True,
+                              'detail': ''}]
+        broken = _result()
+        runner.grade_case(case, broken, FakeJudge('nope'), repo, 'r:a',
+                          rubric_min=1)
+        assert broken.passed is False
+        assert broken.checks[0]['detail'].startswith('not graded (error: ')
+        already_failed = _result(passed=False)
+        runner.grade_case(case, already_failed, FakeJudge('{"score": 2}'),
+                          repo, 'r:a', rubric_min=1)
+        assert already_failed.passed is False       # a grade never rescues
+
+
+class TestRunSuiteRubric:
+    def _suite(self, rubric_text: str = 'mentions path traversal') -> list:
+        a = _case(name='a', answer_contains=['path traversal'])
+        a.expect.rubric = rubric_text
+        b = _case(name='b')                          # no rubric
+        return [a, b]
+
+    def test_grades_rubric_cases_and_records_everything(self, tmp_path,
+                                                        canned) -> None:
+        base = _base()
+        adapter = GradingAdapter()
+        base.adapter = adapter
+        out = tmp_path / 'runs'
+        seen: list = []
+        run = runner.run_suite(self._suite(), 'Fake|base-model', out,
+                               base_state=base, adapters=[adapter],
+                               trajectory_dir=tmp_path,
+                               on_result=seen.append,
+                               rubric_spec='Fake|judge-model')
+        assert run.rubric == 'Fake|judge-model'
+        a, b = run.cases
+        assert (a.rubric_score, a.rubric_reason) == (2, 'names the bug')
+        assert b.rubric_score is None and b.rubric_reason == ''
+        assert a.passed and b.passed
+        assert run.rubric_total() == (2, 2)
+        # graded before on_result saw it
+        assert seen[0].rubric_score == 2
+        # one completion, on the judge model, with the fenced answer
+        assert len(adapter.completions) == 1
+        prompt, max_tokens, model = adapter.completions[0]
+        assert model == 'judge-model'
+        assert max_tokens == rubric_mod.RUBRIC_MAX_TOKENS
+        assert 'mentions path traversal' in prompt
+        # the labels row in the run's ledger
+        rows = JsonlLedger(out / run.run_id / 'ledger').rows('labels')
+        assert [(r['target_id'], r['labeller'], r['label'], r['note'])
+                for r in rows] == [(f'{run.run_id}:a', 'rubric:judge-model',
+                                    '2', 'names the bug')]
+        # and in the run file
+        saved = runs.load(next(out.glob('*.json')))
+        assert saved.rubric == 'Fake|judge-model'
+        assert saved.cases[0].rubric_score == 2
+        assert judges_llm.registry() is None             # cleared
+
+    def test_rubric_min_fails_the_case(self, tmp_path, canned) -> None:
+        base = _base()
+        adapter = GradingAdapter()
+        adapter.reply = '{"score": 1, "reason": "half"}'
+        base.adapter = adapter
+        run = runner.run_suite(self._suite(), 'Fake|base-model', tmp_path,
+                               base_state=base, adapters=[adapter],
+                               trajectory_dir=tmp_path,
+                               rubric_spec='Fake|judge-model', rubric_min=2)
+        a, b = run.cases
+        assert a.passed is False and a.rubric_score == 1
+        assert a.checks[-1]['name'] == 'rubric_min'
+        assert b.passed is True                       # no rubric: untouched
+
+    def test_without_spec_nothing_is_graded(self, tmp_path, canned) -> None:
+        base = _base()
+        adapter = GradingAdapter()
+        base.adapter = adapter
+        run = runner.run_suite(self._suite(), 'Fake|base-model', tmp_path,
+                               base_state=base, adapters=[adapter],
+                               trajectory_dir=tmp_path)
+        assert run.rubric == '' and adapter.completions == []
+        assert run.cases[0].rubric_score is None
+        assert run.rubric_total() is None
+
+    def test_unknown_judge_adapter_is_a_value_error(self, tmp_path,
+                                                    canned) -> None:
+        base = _base()
+        with pytest.raises(ValueError, match='rubric judge'):
+            runner.run_suite(self._suite(), 'Fake|base-model', tmp_path,
+                             base_state=base, adapters=[base.adapter],
+                             trajectory_dir=tmp_path,
+                             rubric_spec='Other|judge')
+        assert judges_llm.registry() is None
+        assert not list(tmp_path.glob('*.json'))
+
+    def test_judge_error_reported_not_fatal(self, tmp_path, canned) -> None:
+        base = _base()
+        adapter = GradingAdapter()
+        adapter.reply = RuntimeError('provider down')
+        base.adapter = adapter
+        run = runner.run_suite(self._suite(), 'Fake|base-model', tmp_path,
+                               base_state=base, adapters=[adapter],
+                               trajectory_dir=tmp_path,
+                               rubric_spec='Fake|judge-model')
+        a = run.cases[0]
+        assert a.passed is True and a.rubric_score is None
+        assert a.rubric_reason == 'error: provider down'
+        assert run.rubric_total() is None
+
+
+def _cli_case_dir(tmp_path: Path, *names: str) -> Path:
+    cdir = tmp_path / 'cases'
+    cdir.mkdir(exist_ok=True)
+    for n in names:
+        (cdir / f'{n}.toml').write_text(
+            f'name = "{n}"\nfixture = "docs-only"\nprompt = "hi"\n'
+            'tags = ["fast"]\n\n[expect.rubric]\ntext = "says hi"\n')
+    return cdir
+
+
+def _fake_run(model_spec: str, verdicts: dict, scores: dict,
+              seconds: float = 2.0, cost=0.1, **kw) -> runs.Run:
+    cases_ = []
+    for name, ok in verdicts.items():
+        cases_.append(runs.CaseResult(
+            case=name, passed=ok,
+            checks=[{'name': 'x', 'passed': ok, 'detail': ''}],
+            observed={'seconds': seconds, 'answer': 'hi'},
+            rubric='says hi', transcript_path='t', cost_usd=cost,
+            rubric_score=scores.get(name),
+            rubric_reason='' if scores.get(name) is None else 'ok'))
+    return runs.Run(run_id=runs.new_run_id(), ts=runs.now_ts(),
+                    model=model_spec, git_sha='', cases=cases_, **kw)
+
+
+class TestCliRubricAndRepeat:
+    def test_rubric_flags_are_passed_and_shown(self, tmp_path, capsys,
+                                               monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a', 'b')
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            r = _fake_run(model_spec, {'a': True, 'b': True},
+                          {'a': 2, 'b': 1}, rubric=kw['rubric_spec'])
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r'),
+                         '--rubric', 'F|judge', '--rubric-min', '1'])
+        assert code == 0
+        assert seen['rubric_spec'] == 'F|judge' and seen['rubric_min'] == 1
+        out = capsys.readouterr().out
+        assert 'rubric: 2/2' in out and 'rubric: 1/2' in out
+        assert '· rubric 3/4' in out
+        assert 'grade by hand' not in out
+
+    def test_ungraded_rubric_says_grade_by_hand(self, tmp_path, capsys,
+                                                monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            assert kw['rubric_spec'] == '' and kw['rubric_min'] is None
+            return _fake_run(model_spec, {'a': True}, {})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path / 'r')]) == 0
+        out = capsys.readouterr().out
+        assert 'rubric: grade by hand' in out and '· rubric ' not in out
+
+    def test_default_judge_is_cheapest_rung_with_spend_and_routing(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+        routing_file = tmp_path / 'exp.toml'
+        routing_file.write_text(
+            '[routing]\ncontroller = false\n'
+            '[[routing.ladder]]\nadapter = "Fake"\nmodel = "haiku"\n'
+            'max_complexity = "trivial"\n'
+            '[[routing.ladder]]\nadapter = "Fake"\nmodel = "opus"\n'
+            'max_complexity = "hard"\n')
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            return _fake_run(model_spec, {'a': True}, {'a': 2})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        base = ['run', '--cases-dir', str(cdir), '--out',
+                str(tmp_path / 'r'), '--routing', str(routing_file)]
+        assert cli_main(base + ['--allow-spend']) == 0
+        assert seen['rubric_spec'] == 'Fake|haiku'
+        assert cli_main(base) == 0                      # no spend: no judge
+        assert seen['rubric_spec'] == ''
+        assert cli_main(base + ['--allow-spend', '--rubric', 'none']) == 0
+        assert seen['rubric_spec'] == ''
+        assert cli_main(base + ['--allow-spend', '--rubric', 'X|y']) == 0
+        assert seen['rubric_spec'] == 'X|y'
+
+    def test_rubric_min_without_judge_is_a_usage_error(self, tmp_path,
+                                                       capsys,
+                                                       monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+        monkeypatch.setattr(runner, 'run_suite',
+                            lambda *a, **k: pytest.fail('must not run'))
+        assert cli_main(['run', '--cases-dir', str(cdir), '--out',
+                         str(tmp_path), '--rubric-min', '1']) == 2
+        assert 'needs a rubric judge' in capsys.readouterr().err
+        assert cli_main(['run', '--cases-dir', str(cdir), '--out',
+                         str(tmp_path), '--rubric', 'F|j',
+                         '--rubric-min', '3']) == 2
+        assert '--rubric-min must be 0..2' in capsys.readouterr().err
+
+    def test_unknown_judge_from_runner_is_exit_2(self, tmp_path, capsys,
+                                                 monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+
+        def fake_suite(*a, **kw):
+            raise ValueError("rubric judge 'X|y': not configured")
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--out',
+                         str(tmp_path), '--rubric', 'X|y']) == 2
+        assert 'rubric judge' in capsys.readouterr().err
+
+    def test_repeat_runs_n_times_and_aggregates(self, tmp_path, capsys,
+                                                monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a', 'b')
+        verdicts = iter([{'a': True, 'b': True}, {'a': True, 'b': False},
+                         {'a': True, 'b': False}])
+        secs = iter([10.0, 12.0, 14.0])
+        notes: list = []
+
+        def fake_suite(suite, model_spec, out_root, note='', **kw):
+            notes.append(note)
+            r = _fake_run(model_spec, next(verdicts), {'a': 2, 'b': 0},
+                          seconds=next(secs), cost=0.5)
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r'), '--repeat', '3',
+                         '--note', 'gate'])
+        assert code == 1                                 # b passed 1 < 2
+        assert notes == ['gate (repeat 1/3)', 'gate (repeat 2/3)',
+                         'gate (repeat 3/3)']
+        assert len(list((tmp_path / 'r').glob('*.json'))) == 3
+        out = capsys.readouterr().out
+        assert out.count('[evals] repeat ') == 3
+        assert 'aggregate over 3 run(s):' in out
+        agg = out.split('aggregate over 3 run(s):')[1]
+        assert 'a     3/3     $0.500 ± $0.000  12.0 ± 2.0  2.0/2' in agg
+        assert 'b     1/3     $0.500 ± $0.000  12.0 ± 2.0  0.0/2' in agg
+        assert 'gate: every case must pass at least 2/3 — below: b' in agg
+        assert 'runs: ' in agg
+
+    def test_repeat_passes_when_each_case_meets_ceil_half(self, tmp_path,
+                                                          capsys,
+                                                          monkeypatch):
+        cdir = _cli_case_dir(tmp_path, 'a')
+        verdicts = iter([{'a': False}, {'a': True}, {'a': True}])
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            return _fake_run(model_spec, next(verdicts), {}, cost=None)
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--out',
+                         str(tmp_path), '--repeat', '3']) == 0
+        out = capsys.readouterr().out
+        assert 'a     2/3     n/a' in out
+        assert '— ok' in out
+
+    def test_repeat_one_prints_no_aggregate(self, tmp_path, capsys,
+                                            monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+        monkeypatch.setattr(
+            runner, 'run_suite',
+            lambda suite, model_spec, out_root, **kw: _fake_run(
+                model_spec, {'a': False}, {}))
+        assert cli_main(['run', '--cases-dir', str(cdir), '--out',
+                         str(tmp_path)]) == 1
+        out = capsys.readouterr().out
+        assert 'aggregate over' not in out and '[evals] repeat' not in out
+        assert cli_main(['run', '--cases-dir', str(cdir), '--out',
+                         str(tmp_path), '--repeat', '0']) == 2
+        assert '--repeat must be at least 1' in capsys.readouterr().err

@@ -27,6 +27,17 @@ seam (``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS``) from it, installs
 the judges for the duration and records their names on the run; the seam
 and the judge registry are restored (cleared) afterwards.
 
+Rubric grading: ``run_suite(rubric_spec='Adapter|model')`` grades every case
+that has an ``[expect.rubric]`` with :mod:`guru.evals.rubric` after its
+deterministic checks (:func:`grade_case`): the grade lands on the result
+(``rubric_score``, ``rubric_reason``), in the run file and as a ``labels``
+row of the run's ledger (``target_id = <run_id>:<case>``, labeller
+``rubric:<model>``). A grade never fails the case by itself; ``rubric_min``
+does (a score below it, or no grade, adds a failing ``rubric_min`` check).
+The grading call's own cost goes to the run's ledger, not to the case's
+``cost_usd``. :func:`default_rubric_spec` names the routing file's
+cheapest rung for the CLI's default.
+
 Sandbox cases (``sandbox = true``): the copy is made at a stable path
 (``<tmp>/guru-eval-sandbox/<fixture>``, so the image record and tag are
 reused across runs while the lockfile is unchanged) and provisioned with
@@ -82,7 +93,8 @@ from guru.adapters.base import Adapter
 from guru.domain import conversation
 from guru.domain import decisions as decision_seam
 from guru.domain import files, gate, ledger, policy, spend, tools
-from guru.evals import cases, checks, runs
+from guru.domain import routing as routing_domain
+from guru.evals import cases, checks, rubric, runs
 from guru.evals.cases import Case, GitFixture
 from guru.evals.checks import Observed
 from guru.evals.runs import CaseResult, Run
@@ -696,6 +708,80 @@ def run_case(case: Case, base_state: session.SessionState,
         routes=_routes(repo.rows('tasks')[tasks_before:]))
 
 
+# --- rubric grading ---------------------------------------------------------
+
+def default_rubric_spec(routing: RoutingSettings) -> str:
+    """The ``Adapter|model`` of the routing file's cheapest rung: the
+    lowest rung of the ``default`` ladder, else of the first ladder in the
+    table; ``''`` without any rung."""
+    specs = routing.ladders.get(routing_domain.DEFAULT_LADDER)
+    if not specs:
+        specs = next((v for v in routing.ladders.values() if v), None)
+    if not specs:
+        return ''
+    return f'{specs[0].adapter}|{specs[0].model}'
+
+
+def _record_grade(repo: JsonlLedger, target_id: str, labeller: str,
+                  grade: rubric.Grade) -> None:
+    """One ``labels`` row for a grade in the run's ledger (the ledger is
+    enabled and pointed at ``repo`` for the write, then restored)."""
+    prev_repo, prev_enabled = ledger.repository(), config.LEDGER_ENABLED
+    ledger.set_repository(repo)
+    config.LEDGER_ENABLED = True
+    try:
+        ledger.record_label(target_id, labeller, str(grade.score),
+                            note=grade.reason)
+        ledger.flush()
+    finally:
+        ledger.set_repository(prev_repo)
+        config.LEDGER_ENABLED = prev_enabled
+
+
+def grade_case(case: Case, res: CaseResult, judge: rubric.Judge,
+               repo: JsonlLedger, target_id: str,
+               rubric_min: Optional[int] = None) -> None:
+    """Grade ``res`` against the case's rubric and record it; never raises.
+
+    A case without a rubric is left alone. An empty answer scores 0
+    without asking the judge. The grade goes to ``res.rubric_score`` /
+    ``res.rubric_reason`` and to a ``labels`` row in ``repo`` (target
+    ``target_id``, labeller ``rubric:<model>``); a provider error or an
+    unparsable reply leaves the score None with ``error: ...`` as the
+    reason (logged, no label). The grade does not touch ``res.passed``
+    unless ``rubric_min`` is set: then a score below it — or no grade —
+    appends a failing ``rubric_min`` check and fails the case, and a
+    sufficient one appends a passing check.
+    """
+    if not case.expect.rubric:
+        return
+    answer = str(res.observed.get('answer') or '')
+    grade: Optional[rubric.Grade] = None
+    try:
+        if not answer.strip():
+            grade = rubric.Grade(0, 'empty answer')
+        else:
+            grade = rubric.grade(case.prompt, case.expect.rubric, answer,
+                                 judge)
+    except Exception as e:                           # noqa: BLE001
+        res.rubric_reason = f'error: {e}'
+        log.warning('evals: rubric grading of %s failed: %s', case.name, e)
+    if grade is not None:
+        res.rubric_score, res.rubric_reason = grade.score, grade.reason
+        _record_grade(repo, target_id, rubric.labeller(judge), grade)
+    if rubric_min is None:
+        return
+    ok = res.rubric_score is not None and res.rubric_score >= rubric_min
+    if ok:
+        detail = ''
+    elif res.rubric_score is None:
+        detail = f'not graded ({res.rubric_reason or "no grade"})'
+    else:
+        detail = f'rubric {res.rubric_score} < {rubric_min}'
+    res.checks.append(asdict(checks.CheckResult('rubric_min', ok, detail)))
+    res.passed = res.passed and ok
+
+
 # --- the suite --------------------------------------------------------------
 
 def git_sha() -> str:
@@ -772,7 +858,9 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               trajectory_dir: Path = DEFAULT_TRAJECTORY_DIR,
               num_ctx: int = 0, routing: Optional[RoutingSettings] = None,
               routing_name: str = '', allow_spend: bool = False,
-              decisions: Optional[DecisionsSettings] = None) -> Run:
+              decisions: Optional[DecisionsSettings] = None,
+              rubric_spec: str = '',
+              rubric_min: Optional[int] = None) -> Run:
     """Run every case, save the run file and append the trajectory row.
 
     Synchronous; see :func:`run_case` for the loop and concurrency rules.
@@ -789,7 +877,11 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     :func:`_judges_for`); their names land on ``Run.judges``. The adapter
     registry (and the routing settings, empty without a file) are installed
     for the sandbox gate's default reviewer (``judges.set_registry``) and
-    cleared afterwards.
+    cleared afterwards. ``rubric_spec`` (``Adapter|model``, resolved
+    through that registry; ``ValueError`` for an unknown adapter) grades
+    every rubric case with :func:`grade_case` before ``on_result`` sees
+    it, ``rubric_min`` making a low grade fail the case; the spec lands on
+    ``Run.rubric``.
     """
     _assert_no_running_loop('run_suite')
     skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
@@ -813,10 +905,21 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     judges.set_registry(registry, routing if routing is not None
                         else RoutingSettings())
     try:
+        judge: Optional[rubric.LLMJudge] = None
+        if rubric_spec:
+            judge = rubric.judge_from_spec(rubric_spec)
+            if judge is None:
+                raise ValueError(f'rubric judge {rubric_spec!r}: not '
+                                 "'Adapter|model' or the adapter is not "
+                                 'configured')
         with _scanner_for(routing), _judges_for(decisions) as judge_names:
             for case in suite:
                 res = run_case(case, base_state, adapters, out_dir,
                                routing=routed, allow_spend=allow_spend)
+                if judge is not None:
+                    grade_case(case, res, judge,
+                               JsonlLedger(out_dir / 'ledger'),
+                               f'{run_id}:{case.name}', rubric_min)
                 results.append(res)
                 if on_result is not None:
                     on_result(res)
@@ -827,7 +930,7 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               num_ctx=base_state.num_ctx or base_state.num_ctx_override,
               routing=routing_name if routing is not None else '',
               controller=bool(routing is not None and routing.controller),
-              judges=judge_names)
+              judges=judge_names, rubric=rubric_spec if judge else '')
     runs.save(run, out_root)
     runs.append_trajectory(run, Path(trajectory_dir), note=note)
     return run

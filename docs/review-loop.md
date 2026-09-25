@@ -177,12 +177,12 @@ add a ladder for it and switch `type_router = true`:
 [routing]
 type_router = true
 [[routing.ladders.review]]      # kind from the controller's KINDS
-adapter = "Ollama"
-model = "qwen3:14b"
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
 max_complexity = "standard"
 [[routing.ladders.review]]
-adapter = "Anthropic"
-model = "claude-sonnet-5"
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
 max_complexity = "hard"
 ```
 
@@ -196,7 +196,7 @@ Every change in this loop (a promoted judge, a threshold, a new ladder) is
 a behaviour change, so it goes through `python -m guru.evals`:
 
 ```bash
-.venv/bin/python -m guru.evals run --model 'Ollama|qwen3:14b'
+.venv/bin/python -m guru.evals run --model 'SBP Litellm|aws/claude-4-5-haiku' --routing evals/routing/claude-tiers-judges.toml --allow-spend
 .venv/bin/python -m guru.evals compare evals/runs/<before>.json evals/runs/<after>.json
 ```
 

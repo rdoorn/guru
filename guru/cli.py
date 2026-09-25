@@ -46,6 +46,7 @@ def _instantiate(cfg: dict):
             profile=cfg.get('profile'),
             models=cfg.get('models'),
             thinking=cfg.get('thinking', True),
+            cache=cfg.get('cache', True),
         )
     if kind == 'litellm':
         return LiteLLMAdapter(
@@ -54,6 +55,7 @@ def _instantiate(cfg: dict):
             api_key_env=cfg.get('api_key_env'),
             api_key=cfg.get('api_key'),
             models=cfg.get('models'),
+            cache=cfg.get('cache', True),
         )
     return None
 
@@ -380,6 +382,22 @@ def _label_command(label: str, note: str = '') -> None:
         + (f": {note}" if note else ''))
 
 
+def _turn_line(turn_id: str) -> str:
+    """The per-turn cost line for ``turn_id`` (``ledger.format_turn_line``
+    over this process's call rows), or ``''`` when ``[ledger] turn_line``
+    is off or the turn made no calls."""
+    if not config.LEDGER_TURN_LINE or not turn_id:
+        return ''
+    return ledger.format_turn_line(ledger.turn_summary(turn_id))
+
+
+def _session_line() -> str:
+    """The exit summary: every call this process made, or ``''``."""
+    if not config.LEDGER_TURN_LINE:
+        return ''
+    return ledger.format_turn_line(ledger.session_summary(), 'session')
+
+
 def _format_run_summary(summary: dict) -> str:
     """Plain-text rendering of :func:`ledger.run_summary` for ``/ledger``."""
     def money(v: Optional[float]) -> str:
@@ -676,6 +694,97 @@ def _sandbox_command(args: str = '') -> None:
     ui.console.print(text, markup=False, highlight=False)
 
 
+_ROUTING_USAGE = 'usage: /routing [on | off]'
+
+
+def _format_routing(settings: routing_settings.RoutingSettings,
+                    path: Path) -> str:
+    """Plain-text ``/routing``: mode and flags, every ladder's rungs, and
+    the judge per decision point with its mode (active / shadow) and
+    whether it is installed. ``settings`` is the ``full`` load, so an
+    ``off`` table still lists its ladders."""
+    from guru.domain import decisions
+    if not settings.present:
+        return (f'routing: not configured (no [routing] table in {path}); '
+                'guru writes the default block at startup when a remote '
+                'adapter is enabled')
+    if settings.off:
+        head = f'routing: off (mode = "off" in {path}; /routing on to enable)'
+    else:
+        head = f'routing: on (mode {settings.mode})'
+    flag = {True: 'on', False: 'off'}
+    lines = [head,
+             f"controller {flag[bool(settings.controller)]} · complexity "
+             f"router {flag[settings.complexity_router]} · type router "
+             f"{flag[settings.type_router]} · spend {settings.spend_confirm}"
+             f" · secret scan {flag[settings.secret_scan]}"]
+    for name, specs in settings.ladders.items():
+        kind = '' if name == 'default' else f' (kind {name})'
+        lines.append(f'ladder {name}{kind}:')
+        width = max((len(f'{r.adapter} | {r.model}') for r in specs),
+                    default=0)
+        for r in specs:
+            lines.append(f"  {f'{r.adapter} | {r.model}':<{width}}  up to "
+                         f"{r.max_complexity}"
+                         + ('  (default rung)' if r.default else ''))
+    if not settings.ladders:
+        lines.append('ladders: none')
+    if config.DECISIONS_MODE not in config.JUDGING_MODES:
+        lines.append(f'judges: off (decisions mode {config.DECISIONS_MODE})')
+    else:
+        parts = []
+        for point, spec in config.DECISIONS_POINTS.items():
+            state = 'active' if decisions.active(point) else 'shadow'
+            have = ('installed' if decisions.judge_for(point) is not None
+                    else 'not installed')
+            parts.append(f'{point} {state} ({spec}, {have})')
+        lines.append(f'judges: decisions mode {config.DECISIONS_MODE}'
+                     + (' · ' + ' · '.join(parts) if parts else
+                        ' · no points configured'))
+    lines.append(f'file: {path}')
+    return '\n'.join(lines)
+
+
+def _routing_command(args: str = ''
+                     ) -> Optional[routing_settings.RoutingSettings]:
+    """``/routing`` prints the routing in force; ``/routing off`` and
+    ``/routing on`` flip ``mode`` in the settings file
+    (:func:`routing_settings.switch_routing`) and reload it into the
+    process (scanner, ``config.SECRET_SCAN``, the judges' registry).
+
+    Returns the reloaded RoutingSettings after a switch, so the caller can
+    hand it to the orchestrator (``Orchestrator.set_routing``); None when
+    nothing changed.
+    """
+    word = (args or '').strip().lower()
+    path = config.GLOBAL_SETTINGS_PATH
+    reloaded = None
+    if word in ('on', 'off'):
+        try:
+            mode = routing_settings.switch_routing(word == 'on', path)
+        except ValueError as e:
+            ui.console.print(str(e), style='yellow', markup=False,
+                             highlight=False, soft_wrap=True)
+            return None
+        reloaded = load_routing()
+        judges.set_registry(REGISTRY, reloaded)
+        ui.console.print(f'[green]routing {word}[/green] · mode = "{mode}"'
+                         f' written to {path}', markup=True, highlight=False)
+    elif word:
+        ui.console.print(f"Unknown /routing command '{word}'; "
+                         f"{_ROUTING_USAGE}", markup=False)
+        return None
+    try:
+        full = routing_settings.load_routing(
+            config.settings_section('routing'), full=True)
+    except ValueError as e:
+        ui.console.print(f'[yellow]{e}; using routing defaults.[/yellow]')
+        full = routing_settings.RoutingSettings()
+    ui.console.print(_format_routing(full, path), markup=False,
+                     highlight=False)
+    return reloaded
+
+
 def _handle_slash_search(query: str) -> None:
     """Directly invoke web_search and optionally web_fetch for testing."""
     if not tools.ensure_domain_allowed(config.SEARCH_BACKEND_DOMAIN):
@@ -743,6 +852,10 @@ def main() -> None:
     global ADAPTERS, REGISTRY
     ADAPTERS = _build_adapters()
     REGISTRY = build_registry(ADAPTERS)
+    if routing_settings.ensure_default_routing(ADAPTER_CONFIGS) == 'written':
+        ui.console.print(
+            "[yellow]routing: wrote the default Claude-tier configuration to"
+            " settings.toml; /routing to inspect or turn off[/yellow]")
     routing = load_routing()
     judges.set_registry(REGISTRY, routing)     # llm: judges, gate reviewer
     installed = judges.install()
@@ -758,6 +871,9 @@ def main() -> None:
 
     from guru import tui
     tui.run(registry=REGISTRY, routing=routing)
+    line = _session_line()
+    if line:
+        ui.console.print(f'[dim]{line}[/dim]', highlight=False)
     # Remember the context the (final) model ran at, so the next launch loads
     # it directly instead of recomputing the GPU fit.
     config.save_model_ctx(session.model, session.num_ctx)

@@ -51,6 +51,7 @@ Requires the Ollama app running in the menu bar (for local models).
 | `/good [note]`, `/bad [note]` | Label the last completed turn (and the sub-agent tasks it spawned) in the ledger's `labels` stream |
 | `/ledger` | Print this run's spend: calls, tokens and cost per model, tasks per model, the three most expensive tasks |
 | `/tools` | Print the last turn's tool calls from the audit stream: tool, args head, seconds, bytes shown/produced, denials |
+| `/routing`, `/routing off`, `/routing on` | Show the active routing configuration (mode, ladders, judges) or flip `mode` in `settings.toml` and reload it |
 | `exit` / `quit` | Exit |
 
 ## Roles & skills
@@ -186,10 +187,13 @@ only when it differs from the controller's and beats the runner-up by
 `labels_margin`; the task row's `reason` then says
 `labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
 lost on margin leaves a row with `fallback_reason = "margin"` (the kind
-label is only observed). `panel` and `injection` are shadow-only until the
-review loop promotes them. The promotion rule (100+ labelled rows, judge beats the
-heuristic, acceptable false-positive rate) and the labelling procedure are in
-`docs/review-loop.md`.
+label is only observed). The default routing block also runs `panel`
+active: when its `needs_security` answer is yes for a review-kind task and
+no security worker was spawned, the orchestrator adds one
+(`reason` starts with `origin:panel`). `injection` stays shadow-only until
+the review loop promotes it. The promotion rule (100+ labelled rows, judge
+beats the heuristic, acceptable false-positive rate) and the labelling
+procedure are in `docs/review-loop.md`.
 
 Judge specs are `ollama` or `ollama:<model>`, `encoder` or
 `encoder:<hf-model>` (default `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`)
@@ -213,71 +217,119 @@ viewers.
 
 ## Routing (controller and ladder)
 
-Sub-agent tasks can be *routed*: the model that runs a spawned task is picked
-from a ladder of rungs (cheapest first) by the task's labels rather than
-inherited from the parent. The `spawn` tool carries two labels the model
-fills in — `kind` (`debug`, `build`, `refactor`, `review`, `explain`, `docs`,
-`ops`, `other`) and `complexity` (`trivial`, `standard`, `hard`) — and
-`[routing]` in `~/.guru/settings.toml` says what to do with them:
+Sub-agent tasks are *routed*: the model that runs a spawned task is picked
+from a ladder of Claude tiers (cheapest first) by the task's labels rather
+than inherited from the parent. The `spawn` tool carries two labels the
+controller fills in — `kind` (`debug`, `build`, `refactor`, `review`,
+`explain`, `docs`, `ops`, `other`) and `complexity` (`trivial`, `standard`,
+`hard`) — and `[routing]` in `~/.guru/settings.toml` says what to do with
+them.
+
+**The default configuration.** On startup, when `~/.guru/settings.toml`
+has no `[routing]` table and at least one remote adapter (`litellm` or
+`anthropic`) is enabled in `adapters.toml`, guru appends the measured
+default block (`evals/routing/claude-tiers-judges.toml`, triage notes
+`evals/triage/2026-09-24-*`) to the file and prints one line saying so.
+The block is written once; an existing `[routing]` table — even an empty
+one — is never touched, other tables are left as they are, and the file is
+created if missing. For a LiteLLM adapter named `SBP Litellm` it reads:
 
 ```toml
 [routing]
-mode = "local-and-remote"   # local-only | local-and-remote | remote-only
-controller = true           # main agent only coordinates (see below);
-                            # default: on when any ladder rung is configured
-complexity_router = true    # pick the lowest rung that covers the complexity
-type_router = false         # use the per-kind ladders below (default: no)
-spend_confirm = "ask"       # ask | auto | never
-secret_scan = true          # findings force local + redact remote tool output
+mode = "local-and-remote"   # local-only | local-and-remote | remote-only | off
+controller = true           # the main agent only spawns, checks and joins
+complexity_router = true    # lowest rung whose max_complexity covers the task
+type_router = true          # review tasks use [[routing.ladders.review]]
+spend_confirm = "ask"       # ask (once per run) | auto | never
+secret_scan = true          # findings force local; remote tool output redacted
 
-[[routing.ladder]]          # the default ladder, lowest rung first:
-adapter = "SBP Litellm"     # Claude tiers via a LiteLLM adapter (the name
-model = "aws/claude-4-5-haiku"   # must match an [[adapter]] in adapters.toml)
-max_complexity = "trivial"  # the hardest task this rung should take
+[[routing.ladder]]          # trivial: lookups, one-file summaries
+adapter = "SBP Litellm"
+model = "aws/claude-4-5-haiku"
+max_complexity = "trivial"
 
-[[routing.ladder]]
+[[routing.ladder]]          # standard: a few files, one bug, one edit
 adapter = "SBP Litellm"
 model = "aws/claude-5-sonnet"
 max_complexity = "standard"
-default = true              # used when complexity_router = false
+default = true
 
-[[routing.ladder]]
+[[routing.ladder]]          # hard: multi-file work, whole-repo reviews
 adapter = "SBP Litellm"
 model = "aws/claude-5-5-opus"
 max_complexity = "hard"
 
-[[routing.ladders.review]]  # optional per-kind ladder (only with type_router)
+[[routing.ladders.review]]  # review-kind tasks: never Haiku
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
+default = true
+
+[[routing.ladders.review]]
 adapter = "SBP Litellm"
 model = "aws/claude-5-5-opus"
 max_complexity = "hard"
+
+[decisions]
+mode = "active"
+labels_margin = 0.15
+[decisions.points]
+labels = "encoder"          # complexity tie-breaker for the controller's label
+panel = "encoder"           # needs_security: one extra security reviewer
+injection = "injection"     # shadow: fetched pages checked for injection
+[decisions.active]
+labels = true
+panel = true
 ```
 
-Without a `[routing]` table guru behaves exactly as before: children run on
-the parent's adapter and model, nothing is scanned or redacted, and no spend
-question is asked. With one, secret scan and redaction default on. A rung
-naming an adapter that is not configured is dropped with a warning at
-startup; an invalid table logs a warning and the defaults apply. The
-parent's own adapter/model is always *pre-approved*: it is the "no change"
-fallback, it never needs a spend confirmation and neither a scan finding nor
-a declined confirmation takes it away (the parent already runs that model
-and already saw the task text); only `mode = "local-only"` refuses to fall
-back to a remote parent model.
+For an `anthropic` adapter the model ids are the first-party ones
+(`claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5-5`). The
+`[decisions]` part is skipped when the file already has one, and without
+the `judge` extra (`uv sync --extra judge`) `labels` and `panel` are
+written `false` with a note: the encoder judges are then only observed.
+The measurements behind the block used Haiku 4.5 as the main (controller)
+model — pick it in `/models`; the routing table does not set the main
+model.
+
+**Inspecting and turning it off.** `/routing` prints the mode and flags,
+every ladder's rungs and the judge per decision point (active / shadow,
+installed or not). `/routing off` writes `mode = "off"` into the table
+(remembering the previous mode in a trailing `# was "…"` comment, touching
+no other line) and reloads: routing, the controller hint on new agents,
+secret scan and redaction all behave as if no `[routing]` table existed.
+`/routing on` restores the previous mode. Both take effect in the running
+process; the main agent keeps its current controller/hands-on tool set
+until the next start.
+
+**How a task is routed.** With `complexity_router` on, a task takes the
+lowest surviving rung whose `max_complexity` is at least its complexity;
+off, the ladder's `default` rung. With `type_router` on, a task whose
+`kind` has a per-kind ladder (`[[routing.ladders.<kind>]]`) uses it — the
+default block gives `review` its own ladder starting at Sonnet, so a
+trivial-labelled review never lands on Haiku; every other kind uses the
+default ladder. A rung naming an adapter that is not configured is dropped
+with a warning at startup; an invalid table logs a warning and the defaults
+apply. The parent's own adapter/model is always *pre-approved*: it is the
+"no change" fallback, it never needs a spend confirmation and neither a scan
+finding nor a declined confirmation takes it away (the parent already runs
+that model and already saw the task text); only `mode = "local-only"`
+refuses to fall back to a remote parent model.
 
 **Working modes.** `local-only` never runs a task on an adapter that sends
 content off-machine (Ollama is local; Anthropic and LiteLLM are remote);
 `remote-only` never runs one locally; `local-and-remote` uses the whole
-ladder. With `complexity_router` on, a task takes the lowest surviving rung
-whose `max_complexity` is at least its complexity; off, the ladder's
-`default` rung. When the chosen ladder is emptied by the filters the task
-falls back to the default ladder, then to the parent's own model
-(pre-approved, see above), then to the first surviving rung of any ladder.
-A spawn is *refused* only when no permitted rung is left after those steps:
-in `remote-only` mode (where the parent model is never a fallback) when the
-filters strip every remote rung — a secret-scan finding, or a declined spend
-confirmation — or in `local-only` mode when the parent itself runs remotely
-and no ladder has a local rung. The spawn tool reports why and a `refused`
-task row is written. Every filter that changed the outcome is listed
-verbatim in the task row's `reason` (and its `route`).
+ladder. When the chosen ladder is emptied by the filters the task falls
+back to the default ladder, then to the parent's own model (pre-approved,
+see above), then to the first surviving rung of any ladder. A spawn is
+*refused* only when no permitted rung is left after those steps: in
+`remote-only` mode (where the parent model is never a fallback) when the
+filters strip every remote rung — a secret-scan finding, or a declined
+spend confirmation — or in `local-only` mode when the parent itself runs
+remotely and no ladder has a local rung. The spawn tool reports why and a
+`refused` task row is written. Every filter that changed the outcome is
+listed verbatim in the task row's `reason` (and its `route`). Ollama stays
+the local-only option: point the rungs at an Ollama adapter for a
+`local-only` setup, and at the sidecar for the `ollama` judge.
 
 **Controller mode.** `controller = true` turns the main agent into a
 coordinator: it converses, clarifies, decomposes with
@@ -294,6 +346,21 @@ with more than 600 characters without spawning. A hands-on main agent has
 an over-read guard instead: after `OVER_READ_LIMIT` (8) distinct files
 read in one turn without a spawn it is told, once, to delegate
 (struggle counter `over_read`).
+
+**Judges on the routing seam.** Two decision points act with the default
+block (`[decisions] mode = "active"`, see **Ledger and decisions**):
+`labels` is a margin-gated tie-breaker for the controller's complexity
+label — the encoder judge's tier routes the task only when it differs from
+the controller's and beats the runner-up by `labels_margin` (the task
+row's `reason` then says `labels:judge override standard->hard (0.57 vs
+0.33)`); `panel` asks the same judge `needs_security` over every
+`review`-kind task a controller spawns without a security reviewer (role
+`security-engineer` or a skill containing `security`), and on *yes* guru
+spawns one extra `security-engineer` worker on the same task with the
+`/review` panel's security focus — once per parent turn, routed like the
+task it shadows, its row's `reason` opening with `origin:panel
+(needs_security)`, and the controller told to join it. A shadow judge, a
+timeout, an error or a missing judge adds nothing. `injection` stays shadow.
 
 **Spend confirmation.** In `ask` mode the first task that would run on a
 remote (paid) *ladder rung* asks once per run — "Allow remote model spend for this

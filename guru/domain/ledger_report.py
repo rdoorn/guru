@@ -34,12 +34,16 @@ rows count as correct/incorrect under ``choice``.
 """
 from __future__ import annotations
 
+import json
 import math
+import re
 from typing import Optional
 
+from guru import config
 from guru.domain import ledger
 
 _NA = 'n/a'
+SMELL_EXAMPLES = 3            # examples kept per tool-usage smell
 REVIEW_LABELS = ('yes', 'no')
 THRESHOLD_GRID = [round(0.05 * i, 2) for i in range(1, 20)]   # 0.05..0.95
 
@@ -413,6 +417,166 @@ def tools_summary(tool_events_rows: list) -> dict:
     return dict(sorted(out.items()))
 
 
+# --- tool-usage smells -------------------------------------------------------
+
+def _task_key(r: dict) -> tuple:
+    """What "the same task" means for a tool event: one agent's calls
+    within one sub-agent task, or (the main agent) within one turn."""
+    return (str(r.get('run_id') or ''), str(r.get('agent') or ''),
+            str(r.get('task_id') or ''), str(r.get('turn_id') or ''))
+
+
+def _args(r: dict) -> dict:
+    args = r.get('args')
+    return args if isinstance(args, dict) else {}
+
+
+def _call_text(r: dict) -> str:
+    """``tool(k=v, ...)`` for an example line (values cut short)."""
+    parts = []
+    for k, v in _args(r).items():
+        text = str(v)
+        parts.append(f'{k}={text[:60]}' + ('…' if len(text) > 60 else ''))
+    return f"{r.get('tool') or '?'}({', '.join(parts)})"
+
+
+def _where(r: dict) -> str:
+    """``[task <id>]`` / ``[turn <id>]`` suffix for an example line."""
+    if r.get('task_id'):
+        return f" [task {r['task_id']}]"
+    if r.get('turn_id'):
+        return f" [turn {r['turn_id']}]"
+    return ''
+
+
+def _smell(count: int, examples: list) -> dict:
+    return {'count': count, 'examples': examples[:SMELL_EXAMPLES]}
+
+
+def _by_task(rows: list) -> dict:
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault(_task_key(r), []).append(r)
+    return groups
+
+
+def whole_file_after_outline(rows: list) -> dict:
+    """A whole-file ``read_file`` (no ``lines``) of a path already
+    ``outline``-d in the same task: the outline told the model where to
+    look, and it read everything anyway."""
+    count, examples = 0, []
+    for group in _by_task(rows).values():
+        outlined: set = set()
+        for r in group:
+            path = str(_args(r).get('path') or '')
+            if r.get('tool') == 'outline' and path:
+                outlined.add(path)
+            elif (r.get('tool') == 'read_file' and path in outlined
+                  and not str(_args(r).get('lines') or '').strip()):
+                count += 1
+                examples.append(f'read_file({path}) after outline'
+                                f'{_where(r)}')
+    return _smell(count, examples)
+
+
+def _normal(text: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', text.lower())
+
+
+def preactivated_match(query: str, preactivated: list) -> str:
+    """The pre-activated tool ``query`` asks for: the name itself is a
+    token of the query, every word of the name is (``"read a file"`` ->
+    ``read_file``), or the query with spaces/underscores dropped contains
+    the name (``"readfile"``); ``''`` when none matches."""
+    tokens = set(re.split(r'[^a-z0-9_]+', query.lower()))
+    flat = _normal(query)
+    for name in preactivated:
+        words = set(name.lower().split('_'))
+        if (name in tokens or words <= tokens
+                or (flat and _normal(name) in flat)):
+            return name
+    return ''
+
+
+def search_for_preactivated(rows: list, preactivated: list) -> dict:
+    """``search_tools`` calls asking for a tool that was in the model's
+    context from the start (``[tools] preactivate``)."""
+    count, examples = 0, []
+    for r in rows:
+        if r.get('tool') != 'search_tools':
+            continue
+        query = str(_args(r).get('query') or '')
+        hit = preactivated_match(query, preactivated)
+        if hit:
+            count += 1
+            examples.append(f'search_tools({query[:60]}) -> {hit}'
+                            f'{_where(r)}')
+    return _smell(count, examples)
+
+
+def repeated_calls(rows: list) -> dict:
+    """Identical calls (same tool, same arguments) repeated within one
+    task; ``count`` is the number of surplus calls."""
+    count, examples = 0, []
+    for group in _by_task(rows).values():
+        seen: dict = {}
+        for r in group:
+            key = (r.get('tool'), json.dumps(_args(r), sort_keys=True,
+                                             default=str))
+            seen.setdefault(key, []).append(r)
+        for calls in seen.values():
+            if len(calls) > 1:
+                count += len(calls) - 1
+                examples.append(f'{_call_text(calls[0])} x{len(calls)}'
+                                f'{_where(calls[0])}')
+    return _smell(count, examples)
+
+
+def refused_calls(rows: list) -> dict:
+    """Calls a gate refused (``denied`` set), grouped by tool and
+    reason: ``{'count', 'groups': {'tool/reason': n}, 'examples'}``."""
+    groups: dict = {}
+    examples = []
+    for r in rows:
+        reason = str(r.get('denied') or '')
+        if not reason:
+            continue
+        key = f"{r.get('tool') or '?'}/{reason}"
+        groups[key] = groups.get(key, 0) + 1
+        examples.append(f'{_call_text(r)} denied: {reason}{_where(r)}')
+    return {**_smell(sum(groups.values()), examples),
+            'groups': dict(sorted(groups.items()))}
+
+
+def byte_ratio(rows: list) -> dict:
+    """``{tool: {'shown', 'produced', 'ratio'}}`` (bytes the model saw
+    over bytes the tool produced; ratio None when nothing was produced),
+    sorted by tool."""
+    summary = tools_summary(rows)
+    return {name: {'shown': v['shown_bytes'], 'produced': v['produced_bytes'],
+                   'ratio': (v['shown_bytes'] / v['produced_bytes']
+                             if v['produced_bytes'] else None)}
+            for name, v in summary.items()}
+
+
+def tool_smells(tool_events_rows: list,
+                preactivated: Optional[list] = None) -> dict:
+    """The tool-usage smells over the ``tool_events`` stream: keys
+    ``whole_file_after_outline``, ``search_preactivated``,
+    ``repeated_calls``, ``refused`` (each ``{'count', 'examples'}``, up to
+    :data:`SMELL_EXAMPLES` examples; ``refused`` also ``groups``) and
+    ``byte_ratio`` (per tool). ``preactivated`` defaults to
+    ``config.PREACTIVATE_TOOLS``."""
+    pre = list(config.PREACTIVATE_TOOLS if preactivated is None
+               else preactivated)
+    rows = list(tool_events_rows)
+    return {'whole_file_after_outline': whole_file_after_outline(rows),
+            'search_preactivated': search_for_preactivated(rows, pre),
+            'repeated_calls': repeated_calls(rows),
+            'refused': refused_calls(rows),
+            'byte_ratio': byte_ratio(rows)}
+
+
 def controller_labelled(tasks_rows: list) -> bool:
     """True once any task row carries a controller ``kind`` (routing
     writes it); until then controller-vs-judge agreement is ``n/a``."""
@@ -420,14 +584,18 @@ def controller_labelled(tasks_rows: list) -> bool:
 
 
 def build_report(*, calls: list, tasks: list, turns: list, decisions: list,
-                 labels: list, tool_events: Optional[list] = None) -> dict:
+                 labels: list, tool_events: Optional[list] = None,
+                 preactivated: Optional[list] = None) -> dict:
     """Every aggregation in one dict (keys: ``models``, ``latency``,
     ``fallback``, ``judge_vs_heuristic``, ``judge_vs_labels``,
-    ``judge_metrics``, ``turns``, ``tools``, ``controller_labelled``,
-    ``counts``). ``tool_events`` may be omitted (older ledgers)."""
+    ``judge_metrics``, ``turns``, ``tools``, ``tool_smells``,
+    ``controller_labelled``, ``counts``). ``tool_events`` may be omitted
+    (older ledgers); ``preactivated`` is the pre-activated tool list for
+    :func:`tool_smells` (default ``config.PREACTIVATE_TOOLS``)."""
     events = list(tool_events or [])
     return {'models': ledger.per_model_usage(calls),
             'tools': tools_summary(events),
+            'tool_smells': tool_smells(events, preactivated),
             'controller_labelled': controller_labelled(tasks),
             'latency': latency_by_kind(tasks),
             'fallback': fallback_retry(tasks),
@@ -593,4 +761,41 @@ def render_markdown(report: dict) -> str:
                           if v['produced_bytes'] else None),
                     v['denials']]
                    for name, v in report.get('tools', {}).items()])
+    out += _render_smells(report.get('tool_smells'))
     return '\n'.join(out).rstrip() + '\n'
+
+
+_SMELL_TITLES = (
+    ('whole_file_after_outline',
+     'whole-file read_file after an outline of the same path'),
+    ('search_preactivated', 'search_tools for a pre-activated tool'),
+    ('repeated_calls', 'identical repeated calls within a task'),
+    ('refused', 'refused calls'),
+)
+
+
+def _render_smells(smells: Optional[dict]) -> list:
+    """The ``## Tool usage smells`` section: one count line per smell with
+    its examples, the refused calls per tool/reason and the shown/produced
+    byte ratio per tool."""
+    out = ['## Tool usage smells', '',
+           'Over the `tool_events` stream, per task (one agent, one '
+           'sub-agent task or one main-agent turn). Counts, then up to '
+           f'{SMELL_EXAMPLES} examples each.', '']
+    if not smells:
+        return out + ['(no tool events)', '']
+    for key, title in _SMELL_TITLES:
+        smell = smells.get(key) or {'count': 0, 'examples': []}
+        out.append(f"- {title}: {smell['count']}")
+        for ex in smell['examples']:
+            out.append(f'    - {ex}')
+    out.append('')
+    groups = (smells.get('refused') or {}).get('groups') or {}
+    out += ['### Refused calls by tool and reason', '']
+    out += _table(['tool/reason', 'calls'],
+                  [[k, v] for k, v in groups.items()])
+    out += ['### Bytes shown / produced per tool', '']
+    out += _table(['tool', 'shown', 'produced', 'ratio'],
+                  [[name, v['shown'], v['produced'], _rate(v['ratio'])]
+                   for name, v in (smells.get('byte_ratio') or {}).items()])
+    return out

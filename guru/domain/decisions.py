@@ -738,6 +738,17 @@ def panel_questions(request: str) -> list:
             for qid, ask, hyp in _PANEL]
 
 
+NEEDS_SECURITY = 'needs_security'
+
+
+def security_question(request: str) -> Question:
+    """The panel's ``needs_security`` noul alone, over ``request``: the
+    orchestrator asks it (``panel`` active) when a review-kind task is
+    spawned without a security reviewer."""
+    return next(q for q in panel_questions(request)
+                if q.id == NEEDS_SECURITY)
+
+
 def injection_question(text: str, url: str = '') -> Question:
     """Noul: does fetched page text try to instruct the assistant?"""
     return Question(

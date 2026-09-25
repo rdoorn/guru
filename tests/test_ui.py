@@ -239,6 +239,53 @@ class TestLedgerCommand:
         assert '$?' in text and 'A|m' in text
 
 
+class TestTurnLine:
+    """The per-turn cost line and the exit summary behind
+    ``[ledger] turn_line``."""
+
+    def _record(self, monkeypatch, turn_id: str) -> None:
+        from guru.domain import ledger, pricing
+        monkeypatch.setattr(session, 'turn_id', turn_id)
+        ledger.record_call(adapter='A', model='claude-haiku-4-5',
+                           usage=pricing.Usage(590, 10, 410, 0),
+                           seconds=1.0, phase='step')
+        ledger.record_call(adapter='A', model='claude-sonnet-5',
+                           usage=pricing.Usage(100, 50), seconds=1.0,
+                           phase='step')
+
+    def test_turn_line_formats_the_turn(self, monkeypatch, fake_repo) -> None:
+        monkeypatch.setattr(config, 'LEDGER_TURN_LINE', True)
+        self._record(monkeypatch, 'turn-x')
+        line = cli._turn_line('turn-x')
+        assert line.startswith('turn: $0.00 · 2 calls · haiku, sonnet')
+        assert line.endswith('cache 37%')             # 410 of 1100
+        assert cli._turn_line('other') == ''
+        assert cli._turn_line('') == ''
+
+    def test_off_switch(self, monkeypatch, fake_repo) -> None:
+        monkeypatch.setattr(config, 'LEDGER_TURN_LINE', False)
+        self._record(monkeypatch, 'turn-y')
+        assert cli._turn_line('turn-y') == ''
+        assert cli._session_line() == ''
+
+    def test_session_line_covers_every_turn(self, monkeypatch,
+                                            fake_repo) -> None:
+        monkeypatch.setattr(config, 'LEDGER_TURN_LINE', True)
+        self._record(monkeypatch, 'turn-1')
+        self._record(monkeypatch, 'turn-2')
+        assert cli._session_line().startswith('session: $')
+        assert '4 calls' in cli._session_line()
+
+    def test_cost_omitted_when_ledger_disabled(self, monkeypatch) -> None:
+        from guru.domain import ledger
+        monkeypatch.setattr(config, 'LEDGER_TURN_LINE', True)
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        ledger.set_repository(None)
+        self._record(monkeypatch, 'turn-z')
+        assert cli._turn_line('turn-z') == \
+            'turn: 2 calls · haiku, sonnet · cache 37%'
+
+
 class TestToolsCommand:
     """/tools prints the last turn's tool events as a table."""
 

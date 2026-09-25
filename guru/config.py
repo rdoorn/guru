@@ -168,11 +168,13 @@ SECRET_SCAN = False
 
 # Ledger (guru/domain/ledger.py): append-only JSONL streams of every model
 # call, turn and sub-agent task under ~/.guru/ledger/. [ledger] enabled=false
-# turns it off. [pricing."<model>"] overrides the bundled price table
+# turns it off; [ledger] turn_line=false hides the per-turn cost line and
+# the exit summary. [pricing."<model>"] overrides the bundled price table
 # (input_per_m, output_per_m, cache_write_5m_per_m, cache_write_1h_per_m,
 # cache_read_per_m; USD per million tokens).
 LEDGER_DIR = GURU_HOME / 'ledger'
 LEDGER_ENABLED = True
+LEDGER_TURN_LINE = True
 PRICING_OVERRIDES: dict = {}
 
 # Eval suite (guru/evals): the default ``Adapter|model`` spec ('' = guru's
@@ -573,7 +575,7 @@ def _apply_settings() -> None:
     global DECISIONS_TIMEOUT_MS, DECISIONS_GATE_TIMEOUT_MS
     global DECISIONS_BREAKER_TIMEOUTS
     global DECISIONS_BREAKER_COOLDOWN_S, DECISIONS_LABELS_MARGIN
-    global LEDGER_ENABLED, PRICING_OVERRIDES
+    global LEDGER_ENABLED, LEDGER_TURN_LINE, PRICING_OVERRIDES
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -659,7 +661,9 @@ def _apply_settings() -> None:
     if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) \
             and num_ctx >= 0:
         EVALS_NUM_CTX = num_ctx
-    LEDGER_ENABLED = bool(settings_section('ledger').get('enabled', True))
+    ledger = settings_section('ledger')
+    LEDGER_ENABLED = bool(ledger.get('enabled', True))
+    LEDGER_TURN_LINE = bool(ledger.get('turn_line', True))
     PRICING_OVERRIDES = {
         str(k): {str(f): float(v) for f, v in tbl.items()
                  if isinstance(v, (int, float))}

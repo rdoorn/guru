@@ -29,6 +29,15 @@ registry. Without a registry routing is inert (the child keeps the parent's
 adapter and model). A remote child that fails without an answer is respawned
 once on the best local rung (``retry_of``); the original row is
 ``fell_back``.
+
+Panel judge (item 6 of ``docs/plans/2026-09-25-top10-remaining.md``): when
+the ``panel`` decision point is *active* and a controller spawns a
+``review``-kind task without a security reviewer, the judge's
+``needs_security`` verdict over the task text adds one ``security-engineer``
+worker on the same task (once per parent turn; the row says
+``origin = "panel"`` and its ``reason`` starts with ``origin:panel``).
+Shadow mode changes nothing (the turn loop already shadows the panel
+questions).
 """
 import asyncio
 import io
@@ -61,6 +70,19 @@ CHECK_WAIT_TEXT = (
     " be resumed with their results.")
 _DEFERRED_REASON = 'confirmation:deferred (loop thread)'
 _RETRY_REASON = 'retry:local after remote failure'
+# The panel judge's extra worker: role/skill/focus from the /review panel's
+# security member, the task row's origin marker, and the reply suffix that
+# tells the controller to join it.
+PANEL_ORIGIN = 'origin:panel (needs_security)'
+SECURITY_ROLE = 'security-engineer'
+_SECURITY_MEMBER = next(m for m in config.REVIEW_PANEL
+                        if m[0] == SECURITY_ROLE)
+_SECURITY_TASK = (
+    "{task}\n\nFocus on {focus}. Give concrete findings with file:line and"
+    " a suggested fix; be specific.")
+_SECURITY_SPAWNED = (
+    " guru also spawned {title} ({role}) on the same task because the panel"
+    " judge found it needs a security review; join it as well.")
 
 
 @dataclass
@@ -93,6 +115,9 @@ class Orchestrator:
         # [routing] table lazily on first use.
         self._routing_settings = routing
         self._ladders: Optional[dict] = None
+        # (parent title, turn_id) pairs that already have a security worker
+        # (spawned by the controller or added by the panel judge).
+        self._security_turns: set = set()
         self.barriers: dict = {}
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -119,6 +144,12 @@ class Orchestrator:
                 self._ladders = routing_settings.ladders_from_settings(
                     self._routing(), self.registry)
         return self._ladders
+
+    def set_routing(self, settings: RoutingSettings) -> None:
+        """Replace the RoutingSettings in force (``/routing on|off``) and
+        rebuild the ladders on next use."""
+        self._routing_settings = settings
+        self._ladders = None
 
     def _local_main(self, parent) -> Optional[routing.Rung]:
         """The parent's adapter/model as a fallback rung, when the registry
@@ -534,7 +565,8 @@ class Orchestrator:
                     kind: str = 'other', complexity: str = 'standard',
                     retry_of: str = '', local_only: bool = False,
                     plan: Optional[_Plan] = None,
-                    refusal: Optional[list] = None) -> Optional[Agent]:
+                    refusal: Optional[list] = None,
+                    origin: str = '') -> Optional[Agent]:
         """Create a configured, routed child agent for ``parent`` with a
         running TaskRecord.
 
@@ -542,7 +574,8 @@ class Orchestrator:
         title when several children are made in one batch, which also passes
         one shared environment snapshot via ``env``. The route comes from
         ``plan`` (else from ``_plan_child``) and is applied to the child;
-        the outcome lands on the TaskRecord. Returns None when the route is
+        the outcome lands on the TaskRecord, as does ``origin`` (``'panel'``
+        for the panel judge's worker). Returns None when the route is
         refused: a ``refused`` task row is written, the reasons are appended
         to ``refusal`` (when given) and no child exists.
         """
@@ -559,7 +592,7 @@ class Orchestrator:
                 turn_id=parent.state.turn_id, model='', adapter='',
                 env=env, route=route.as_dict(), reason=reason,
                 findings=plan.findings, confirmation=plan.confirmation,
-                retry_of=retry_of)
+                retry_of=retry_of, origin=origin)
             rec.status = 'refused'
             ledger.record_task(rec)
             log.warning('routing refused task %s: %s', rec.task_id,
@@ -586,7 +619,7 @@ class Orchestrator:
             tools_active=sorted(child.state.active_tool_names),
             route=route.as_dict() if route is not None else None,
             reason=reason, findings=plan.findings,
-            confirmation=plan.confirmation, retry_of=retry_of)
+            confirmation=plan.confirmation, retry_of=retry_of, origin=origin)
         child.task_rec = rec
         child.state.task_id = rec.task_id
         child.state.task_text = task
@@ -613,19 +646,84 @@ class Orchestrator:
                 f" allowed to run it ({'; '.join(refusal)}). Handle it"
                 " yourself, or ask the user to adjust the routing settings.")
         title = child.title
+        extra = self._panel_security_worker(parent, child)
+        children = [child] if extra is None else [child, extra]
 
         # Append to the agent list on the loop thread — never mutate it from a
         # worker thread while the loop may be iterating it.
         def _start() -> None:
-            self.manager.agents.append(child)
-            self.launch(child)
+            for c in children:
+                self.manager.agents.append(c)
+                self.launch(c)
             self.invalidate()
 
         assert self.loop is not None
         self.loop.call_soon_threadsafe(_start)
-        return (
+        reply = (
             f"Spawned {title} to work on this task in parallel. Its result"
             f" will be delivered back to you automatically when it finishes.")
+        if extra is not None:
+            reply += _SECURITY_SPAWNED.format(title=extra.title,
+                                              role=SECURITY_ROLE)
+        return reply
+
+    @staticmethod
+    def _is_security(role: Optional[str], skill: Optional[str]) -> bool:
+        return role == SECURITY_ROLE or 'security' in (skill or '')
+
+    def _panel_security_worker(self, parent, child) -> Optional[Agent]:
+        """The panel judge's extra worker for ``child`` (a spawned task), or
+        None.
+
+        Only with the ``panel`` point active, for a ``review``-kind task,
+        when neither ``child`` nor any earlier child of ``parent`` in this
+        turn is a security reviewer, and when the judge answers yes to
+        ``needs_security`` over the task text (heuristic: no; a timeout or
+        error adds nothing). The worker takes the same task with the
+        security focus of the /review panel, kind ``review`` at the
+        child's complexity; its row carries ``origin = 'panel'`` and a
+        ``reason`` opening with ``PANEL_ORIGIN``. At most one per parent
+        turn.
+        """
+        rec = child.task_rec
+        key = (parent.title, parent.state.turn_id)
+        if self._is_security(child.state.active_role,
+                             child.state.active_skill):
+            self._security_turns.add(key)
+            return None
+        if (rec is None or rec.kind != 'review'
+                or not decisions.active('panel')
+                or key in self._security_turns
+                or self._security_seen(parent)):
+            return None
+        needed = decisions.decide(
+            'panel', decisions.security_question(child.task),
+            heuristic=False)
+        if not needed:
+            return None
+        task = _SECURITY_TASK.format(task=child.task,
+                                     focus=_SECURITY_MEMBER[2])
+        plan = self._plan_child(parent, task, 'review', rec.complexity)
+        plan.reason.insert(0, PANEL_ORIGIN)
+        extra = self._make_child(parent, task, role=SECURITY_ROLE,
+                                 skill=_SECURITY_MEMBER[1], index=1,
+                                 env=rec.env, plan=plan, origin='panel')
+        if extra is not None:
+            self._security_turns.add(key)
+        return extra
+
+    def _security_seen(self, parent) -> bool:
+        """True when a security reviewer already ran for ``parent`` in the
+        current turn (covers children the controller spawned before the
+        panel point became active)."""
+        turn = parent.state.turn_id
+        for a in self.manager.agents:
+            if (a.parent is parent and a.state.turn_id == turn
+                    and self._is_security(a.state.active_role,
+                                          a.state.active_skill)):
+                self._security_turns.add((parent.title, turn))
+                return True
+        return False
 
     def spawn_panel(self, parent, tasks, synthesis: str = '') -> list:
         """Deterministically spawn a fixed panel of sub-agents parented to

@@ -40,6 +40,7 @@ def _fresh_accumulators(monkeypatch):
     monkeypatch.setattr(session, 'unpriced_calls', 0)
     monkeypatch.setattr(session, 'struggle', ledger.new_struggle())
     monkeypatch.setattr(session, 'last_error', '')
+    ledger.forget_calls()            # the per-turn rows behind turn_summary
 
 
 class FakeRepo:

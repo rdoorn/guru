@@ -240,6 +240,7 @@ class TestDecisionsAndLedgerSettings:
                               ('DECISIONS_LABELS_MARGIN', 0.15),
                               ('DECISIONS_SIDECAR_MODEL', 'qwen3:4b'),
                               ('LEDGER_ENABLED', True),
+                              ('LEDGER_TURN_LINE', True),
                               ('PRICING_OVERRIDES', {})):
             monkeypatch.setattr(config, name, default)
         config._apply_settings()
@@ -258,6 +259,7 @@ class TestDecisionsAndLedgerSettings:
         assert config.DECISIONS_LABELS_MARGIN == 0.15
         assert config.OVER_READ_LIMIT == 8
         assert config.LEDGER_ENABLED is True
+        assert config.LEDGER_TURN_LINE is True
         assert config.LEDGER_DIR == config.GURU_HOME / 'ledger'
         assert config.PRICING_OVERRIDES == {}
 
@@ -284,6 +286,13 @@ class TestDecisionsAndLedgerSettings:
         assert config.LEDGER_ENABLED is False
         assert config.PRICING_OVERRIDES == {
             'claude-sonnet-5': {'input_per_m': 2.5, 'output_per_m': 11.0}}
+
+    def test_ledger_turn_line_switch(self, tmp_path, monkeypatch) -> None:
+        self._apply(tmp_path, monkeypatch, '[ledger]\nturn_line = false\n')
+        assert config.LEDGER_TURN_LINE is False
+        assert config.LEDGER_ENABLED is True          # independent keys
+        self._apply(tmp_path, monkeypatch, '[ledger]\nenabled = false\n')
+        assert config.LEDGER_TURN_LINE is True
 
     def test_unknown_mode_falls_back_to_off(self, tmp_path, monkeypatch):
         self._apply(tmp_path, monkeypatch, '[decisions]\nmode = "yolo"\n')

@@ -882,6 +882,177 @@ class TestCallRecords:
         assert row['cost_source'] == 'header'
 
 
+class TestPromptCaching:
+    """cache_control markers (system prompt + last tool) on both remote
+    adapters, the ``cache`` switch, and LiteLLM cache-usage parsing."""
+
+    SPECS = [{'name': 'a', 'description': 'A', 'parameters': {'x': 'X'}},
+             {'name': 'b', 'description': 'B', 'parameters': {}}]
+
+    # --- pure helpers: anthropic --------------------------------------------
+
+    def test_anthropic_system_blocks(self) -> None:
+        assert anth.system_blocks('', True) is None
+        assert anth.system_blocks('S', False) == 'S'
+        assert anth.system_blocks('S', True) == [
+            {'type': 'text', 'text': 'S',
+             'cache_control': {'type': 'ephemeral'}}]
+
+    def test_anthropic_cached_tools_marks_last_only(self) -> None:
+        defs = anth.tool_defs(self.SPECS)
+        out = anth.cached_tools(defs, True)
+        assert 'cache_control' not in out[0]
+        assert out[1]['cache_control'] == {'type': 'ephemeral'}
+        assert 'cache_control' not in defs[1]          # copy, not in place
+        assert anth.cached_tools(defs, False) is defs
+        assert anth.cached_tools([], True) == []
+
+    # --- pure helpers: litellm ----------------------------------------------
+
+    def test_litellm_cached_messages_marks_last_system_part(self) -> None:
+        msgs = [{'role': 'system', 'content': 'BASE'},
+                {'role': 'system', 'content': 'SUMMARY'},
+                {'role': 'user', 'content': 'q'}]
+        out = lite.cached_messages(msgs, True)
+        assert out[0]['content'] == [{'type': 'text', 'text': 'BASE'}]
+        assert out[1]['content'] == [{
+            'type': 'text', 'text': 'SUMMARY',
+            'cache_control': {'type': 'ephemeral'}}]
+        assert out[2] == {'role': 'user', 'content': 'q'}
+        assert msgs[1]['content'] == 'SUMMARY'          # untouched
+        assert lite.cached_messages(msgs, False) is msgs
+        no_system = [{'role': 'user', 'content': 'q'}]
+        assert lite.cached_messages(no_system, True) is no_system
+
+    def test_litellm_cached_tools_marks_last_only(self) -> None:
+        defs = lite.openai_tool_defs(self.SPECS)
+        out = lite.cached_tools(defs, True)
+        assert 'cache_control' not in out[0]
+        assert out[1]['cache_control'] == {'type': 'ephemeral'}
+        assert out[1]['type'] == 'function'
+        assert lite.cached_tools(None, True) is None
+
+    def test_litellm_usage_anthropic_style_fields(self) -> None:
+        # What the SBP proxy returns for aws/claude-* (probe 2026-09-25):
+        # prompt_tokens counts the cached tokens too.
+        u = lite.usage_from(SimpleNamespace(
+            prompt_tokens=6746, completion_tokens=47,
+            cache_read_input_tokens=0, cache_creation_input_tokens=6386,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0)))
+        assert (u.input_tokens, u.output_tokens) == (360, 47)
+        assert (u.cache_read_tokens, u.cache_write_tokens) == (0, 6386)
+
+    def test_litellm_usage_openai_style_details(self) -> None:
+        u = lite.usage_from({'prompt_tokens': 100, 'completion_tokens': 5,
+                             'prompt_tokens_details': {'cached_tokens': 60}})
+        assert u.input_tokens == 40 and u.cache_read_tokens == 60
+        assert u.cache_write_tokens == 0
+
+    def test_litellm_usage_plain_and_missing(self) -> None:
+        u = lite.usage_from(SimpleNamespace(prompt_tokens=10,
+                                            completion_tokens=5))
+        assert (u.input_tokens, u.output_tokens) == (10, 5)
+        assert u.cache_read_tokens == 0 and u.cache_write_tokens == 0
+        assert lite.usage_from(None) == lite.pricing.Usage()
+        odd = lite.usage_from(SimpleNamespace(prompt_tokens='x',
+                                              completion_tokens=None,
+                                              cache_read_input_tokens=True))
+        assert odd == lite.pricing.Usage()
+
+    # --- wiring: what the request carries ----------------------------------
+
+    def _arm(self, monkeypatch):
+        from guru.adapters import turn
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'session_in', 0)
+        monkeypatch.setattr(session, 'session_out', 0)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'system', 'content': 'SYS'},
+            {'role': 'user', 'content': 'q'}])
+        monkeypatch.setattr('guru.domain.tools.active_specs',
+                            lambda: self.SPECS)
+
+    def _anthropic_kwargs(self, monkeypatch, cache: bool) -> dict:
+        self._arm(monkeypatch)
+        seen: dict = {}
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            stop_reason='end_turn',
+            content=[SimpleNamespace(type='text', text='ok')])
+
+        def create(**kw):
+            seen.update(kw)
+            return resp
+        a = anth.AnthropicAdapter(thinking=False, cache=cache)
+        monkeypatch.setattr(a, '_client', lambda: SimpleNamespace(
+            messages=SimpleNamespace(create=create)))
+        a.run_turn()
+        return seen
+
+    def test_anthropic_step_sends_markers(self, monkeypatch) -> None:
+        kw = self._anthropic_kwargs(monkeypatch, cache=True)
+        assert kw['system'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert kw['system'][0]['text'] == 'SYS'
+        assert kw['tools'][-1]['cache_control'] == {'type': 'ephemeral'}
+        assert 'cache_control' not in kw['tools'][0]
+        assert all('cache_control' not in str(m) for m in kw['messages'])
+
+    def test_anthropic_cache_off(self, monkeypatch) -> None:
+        kw = self._anthropic_kwargs(monkeypatch, cache=False)
+        assert kw['system'] == 'SYS'
+        assert 'cache_control' not in str(kw['tools'])
+
+    def _litellm_kwargs(self, monkeypatch, cache: bool, fake_repo) -> tuple:
+        self._arm(monkeypatch)
+        seen: dict = {}
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=6746, completion_tokens=47,
+                                  cache_read_input_tokens=6386,
+                                  cache_creation_input_tokens=0),
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='ok', tool_calls=None),
+                finish_reason='stop')])
+        a = lite.LiteLLMAdapter(base_url='http://proxy', cache=cache)
+        monkeypatch.setattr(a, '_client', lambda: _fake_openai_client(
+            resp, create=lambda **kw: seen.update(kw)))
+        a.run_turn()
+        from guru.domain import ledger
+        ledger.flush()
+        return seen, fake_repo.stream('calls')
+
+    def test_litellm_step_sends_markers_and_records_cache(
+            self, monkeypatch, fake_repo) -> None:
+        kw, rows = self._litellm_kwargs(monkeypatch, True, fake_repo)
+        system = kw['messages'][0]
+        assert system['role'] == 'system'
+        assert system['content'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert kw['tools'][-1]['cache_control'] == {'type': 'ephemeral'}
+        assert 'cache_control' not in kw['tools'][0]
+        assert kw['messages'][1] == {'role': 'user', 'content': 'q'}
+        [row] = rows
+        assert row['tokens_in'] == 360 and row['cache_read'] == 6386
+        assert row['cache_write'] == 0 and row['tokens_out'] == 47
+
+    def test_litellm_cache_off(self, monkeypatch, fake_repo) -> None:
+        kw, _ = self._litellm_kwargs(monkeypatch, False, fake_repo)
+        assert kw['messages'][0] == {'role': 'system', 'content': 'SYS'}
+        assert 'cache_control' not in str(kw['tools'])
+
+    def test_cache_defaults_on_and_config_switch(self) -> None:
+        assert anth.AnthropicAdapter().cache is True
+        assert lite.LiteLLMAdapter().cache is True
+        import guru.cli as cli
+        assert cli._instantiate({'type': 'anthropic', 'cache': False}).cache \
+            is False
+        assert cli._instantiate({'type': 'litellm', 'cache': False}).cache \
+            is False
+        assert cli._instantiate({'type': 'litellm'}).cache is True
+
+
 def _fake_openai_client(resp=None, headers=None, create=None):
     """Fake ``openai.OpenAI`` exposing only what the LiteLLM adapter calls:
     ``chat.completions.with_raw_response.create`` -> raw with ``.parse()``

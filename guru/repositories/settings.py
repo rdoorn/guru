@@ -16,15 +16,23 @@ sibling table)::
     secret_scan = true
 
     [[routing.ladder]]               # the default ladder, lowest rung first
-    adapter = "Ollama"
-    model = "qwen3:14b"
+    adapter = "SBP Litellm"
+    model = "aws/claude-5-sonnet"
     max_complexity = "standard"      # trivial | standard | hard
     default = true                   # at most one per ladder
 
     [[routing.ladders.review]]       # per-kind ladder (kind from KINDS)
-    adapter = "Anthropic"
-    model = "claude-sonnet-5"
+    adapter = "SBP Litellm"
+    model = "aws/claude-5-5-opus"
     max_complexity = "hard"
+
+``mode = "off"`` keeps the table but disables it: :func:`load_routing`
+then yields the no-table defaults (``present`` False, ``off`` True), so
+guru behaves as without a ``[routing]`` table; ``load_routing(full=True)``
+keeps the ladders for display (``/routing``). :func:`switch_routing`
+flips that key in place and :func:`ensure_default_routing` writes the
+measured default block (:func:`default_routing_toml`) into a settings
+file that has no ``[routing]`` yet.
 
 Validation is strict: unknown keys, unknown enum values and duplicate
 defaults raise ``ValueError`` naming the offender, so a typo cannot silently
@@ -77,6 +85,7 @@ opt-in)::
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,9 +98,12 @@ from guru.domain.toolpolicy import ToolsPolicy
 from guru.repositories.adapters import AdapterRegistry
 
 __all__ = ['DecisionsSettings', 'RoutingSettings', 'RungSpec',
-           'SandboxSettings', 'ToolsPolicy', 'ladders_from_settings',
+           'SandboxSettings', 'ToolsPolicy', 'default_routing_toml',
+           'ensure_default_routing', 'ladders_from_settings',
            'load_decisions', 'load_routing', 'load_sandbox',
-           'load_tools_policy']
+           'load_tools_policy', 'switch_routing']
+
+MODE_OFF = 'off'
 
 SPEND_CONFIRM = ('ask', 'auto', 'never')
 
@@ -130,6 +142,8 @@ class RoutingSettings:
     # guru behaves exactly as before: the CLI binds no secret scanner and
     # leaves ``config.SECRET_SCAN`` off, and routing is inert.
     present: bool = False
+    # True when the table says ``mode = "off"`` (kept but disabled).
+    off: bool = False
 
     def __post_init__(self) -> None:
         if self.controller is None:
@@ -264,16 +278,24 @@ def _ladder(raw: object, where: str) -> list[RungSpec]:
     return rungs
 
 
-def load_routing(section: Optional[dict] = None) -> RoutingSettings:
+def load_routing(section: Optional[dict] = None, *,
+                 full: bool = False) -> RoutingSettings:
     """Parse and validate the ``[routing]`` table.
 
     ``section`` defaults to ``config.settings_section('routing')``; a missing
     (or empty) table yields the documented defaults with ``present`` False.
-    Raises ``ValueError`` on any invalid or unknown key.
+    ``mode = "off"`` validates the whole table and then yields the same
+    defaults with ``off`` True (guru runs as without a table) — unless
+    ``full`` is set, which keeps the parsed ladders and flags (for display)
+    with ``mode`` at its default. Raises ``ValueError`` on any invalid or
+    unknown key.
     """
     if section is None:
         section = config.settings_section('routing')
     present = bool(section)
+    off = section.get('mode') == MODE_OFF
+    if off:
+        section = {**section, 'mode': routing.MODES[1]}
     unknown = sorted(set(section) - _KNOWN_KEYS)
     if unknown:
         raise ValueError(
@@ -298,7 +320,7 @@ def load_routing(section: Optional[dict] = None) -> RoutingSettings:
                     f'[routing] ladders.{kind}: unknown kind; expected one '
                     'of ' + ', '.join(routing.KINDS))
             ladders[str(kind)] = _ladder(raw, f'routing.ladders.{kind}')
-    return RoutingSettings(
+    parsed = RoutingSettings(
         mode=_enum(section, 'mode', routing.MODES, 'local-and-remote'),
         controller=_flag(section, 'controller', None),
         complexity_router=bool(_flag(section, 'complexity_router', True)),
@@ -307,7 +329,11 @@ def load_routing(section: Optional[dict] = None) -> RoutingSettings:
         secret_scan=bool(_flag(section, 'secret_scan', True)),
         ladders=ladders,
         present=present,
+        off=off,
     )
+    if off and not full:
+        return RoutingSettings(off=True)
+    return parsed
 
 
 def ladders_from_settings(settings: RoutingSettings,
@@ -335,6 +361,265 @@ def ladders_from_settings(settings: RoutingSettings,
         if rungs:
             ladders[name] = Ladder(rungs)
     return ladders
+
+
+# --- the default [routing] block -------------------------------------------
+
+# Adapter kinds (``type`` in adapters.toml) whose models run off-machine.
+REMOTE_ADAPTER_KINDS = ('litellm', 'anthropic')
+# The Claude tiers per adapter kind, cheapest first (Haiku 4.5, Sonnet 5,
+# Opus 5.5): LiteLLM/Bedrock route names, and the first-party ids that key
+# ``guru.domain.pricing.DEFAULT_PRICES``.
+DEFAULT_TIER_MODELS = {
+    'litellm': ('aws/claude-4-5-haiku', 'aws/claude-5-sonnet',
+                'aws/claude-5-5-opus'),
+    'anthropic': ('claude-haiku-4-5', 'claude-sonnet-5', 'claude-opus-5-5'),
+}
+_ROUTING_HEADER = """\
+# Routing defaults written by guru: the configuration measured in
+# evals/routing/claude-tiers-judges.toml (evals/triage/2026-09-24-*).
+# Sub-agent tasks run on Claude tiers picked by the controller's
+# complexity label; reviews never run on Haiku. Measured with Haiku 4.5
+# as the main (controller) model: pick it in /models.
+# /routing shows this; /routing off disables it (mode = "off");
+# guru never rewrites an existing [routing] table.
+"""
+_ROUTING_TABLE = """
+[routing]
+mode = "local-and-remote"   # local-only | local-and-remote | remote-only | off
+controller = true           # the main agent only spawns, checks and joins
+complexity_router = true    # lowest rung whose max_complexity covers the task
+type_router = true          # review tasks use [[routing.ladders.review]]
+spend_confirm = "ask"       # ask (once per run) | auto | never
+secret_scan = true          # findings force local; remote tool output redacted
+
+"""
+_DECISIONS_TABLE = """
+[decisions]
+mode = "active"             # judges act on the points listed under active
+labels_margin = 0.15        # the labels judge's tier must beat its runner-up
+
+[decisions.points]
+labels = "encoder"          # complexity tie-breaker for the controller's label
+panel = "encoder"           # needs_security: one extra security reviewer
+injection = "injection"     # shadow: fetched pages checked for injection
+
+[decisions.active]
+{note}labels = {flag}
+panel = {flag}
+"""
+_JUDGE_EXTRA_NOTE = """\
+# The encoder judges need the judge extra (uv sync --extra judge);
+# until it is installed labels and panel stay shadow (verdicts are
+# logged, nothing changes). Set both to true afterwards.
+"""
+
+
+def _judge_extra_available() -> bool:
+    """True when the ``judge`` extra (torch + transformers) is importable;
+    a ``find_spec`` probe, so nothing heavy is loaded."""
+    import importlib.util
+    try:
+        return all(importlib.util.find_spec(name) is not None
+                   for name in ('torch', 'transformers'))
+    except (ImportError, ValueError):
+        return False
+
+
+def _rung_toml(table: str, adapter: str, model: str, level: str,
+               default: bool = False, note: str = '') -> str:
+    head = f'[[{table}]]'
+    if note:
+        head = f'{head:<28}# {note}'
+    lines = [head, f'adapter = "{adapter}"', f'model = "{model}"',
+             f'max_complexity = "{level}"']
+    if default:
+        lines.append('default = true')
+    return '\n'.join(lines) + '\n'
+
+
+def default_routing_toml(adapter_name: str, adapter_kind: str, *,
+                         judges_available: Optional[bool] = None,
+                         decisions: bool = True) -> str:
+    """The default ``[routing]`` (and ``[decisions]``) block for the remote
+    adapter ``adapter_name`` of kind ``adapter_kind`` (a key of
+    :data:`DEFAULT_TIER_MODELS`), as TOML text.
+
+    Ladder: Haiku for trivial, Sonnet (default rung) for standard, Opus
+    for hard; a ``review`` ladder starting at Sonnet (``type_router`` on
+    so review-kind tasks take it). Judges: the ``labels`` tie-breaker
+    (margin 0.15) and the ``panel`` point active on the encoder judge,
+    ``injection`` shadow — active only when ``judges_available`` (default:
+    probe the ``judge`` extra); otherwise both are written ``false`` with a
+    note. ``decisions=False`` omits the ``[decisions]`` table (the file
+    already has one). Raises ``ValueError`` for an unknown kind or a name
+    that cannot sit in a TOML basic string.
+    """
+    if adapter_kind not in DEFAULT_TIER_MODELS:
+        raise ValueError(
+            f'no default ladder for adapter kind {adapter_kind!r}; expected '
+            'one of ' + ', '.join(DEFAULT_TIER_MODELS))
+    if not adapter_name or any(ch in adapter_name for ch in '"\\\n'):
+        raise ValueError(f'adapter name {adapter_name!r} cannot be written '
+                         'as a TOML string')
+    if judges_available is None:
+        judges_available = _judge_extra_available()
+    haiku, sonnet, opus = DEFAULT_TIER_MODELS[adapter_kind]
+    out = [_ROUTING_HEADER, _ROUTING_TABLE,
+           _rung_toml('routing.ladder', adapter_name, haiku, 'trivial',
+                      note='trivial: lookups, one-file summaries'),
+           '\n',
+           _rung_toml('routing.ladder', adapter_name, sonnet, 'standard',
+                      default=True,
+                      note='standard: a few files, one bug, one edit'),
+           '\n',
+           _rung_toml('routing.ladder', adapter_name, opus, 'hard',
+                      note='hard: multi-file work, whole-repo reviews'),
+           '\n',
+           _rung_toml('routing.ladders.review', adapter_name, sonnet,
+                      'standard', default=True,
+                      note='review-kind tasks: never Haiku'),
+           '\n',
+           _rung_toml('routing.ladders.review', adapter_name, opus, 'hard')]
+    if decisions:
+        out.append(_DECISIONS_TABLE.format(
+            flag='true' if judges_available else 'false',
+            note='' if judges_available else _JUDGE_EXTRA_NOTE))
+    return ''.join(out)
+
+
+def _remote_adapter(adapters: list) -> Optional[tuple[str, str]]:
+    """``(name, kind)`` of the first enabled remote adapter config."""
+    for cfg in adapters:
+        if not isinstance(cfg, dict):
+            continue
+        kind = str(cfg.get('type', ''))
+        name = str(cfg.get('name', '') or kind)
+        if (kind in REMOTE_ADAPTER_KINDS and cfg.get('enable', True)
+                and name):
+            return name, kind
+    return None
+
+
+def ensure_default_routing(adapters: Optional[list] = None,
+                           path: Optional[Path] = None, *,
+                           judges_available: Optional[bool] = None) -> str:
+    """Write the default routing block into the settings file when it has
+    no ``[routing]`` table and an enabled remote adapter exists.
+
+    ``adapters`` are the raw adapter configs (default
+    ``config.load_adapter_configs()``); ``path`` the settings file (default
+    ``config.GLOBAL_SETTINGS_PATH``), created when missing. The block is
+    appended after the existing text; no existing table is touched, and
+    the ``[decisions]`` part is skipped when the file already has one.
+    After writing, ``config`` re-reads the settings so the new
+    ``[decisions]`` table takes effect in this process.
+
+    Returns ``'written'``, ``'exists'`` (a ``[routing]`` table, even an
+    empty one), ``'no-remote'`` (no enabled litellm/anthropic adapter) or
+    ``'invalid'`` (the file cannot be parsed or written; nothing changed).
+    """
+    if adapters is None:
+        adapters = config.load_adapter_configs()
+    remote = _remote_adapter(adapters)
+    if remote is None:
+        return 'no-remote'
+    target = Path(path) if path is not None else config.GLOBAL_SETTINGS_PATH
+    try:
+        text = target.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        text = ''
+    except OSError as e:
+        log.warning('routing: cannot read %s: %s', target, e)
+        return 'invalid'
+    try:
+        data = tomllib.loads(text)
+    except ValueError as e:                        # TOMLDecodeError
+        log.warning('routing: %s is not valid TOML (%s); not writing the '
+                    'default block', target, e)
+        return 'invalid'
+    if 'routing' in data:
+        return 'exists'
+    block = default_routing_toml(*remote, judges_available=judges_available,
+                                 decisions='decisions' not in data)
+    joiner = '' if not text else ('\n' if text.endswith('\n') else '\n\n')
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text + joiner + block, encoding='utf-8')
+    except OSError as e:
+        log.warning('routing: cannot write %s: %s', target, e)
+        return 'invalid'
+    config._apply_settings()
+    return 'written'
+
+
+_TABLE_HEADER = re.compile(r'^\s*\[')
+_ROUTING_HEADER_LINE = re.compile(r'^\s*\[routing\]\s*(#.*)?$')
+_MODE_LINE = re.compile(
+    r'^(?P<head>\s*mode\s*=\s*)"(?P<mode>[^"]*)"(?P<gap>[ \t]*)'
+    r'(?:#[ \t]*(?P<comment>.*))?$')
+_WAS = re.compile(r'^was "(?P<was>[^"]*)"(?: -- (?P<rest>.*))?$')
+
+
+def _mode_line(head: str, mode: str, comment: str, column: int) -> str:
+    """``head"mode"`` plus ``# comment`` (when any) starting at ``column``
+    where possible, so a switch keeps the file's comment alignment."""
+    value = f'{head}"{mode}"'
+    if not comment:
+        return value
+    return f'{value:<{max(column, len(value) + 2)}}# {comment}'
+
+
+def switch_routing(on: bool, path: Optional[Path] = None) -> str:
+    """Flip ``mode`` in the settings file's ``[routing]`` table: ``on``
+    False writes ``mode = "off"`` (remembering the previous mode in a
+    trailing ``# was "…"`` comment), True restores that mode (default
+    ``local-and-remote``). Only the ``mode`` line changes; every other
+    line, key and comment is kept byte for byte. A table without a
+    ``mode`` line gets one inserted under its header when switching off.
+
+    Returns the mode now in force. Raises ``ValueError`` when the file
+    has no ``[routing]`` table or cannot be read.
+    """
+    target = Path(path) if path is not None else config.GLOBAL_SETTINGS_PATH
+    try:
+        lines = target.read_text(encoding='utf-8').splitlines(keepends=True)
+    except OSError as e:
+        raise ValueError(f'{target}: cannot read: {e}') from e
+    start = next((i for i, ln in enumerate(lines)
+                  if _ROUTING_HEADER_LINE.match(ln)), None)
+    if start is None:
+        raise ValueError(f'{target}: no [routing] table to switch')
+    end = next((i for i in range(start + 1, len(lines))
+                if _TABLE_HEADER.match(lines[i])), len(lines))
+    at = next((i for i in range(start + 1, end)
+               if _MODE_LINE.match(lines[i])), None)
+    if at is None:
+        if on:
+            return routing.MODES[1]
+        lines.insert(start + 1, f'mode = "{MODE_OFF}"\n')
+        target.write_text(''.join(lines), encoding='utf-8')
+        return MODE_OFF
+    match = _MODE_LINE.match(lines[at])
+    assert match is not None
+    head, mode, comment = (match.group('head'), match.group('mode'),
+                           (match.group('comment') or '').strip())
+    column = len(head) + len(mode) + 2 + len(match.group('gap'))
+    newline = '\n' if lines[at].endswith('\n') else ''
+    if not on:
+        if mode == MODE_OFF:
+            return MODE_OFF
+        tail = f'was "{mode}"' + (f' -- {comment}' if comment else '')
+        new_mode = MODE_OFF
+    else:
+        if mode != MODE_OFF:
+            return mode
+        was = _WAS.match(comment)
+        new_mode = (was.group('was') if was else '') or routing.MODES[1]
+        tail = (was.group('rest') or '') if was else comment
+    lines[at] = _mode_line(head, new_mode, tail, column) + newline
+    target.write_text(''.join(lines), encoding='utf-8')
+    return new_mode
 
 
 # --- .guru/tools.toml --------------------------------------------------------

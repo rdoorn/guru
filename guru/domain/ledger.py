@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import re
 import subprocess
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -123,7 +125,8 @@ def struggle_delta(before: dict, after: dict) -> dict:
 
 
 def _accumulate(row: dict) -> None:
-    """Fold one priced call row into the bound session's accumulators."""
+    """Fold one priced call row into the bound session's accumulators and
+    into this process's per-turn call rows (:func:`turn_summary`)."""
     session.call_count += 1
     cost = row.get('cost_usd')
     if cost is None:
@@ -131,6 +134,123 @@ def _accumulate(row: dict) -> None:
         session.unpriced_calls += 1
     else:
         session.cost_usd += cost
+    _remember_call(row)
+
+
+# --- per-turn call rows (this process) --------------------------------------
+
+# Call rows of the most recent turns, keyed by turn_id in insertion order,
+# so the per-turn cost line never has to read the JSONL back. Sub-agents
+# record on their own threads under the parent's turn_id, hence the lock.
+TURNS_KEPT = 32
+_turn_calls: dict = {}
+_run_calls: list = []
+_calls_lock = threading.Lock()
+
+
+def _remember_call(row: dict) -> None:
+    turn_id = row.get('turn_id') or ''
+    with _calls_lock:
+        _turn_calls.setdefault(turn_id, []).append(row)
+        _run_calls.append(row)
+        while len(_turn_calls) > TURNS_KEPT:
+            del _turn_calls[next(iter(_turn_calls))]
+
+
+def forget_calls() -> None:
+    """Drop the remembered call rows (tests)."""
+    with _calls_lock:
+        _turn_calls.clear()
+        _run_calls.clear()
+
+
+@dataclass
+class TurnSummary:
+    """What one user turn (or the whole run) spent, from its call rows.
+
+    ``cost_usd`` is None when any call could not be priced or the ledger is
+    disabled; ``models`` are the distinct short model names in first-call
+    order; ``seconds`` is the summed provider time.
+    """
+    cost_usd: Optional[float] = None
+    calls: int = 0
+    models: list = field(default_factory=list)
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    seconds: float = 0.0
+
+    @property
+    def cache_share(self) -> float:
+        """Share of the prompt tokens served from cache (0.0–1.0)."""
+        prompt = self.tokens_in + self.cache_read + self.cache_write
+        return self.cache_read / prompt if prompt else 0.0
+
+
+_FAMILY_RE = re.compile(r'claude-(opus|sonnet|haiku|fable|mythos)\b')
+
+
+def short_model(model: str) -> str:
+    """A short display name: the Claude family (``haiku``), else the id
+    after any provider prefix, cut at 24 characters."""
+    normalised = pricing.normalise_model_id(model)
+    m = _FAMILY_RE.search(normalised)
+    if m:
+        return m.group(1)
+    return (normalised.rsplit('/', 1)[-1] or model)[:24]
+
+
+def summarise_calls(rows: list) -> TurnSummary:
+    """Aggregate ``rows`` (call rows) into a :class:`TurnSummary`. Pure."""
+    out = TurnSummary()
+    costs = []
+    for r in rows:
+        out.calls += 1
+        out.tokens_in += int(r.get('tokens_in') or 0)
+        out.tokens_out += int(r.get('tokens_out') or 0)
+        out.cache_read += int(r.get('cache_read') or 0)
+        out.cache_write += int(r.get('cache_write') or 0)
+        out.seconds += float(r.get('seconds') or 0.0)
+        costs.append(r.get('cost_usd'))
+        name = short_model(str(r.get('model') or ''))
+        if name and name not in out.models:
+            out.models.append(name)
+    out.cost_usd = sum_cost(costs) if rows else None
+    if not config.LEDGER_ENABLED:
+        out.cost_usd = None
+    return out
+
+
+def turn_summary(turn_id: str) -> TurnSummary:
+    """Spend of the turn ``turn_id`` from the calls this process recorded
+    under it (main agent and its sub-agents alike); empty when unknown."""
+    with _calls_lock:
+        rows = list(_turn_calls.get(turn_id, ()))
+    return summarise_calls(rows)
+
+
+def session_summary() -> TurnSummary:
+    """Spend of every call this process recorded (the exit line)."""
+    with _calls_lock:
+        rows = list(_run_calls)
+    return summarise_calls(rows)
+
+
+def format_turn_line(summary: TurnSummary, label: str = 'turn') -> str:
+    """``turn: $0.12 · 3 calls · haiku, sonnet · cache 41%``; the cost is
+    omitted when unknown, the cache share when zero; ``''`` for no calls."""
+    if not summary.calls:
+        return ''
+    parts = [f'{label}:']
+    if summary.cost_usd is not None:
+        parts.append(f'${summary.cost_usd:.2f}')
+    parts.append(f"{summary.calls} call{'s' if summary.calls != 1 else ''}")
+    if summary.models:
+        parts.append(', '.join(summary.models))
+    if summary.cache_read:
+        parts.append(f'cache {summary.cache_share:.0%}')
+    return parts[0] + ' ' + ' · '.join(parts[1:])
 
 
 # --- environment ------------------------------------------------------------
@@ -348,6 +468,9 @@ class TaskRecord:
     findings: int = 0
     confirmation: str = ''
     retry_of: str = ''
+    # Who asked for this task: '' for the controller/user (spawn,
+    # spawn_panel), 'panel' for the worker the panel judge added.
+    origin: str = ''
 
     def to_row(self) -> dict:
         """Flatten to a ledger row plus a short hash of the task text."""
@@ -370,7 +493,7 @@ def new_task(*, task: str, parent: str, role: str = '', skill: str = '',
              tools_active: Optional[list] = None,
              route: Optional[dict] = None, reason: Optional[list] = None,
              findings: int = 0, confirmation: str = '',
-             retry_of: str = '') -> TaskRecord:
+             retry_of: str = '', origin: str = '') -> TaskRecord:
     """Create a running TaskRecord with a fresh id.
 
     ``turn_id`` defaults to the bound session's value when empty;
@@ -379,7 +502,8 @@ def new_task(*, task: str, parent: str, role: str = '', skill: str = '',
     another thread (the orchestrator) pass them explicitly, plus the
     environment snapshot, system
     prompt hash and active tool names of the child, and the routing outcome
-    (``route``, ``reason``, ``findings``, ``confirmation``, ``retry_of``).
+    (``route``, ``reason``, ``findings``, ``confirmation``, ``retry_of``)
+    and ``origin`` (``'panel'`` for a judge-added worker).
     """
     return TaskRecord(task_id=uuid.uuid4().hex[:12], parent=parent, task=task,
                       role=role or '', skill=skill or '', kind=kind,
@@ -393,7 +517,7 @@ def new_task(*, task: str, parent: str, role: str = '', skill: str = '',
                       route=dict(route) if route is not None else None,
                       reason=list(reason or []), findings=int(findings),
                       confirmation=confirmation or '',
-                      retry_of=retry_of or '')
+                      retry_of=retry_of or '', origin=origin or '')
 
 
 def record_task(rec: TaskRecord) -> None:

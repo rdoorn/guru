@@ -69,6 +69,12 @@ class TestRecording:
         d = ledger.new_task(task='x', parent='main')
         assert (d.turn_id, d.model) == ('S', 'session-model')
 
+    def test_new_task_origin_defaults_empty_and_lands_in_the_row(
+            self) -> None:
+        assert ledger.new_task(task='x', parent='main').origin == ''
+        t = ledger.new_task(task='x', parent='main', origin='panel')
+        assert t.origin == 'panel' and t.to_row()['origin'] == 'panel'
+
     def test_record_call_prices_remote_and_carries_session_keys(
             self, monkeypatch) -> None:
         monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
@@ -672,3 +678,113 @@ class TestToolEvents:
             ledger.flush()
         finally:
             ledger.set_repository(None)
+
+
+class TestTurnSummary:
+    """turn_summary / session_summary over this process's call rows, and
+    the per-turn cost line."""
+
+    def _row(self, turn_id='t1', model='claude-haiku-4-5', tokens_in=100,
+             tokens_out=10, cache_read=0, cache_write=0, cost=0.01,
+             seconds=1.0) -> dict:
+        return {'turn_id': turn_id, 'model': model, 'tokens_in': tokens_in,
+                'tokens_out': tokens_out, 'cache_read': cache_read,
+                'cache_write': cache_write, 'cost_usd': cost,
+                'seconds': seconds}
+
+    def test_summarise_calls_math(self) -> None:
+        s = ledger.summarise_calls([
+            self._row(tokens_in=100, cache_read=300, cache_write=100,
+                      cost=0.01, seconds=1.5),
+            self._row(model='aws/claude-5-sonnet', tokens_in=50,
+                      tokens_out=20, cost=0.11, seconds=2.0),
+            self._row(model='claude-haiku-4-5', cost=0.0, seconds=0.5)])
+        assert s.calls == 3 and s.models == ['haiku', 'sonnet']
+        assert s.tokens_in == 250 and s.tokens_out == 40
+        assert s.cache_read == 300 and s.cache_write == 100
+        assert s.cost_usd == pytest.approx(0.12) and s.seconds == 4.0
+        # 300 cached of 250 + 300 + 100 prompt tokens
+        assert s.cache_share == pytest.approx(300 / 650)
+
+    def test_unknown_cost_and_empty(self) -> None:
+        s = ledger.summarise_calls([self._row(), self._row(cost=None)])
+        assert s.calls == 2 and s.cost_usd is None
+        empty = ledger.summarise_calls([])
+        assert empty.calls == 0 and empty.cost_usd is None
+        assert empty.cache_share == 0.0 and empty.models == []
+
+    def test_cost_omitted_when_ledger_disabled(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        s = ledger.summarise_calls([self._row(cost=0.5)])
+        assert s.calls == 1 and s.cost_usd is None
+
+    def test_short_model(self) -> None:
+        assert ledger.short_model('claude-haiku-4-5') == 'haiku'
+        assert ledger.short_model('aws/claude-5-sonnet') == 'sonnet'
+        assert ledger.short_model('anthropic/claude-opus-5') == 'opus'
+        assert ledger.short_model('claude-fable-5-1') == 'fable'
+        assert ledger.short_model('qwen3:8b') == 'qwen3:8b'
+        assert ledger.short_model('azure/gpt-4.1') == 'gpt-4.1'
+        assert len(ledger.short_model('x' * 40)) == 24
+
+    def test_turn_summary_from_record_call(self, monkeypatch,
+                                           fake_repo) -> None:
+        monkeypatch.setattr(session, 'turn_id', 'turn-a')
+        ledger.record_call(adapter='A', model='claude-haiku-4-5',
+                           usage=pricing.Usage(100, 10, 400, 0),
+                           seconds=1.0, phase='step')
+        ledger.record_call(adapter='A', model='claude-sonnet-5',
+                           usage=pricing.Usage(50, 5), seconds=2.0,
+                           phase='step')
+        monkeypatch.setattr(session, 'turn_id', 'turn-b')
+        ledger.record_call(adapter='A', model='claude-haiku-4-5',
+                           usage=pricing.Usage(10, 1), seconds=0.5,
+                           phase='step')
+        a = ledger.turn_summary('turn-a')
+        assert a.calls == 2 and a.models == ['haiku', 'sonnet']
+        assert a.tokens_in == 150 and a.cache_read == 400
+        assert a.cost_usd == pytest.approx(
+            (100 * 1.0 + 10 * 5.0 + 400 * 0.10 + 50 * 2.0 + 5 * 10.0) / 1e6)
+        assert a.seconds == 3.0
+        assert ledger.turn_summary('turn-b').calls == 1
+        assert ledger.turn_summary('nope').calls == 0
+        whole = ledger.session_summary()
+        assert whole.calls == 3 and whole.tokens_in == 160
+
+    def test_remembered_even_when_ledger_disabled(self, monkeypatch) -> None:
+        # The cost line does not need the JSONL: rows are kept in memory
+        # whether or not they are persisted; only the cost is withheld.
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        monkeypatch.setattr(session, 'turn_id', 't')
+        ledger.set_repository(None)
+        ledger.record_call(adapter='A', model='claude-haiku-4-5',
+                           usage=pricing.Usage(10, 1), seconds=0.1,
+                           phase='step')
+        s = ledger.turn_summary('t')
+        assert s.calls == 1 and s.cost_usd is None
+
+    def test_old_turns_are_evicted(self, monkeypatch) -> None:
+        monkeypatch.setattr(ledger, 'TURNS_KEPT', 2)
+        for tid in ('t1', 't2', 't3'):
+            ledger._remember_call(self._row(turn_id=tid))
+        assert ledger.turn_summary('t1').calls == 0
+        assert ledger.turn_summary('t2').calls == 1
+        assert ledger.turn_summary('t3').calls == 1
+        assert ledger.session_summary().calls == 3      # run total kept
+
+    def test_format_turn_line(self) -> None:
+        full = ledger.TurnSummary(cost_usd=0.1234, calls=3,
+                                  models=['haiku', 'sonnet'], tokens_in=590,
+                                  cache_read=410)
+        assert ledger.format_turn_line(full) == \
+            'turn: $0.12 · 3 calls · haiku, sonnet · cache 41%'
+        assert ledger.format_turn_line(full, 'session').startswith(
+            'session: $0.12')
+        one = ledger.TurnSummary(cost_usd=0.0, calls=1, models=['qwen3:8b'])
+        assert ledger.format_turn_line(one) == \
+            'turn: $0.00 · 1 call · qwen3:8b'
+        no_cost = ledger.TurnSummary(cost_usd=None, calls=2, models=['m'],
+                                     tokens_in=10, cache_read=10)
+        assert ledger.format_turn_line(no_cost) == \
+            'turn: 2 calls · m · cache 50%'
+        assert ledger.format_turn_line(ledger.TurnSummary()) == ''

@@ -5,8 +5,10 @@
 Which models are called how often, task latency p50/p95 per (kind,
 complexity), tokens and cost per model, fallback/retry rates, how the
 shadow judges agree with the heuristics and with ``/good`` ``/bad`` labels,
-and the tools called (per tool: calls, mean seconds, bytes shown vs
-produced, denials).
+the tools called (per tool: calls, mean seconds, bytes shown vs produced,
+denials) and the tool-usage smells (whole-file reads after an outline,
+``search_tools`` for a pre-activated tool, repeated identical calls,
+refused calls, the shown/produced byte ratio per tool).
 The aggregation lives in ``guru.domain.ledger_report``; this script only
 loads the streams and prints.
 """
@@ -36,7 +38,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument('--dir', type=Path, default=config.LEDGER_DIR,
                         help=f'ledger directory (default {config.LEDGER_DIR})')
     args = parser.parse_args(argv)
-    report = ledger_report.build_report(**load(args.dir))
+    report = ledger_report.build_report(
+        **load(args.dir), preactivated=list(config.PREACTIVATE_TOOLS))
     print(ledger_report.render_markdown(report), end='')
     return 0
 

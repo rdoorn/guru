@@ -64,7 +64,23 @@ is injected through setters rather than hard-coded:
 - `ledger.set_repository` — the ledger persistence backend, a JSONL
   repository in the CLI/TUI, a fake in tests. `guru.ledger_cli review`
   installs the JSONL repository of the directory it labels for the duration
-  of the command and restores the previous one afterwards.
+  of the command and restores the previous one afterwards. Independently of
+  the repository, `guru.domain.ledger` keeps this process's call rows in
+  memory per `turn_id` (the last `TURNS_KEPT` turns, plus the run total)
+  behind a lock, so the per-turn cost line (`turn_summary`,
+  `session_summary`; `[ledger] turn_line`, category 3 as
+  `config.LEDGER_TURN_LINE`) never reads the JSONL back and works for a
+  disabled ledger too (it then omits the cost).
+- `Orchestrator.set_routing` — the typed `RoutingSettings` a running
+  orchestrator resolves routes with (its ladders are rebuilt on next use).
+  The CLI loads the table at startup (after
+  `settings.ensure_default_routing` has written the default block into a
+  settings file that had no `[routing]`); `/routing on|off` rewrites only
+  the table's `mode` line (`settings.switch_routing`), reloads the table
+  through `cli.load_routing` (which rebinds the scanner and
+  `config.SECRET_SCAN`) and hands the result to the orchestrator. The
+  main agent's tool set (controller or hands-on) is fixed at configure
+  time and follows the new setting on the next start.
 - `toolpolicy.set_policy` (re-exported as `tools.set_policy`) — the
   project's tool policy (`.guru/tools.toml`, loaded by
   `guru.repositories.settings.load_tools_policy`): which registry tools
@@ -104,8 +120,9 @@ Single-valued, process-wide configuration lives as module-level state in
   overrides per call through the installed policy),
 - `config.SECRET_SCAN` — mirrors `[routing] secret_scan` for the tool layer,
   and stays off (no scanner bound) when no `[routing]` table is configured
-  (the typed `RoutingSettings` itself travels with the `Orchestrator`, which
-  also holds the `AdapterRegistry` it resolves routes against).
+  or the table says `mode = "off"` (the typed `RoutingSettings` itself
+  travels with the `Orchestrator`, which also holds the `AdapterRegistry`
+  it resolves routes against; see `Orchestrator.set_routing` above).
 
 These are the same for every agent in the process. guru is a single-user,
 single-process CLI, so there is never more than one value of each. Making them

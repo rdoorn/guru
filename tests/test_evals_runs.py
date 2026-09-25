@@ -224,3 +224,94 @@ class TestRoutingFields:
         runs.append_trajectory(r, tmp_path)
         text = (tmp_path / runs.TRAJECTORY_FILE).read_text()
         assert '| Ollama\\|qwen3:14b+routed:exp-b |' in text
+
+
+def _graded(case: str, ok: bool, score, seconds: float = 10.0,
+            cost=0.5) -> CaseResult:
+    r = result(case, ok, seconds=seconds, cost=cost)
+    r.rubric = 'the rubric'
+    r.rubric_score = score
+    r.rubric_reason = '' if score is None else 'because'
+    return r
+
+
+class TestRubricFields:
+    def test_defaults_and_old_files_load(self, tmp_path: Path) -> None:
+        r = result('a', True)
+        assert r.rubric_score is None and r.rubric_reason == ''
+        assert run().rubric == ''
+        path = runs.save(run(), tmp_path)
+        data = json.loads(path.read_text(encoding='utf-8'))
+        for c in data['cases']:
+            del c['rubric_score'], c['rubric_reason']
+        del data['rubric']
+        path.write_text(json.dumps(data), encoding='utf-8')
+        loaded = runs.load(path)
+        assert loaded.rubric == ''
+        assert all(c.rubric_score is None for c in loaded.cases)
+
+    def test_round_trip_keeps_grades(self, tmp_path: Path) -> None:
+        r = run(cases=[_graded('a', True, 2), _graded('b', True, None)])
+        r.rubric = 'Fake|judge'
+        assert runs.load(runs.save(r, tmp_path)) == r
+
+    def test_rubric_total_over_graded_cases_only(self) -> None:
+        assert run().rubric_total() is None
+        r = run(cases=[_graded('a', True, 2), _graded('b', False, 1),
+                       _graded('c', True, None), result('d', True)])
+        assert r.rubric_total() == (3, 4)
+        assert runs.RUBRIC_MAX == 2
+
+
+class TestAggregate:
+    def test_required_passes_is_ceil_half(self) -> None:
+        assert [runs.required_passes(n) for n in (1, 2, 3, 4, 5)] == \
+            [1, 1, 2, 2, 3]
+        assert runs.required_passes(0) == 0
+
+    def test_per_case_counts_means_and_spread(self) -> None:
+        r1 = run('r1', cases=[_graded('a', True, 2, seconds=10.0, cost=1.0),
+                              _graded('b', False, 0, seconds=4.0, cost=0.2)])
+        r2 = run('r2', cases=[_graded('a', True, 1, seconds=12.0, cost=3.0),
+                              _graded('b', True, None, seconds=6.0,
+                                      cost=0.4)])
+        r3 = run('r3', cases=[_graded('a', False, None, seconds=14.0,
+                                      cost=2.0)])
+        agg = runs.aggregate([r1, r2, r3])
+        assert list(agg) == ['a', 'b']
+        a = agg['a']
+        assert a['passes'] == 2 and a['runs'] == 3
+        assert a['seconds'] == (12.0, 2.0)
+        assert a['cost_usd'] == (2.0, 1.0)
+        assert a['rubric_mean'] == 1.5
+        b = agg['b']
+        assert b['passes'] == 1 and b['runs'] == 2
+        assert b['seconds'] == (5.0, pytest.approx(1.4142, abs=1e-3))
+        assert b['rubric_mean'] == 0.0
+
+    def test_single_run_has_zero_spread(self) -> None:
+        agg = runs.aggregate([run('r1', cases=[result('a', True)])])
+        assert agg['a'] == {'passes': 1, 'runs': 1, 'seconds': (10.0, 0.0),
+                            'cost_usd': (0.5, 0.0), 'rubric_mean': None}
+
+    def test_unknown_cost_in_any_run_makes_cost_none(self) -> None:
+        agg = runs.aggregate([run('r1', cases=[result('a', True, cost=1.0)]),
+                              run('r2', cases=[result('a', True, cost=None)])])
+        assert agg['a']['cost_usd'] is None
+        assert agg['a']['passes'] == 2
+
+    def test_aggregate_ok_needs_ceil_half_passes_per_case(self) -> None:
+        def _runs(*verdicts):
+            return [run(f'r{i}', cases=[result('a', ok)])
+                    for i, ok in enumerate(verdicts)]
+        assert runs.aggregate_ok(runs.aggregate(_runs(True, True, False)), 3)
+        assert not runs.aggregate_ok(
+            runs.aggregate(_runs(True, False, False)), 3)
+        assert runs.aggregate_ok(runs.aggregate(_runs(True)), 1)
+        assert not runs.aggregate_ok(runs.aggregate(_runs(False)), 1)
+        # one weak case fails the whole gate
+        mixed = [run('r1', cases=[result('a', True), result('b', True)]),
+                 run('r2', cases=[result('a', True), result('b', False)]),
+                 run('r3', cases=[result('a', True), result('b', False)])]
+        assert not runs.aggregate_ok(runs.aggregate(mixed), 3)
+        assert runs.aggregate_ok({}, 3)           # nothing to fail
