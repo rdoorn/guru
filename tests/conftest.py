@@ -6,6 +6,25 @@ from guru import config, session, skills
 from guru.domain import ledger
 
 
+@pytest.fixture(scope='session', autouse=True)
+def _isolated_eval_sandbox_root(tmp_path_factory):
+    """Point the eval runner's stable sandbox workdir
+    (``guru.evals.runner.sandbox_root()``) at a per-session directory.
+
+    The runner's sandbox tests run ``run_case`` for real, which empties
+    ``<tmp>/guru-eval-sandbox``; on the shared temp dir that deleted the
+    copy of a live eval in another process (run 94fdc1bb11a5 — and the
+    dogfood case runs this very suite inside its copy).
+    """
+    mp = pytest.MonkeyPatch()
+    mp.setenv('GURU_EVAL_SANDBOX_ROOT',
+              str(tmp_path_factory.mktemp('eval-sandbox-root')))
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_skill_catalog(tmp_path, monkeypatch):
     """Keep ``skills.REGISTRY`` empty across tests and the catalog directory

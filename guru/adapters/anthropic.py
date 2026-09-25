@@ -15,8 +15,9 @@ Prompt caching (``cache = true`` in the adapter record, the default): the
 system prompt is sent as one text block and it and the last tool
 definition carry ``cache_control: {type: ephemeral}``, so the stable prefix
 (tools, then system) is cached across the rounds of a turn and across
-turns. A third marker sits on the last content block of the conversation
-(the user's text, or the last ``tool_result`` of a tool round): the model
+turns. A third marker sits on the last non-empty content block of the
+conversation (the user's text, or the last ``tool_result`` of a tool round
+that has content — the API rejects a marker on an empty block): the model
 caches the whole history up to it, and the next round reads that prefix
 back and only pays for what was appended since. Three of Anthropic's four
 breakpoints per request are used; a prefix under the model's minimum
@@ -126,13 +127,29 @@ def cached_tools(defs: list, cache: bool) -> list:
     return out
 
 
+def _block_is_empty(block: dict) -> bool:
+    """Whether a content block has nothing to cache: a ``text`` block with
+    empty text, or a ``tool_result`` with empty (or missing) content. Any
+    other block type (an image, a document) counts as content."""
+    kind = block.get('type')
+    if kind == 'text':
+        return not block.get('text')
+    if kind == 'tool_result':
+        return not block.get('content')
+    return False
+
+
 def cached_messages(messages: list, cache: bool) -> list:
-    """``messages`` with the cache marker on the last content block of the
-    last message — the conversation breakpoint — when that message is the
-    user's: a string becomes a one-block list, a block list (a tool round's
-    ``tool_result`` blocks) gets the marker on its last block. Copies: the
-    list, the message and the block. Unchanged when ``cache`` is off, the
-    list is empty, or the last message is not a user message."""
+    """``messages`` with the cache marker on the last non-empty content
+    block of the last message — the conversation breakpoint — when that
+    message is the user's: a string becomes a one-block list, a block list
+    (a tool round's ``tool_result`` blocks) gets the marker on its last
+    block that has content. The API rejects a ``cache_control`` on an
+    empty block, so an empty tail (``text: ''``, a ``tool_result`` whose
+    content is empty) is skipped and the block before it is marked; when
+    no block has content nothing is marked. Copies: the list, the message
+    and the block. Unchanged when ``cache`` is off, the list is empty, or
+    the last message is not a user message."""
     if not cache or not messages:
         return messages
     last = messages[-1]
@@ -142,10 +159,15 @@ def cached_messages(messages: list, cache: bool) -> list:
     if isinstance(content, str) and content:
         blocks: list = [{'type': 'text', 'text': content,
                          'cache_control': dict(CACHE_CONTROL)}]
-    elif (isinstance(content, list) and content
-            and isinstance(content[-1], dict)):
-        blocks = list(content[:-1]) + [
-            {**content[-1], 'cache_control': dict(CACHE_CONTROL)}]
+    elif isinstance(content, list) and content:
+        index = next((i for i in range(len(content) - 1, -1, -1)
+                      if isinstance(content[i], dict)
+                      and not _block_is_empty(content[i])), None)
+        if index is None:
+            return messages
+        blocks = list(content)
+        blocks[index] = {**content[index],
+                         'cache_control': dict(CACHE_CONTROL)}
     else:
         return messages
     return messages[:-1] + [{**last, 'content': blocks}]

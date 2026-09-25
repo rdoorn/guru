@@ -957,6 +957,39 @@ class TestPromptCaching:
         empty_blocks = [{'role': 'user', 'content': []}]
         assert anth.cached_messages(empty_blocks, True) is empty_blocks
 
+    def test_anthropic_cached_messages_never_marks_an_empty_block(self):
+        # The API rejects cache_control on an empty block: an empty tail
+        # (text '' or a tool_result with no content) is skipped and the
+        # block before it carries the marker instead.
+        results = [{'type': 'tool_result', 'tool_use_id': 'a', 'content': 'x'},
+                   {'type': 'tool_result', 'tool_use_id': 'b', 'content': ''}]
+        msgs = [{'role': 'user', 'content': results}]
+        out = anth.cached_messages(msgs, True)
+        assert out[0]['content'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert out[0]['content'][1] == results[1]      # untouched, unmarked
+        assert 'cache_control' not in results[0]       # copy, not in place
+        tail_text = [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q'}, {'type': 'text', 'text': ''}]}]
+        out = anth.cached_messages(tail_text, True)
+        assert out[0]['content'][0] == {
+            'type': 'text', 'text': 'q',
+            'cache_control': {'type': 'ephemeral'}}
+        assert 'cache_control' not in out[0]['content'][1]
+        # tool_result content may be a block list: [] is empty too, and a
+        # missing content key is empty; a non-text block (image) counts.
+        mixed = [{'role': 'user', 'content': [
+            {'type': 'image', 'source': {}},
+            {'type': 'tool_result', 'tool_use_id': 'c', 'content': []},
+            {'type': 'tool_result', 'tool_use_id': 'd'}]}]
+        out = anth.cached_messages(mixed, True)
+        assert out[0]['content'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert all('cache_control' not in b for b in out[0]['content'][1:])
+        # Nothing with content: nothing is marked, the list is unchanged.
+        all_empty = [{'role': 'user', 'content': [
+            {'type': 'text', 'text': ''},
+            {'type': 'tool_result', 'tool_use_id': 'e', 'content': ''}]}]
+        assert anth.cached_messages(all_empty, True) is all_empty
+
     # --- pure helpers: litellm ----------------------------------------------
 
     def test_litellm_cached_messages_marks_last_system_part(self) -> None:

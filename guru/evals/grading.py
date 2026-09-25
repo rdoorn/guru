@@ -10,6 +10,12 @@ sends. Each judge (``Adapter|model`` specs, resolved through the adapter
 registry like the runner's judge) grades every case; the hand grade comes
 from ``evals/rubric-labels.toml`` (:mod:`guru.evals.labels`).
 
+Hand grading: :func:`show_text` renders what a judge sees for one case
+(prompt, rubric, evidence, answer) plus a ``[[label]]`` stub for
+``evals/rubric-labels.toml``; ``python -m guru.evals grade RUN --show``
+prints it per rubric case so a human can grade the same packet and grow
+the hand-label set without a model call.
+
 Everything graded is recorded in the run's own ledger directory
 (``<out_root>/<run_id>/ledger``): one ``labels`` row per judge grade
 (``target_id = <run_id>:<case>``, labeller ``rubric:<model>``), one per
@@ -72,7 +78,7 @@ def resolve_judges(specs: list[str], adapters: Optional[list[Adapter]] = None
     if len(set(specs)) != len(specs):
         raise ValueError('the same --rubric SPEC was given twice')
     if adapters is None:
-        adapters = bench._build_adapters()
+        adapters = bench.build_adapters()
     judges.set_registry(registry_from(adapters), RoutingSettings())
     try:
         out: list[tuple[str, rubric.LLMJudge]] = []
@@ -138,6 +144,53 @@ def answer_and_prompt(res: CaseResult, cases_dir: Optional[Path] = None
     if not prompt:
         prompt = _case_prompt(res.case, cases_dir)
     return answer, prompt
+
+
+LABEL_STUB_NOTE = 'hand grade <date>: <why>'
+
+
+def label_stub(case: str, run_id: str, score: Optional[int] = None,
+               note: str = LABEL_STUB_NOTE) -> str:
+    """A ``[[label]]`` table for ``evals/rubric-labels.toml`` pinned to
+    ``run_id``; ``score`` is left as a ``0 | 1 | 2`` placeholder when
+    None (the stub is valid TOML either way: the placeholder line is
+    commented)."""
+    lines = ['[[label]]', f'case = "{case}"', f'run = "{run_id}"']
+    if score is None:
+        lines.append('# score = 0 | 1 | 2   (uncomment and pick one)')
+    else:
+        lines.append(f'score = {int(score)}')
+    lines.append(f'note = "{note}"')
+    return '\n'.join(lines)
+
+
+def show_text(run: Run, res: CaseResult, answer: str, prompt: str,
+              hand: Optional[HandLabel] = None) -> str:
+    """The packet for one rubric case as a human grader reads it: the
+    prompt, the rubric, the evidence block (unfenced; the same lines the
+    judge gets), the answer, the existing hand grade when there is one,
+    and a :func:`label_stub` to append after grading."""
+    head = f'=== {res.case} (run {run.run_id})'
+    if hand is not None:
+        head += (f' — hand grade {hand.score}'
+                 + (f' for run {hand.run}' if hand.run != labels.ANY_RUN
+                    else ' (any run)'))
+    parts = [
+        head,
+        '', 'Prompt:', prompt.strip() or '(none recorded)',
+        '', 'Rubric:', (res.rubric or '').strip() or '(empty rubric)',
+        '', rubric.evidence(res.observed, res.cost_usd),
+        '', 'Answer:', answer.strip() or '(empty answer)',
+        '', 'Scale: 2 = meets the intent of every rubric point (an '
+        'equivalent mechanism or identifier counts; what the evidence '
+        'confirms is met without pasted output); 1 = one substantive '
+        'point missing or wrong; 0 = wrong, unsupported or contradicted '
+        'by the evidence. Do not penalise brevity, missing code listings '
+        'or the spelling of identifiers.',
+        '', f'Append to {labels.DEFAULT_LABELS_FILE.name} after grading:',
+        label_stub(res.case, run.run_id),
+    ]
+    return '\n'.join(parts)
 
 
 def _grade_one(res: CaseResult, answer: str, prompt: str,

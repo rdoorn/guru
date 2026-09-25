@@ -80,6 +80,8 @@ tests, README sandbox section)
 - Rule kind `destructive`: renames, more than 3 files deleted or more than
   200 lines removed net in one submit, deletion of any test file →
   `unclear` (ask), reasons name the files. Update `GATE_QUESTIONS` sha test.
+  *(Iteration 2 changed "net in one submit" to "gross, per submit and
+  cumulative over the task"; see below.)*
 
 **D. Caching + flaky test** (`guru/adapters/*`, `tests/test_adapters.py`,
 `tests/test_sandbox_integration.py`, `guru/sandbox/provision.py` only if
@@ -156,3 +158,109 @@ files.pythonhosted.org}` (the `pypi.org` index hit belongs to the
 cacheable pip layer). `make test-sandbox` three times in a row with the
 guru image present: 5 passed in 43.7 s, 5 passed in 43.0 s, 5 passed in
 53.2 s. No `built` field was needed in provision.py / sandbox_images.py.
+
+## Iteration 2 — gate fixes (2026-09-25)
+
+An independent review of package B found the new gate rules weaker than
+documented. Each finding, what changed, and the test that pins it
+(`tests/test_gate.py`, `tests/test_sandbox_verbs.py`,
+`tests/test_sandbox_colima.py` new, one test added to
+`tests/test_sandbox_integration.py`).
+
+1. **Thresholds were per submit; the copy is discarded after every apply,
+   so a worker could split a mass deletion across submits.** `verbs` now
+   keeps an in-memory `gate.Tally` per `(project, task)` — files deleted
+   (emptied included), lines removed gross, files touched — fed on every
+   *applied* submit and cleared by `cleanup_task`/`cleanup_all` (not by
+   the copy's removal). `gate.rules(..., prior=tally)` →
+   `destructive_flags(..., prior=...)` checks both thresholds against
+   `now + prior` and names both numbers: `deletes 2 files now, 5 in this
+   task (more than 3): c.py, d.py`. The `apply` event detail carries the
+   running total (`applied; task so far: 2 file(s) touched, 2 deleted, 2
+   line(s) removed`). Pinned by
+   `test_deletions_split_across_submits_are_counted`,
+   `test_removed_lines_accumulate_across_submits`,
+   `test_cumulative_deleted_files_over_a_task`,
+   `test_cumulative_removed_lines_over_a_task`.
+2. **Net-removed was defeated by padding (300 `-` + 300 `+#`).** The
+   threshold is now *gross* removed lines per submit
+   (`DESTRUCTIVE_REMOVED = 200`, replacing `DESTRUCTIVE_NET_REMOVED`);
+   added lines offset nothing. The flag still reports the added lines and
+   how many of them are content (`gate.substantive`: neither blank nor
+   comment-only) so the reader sees padding: `removes 300 lines (more than
+   200); +300 added, 10 of them content`. The plan text above said "net";
+   this is the recorded change. README updated. Pinned by
+   `test_gross_removed_lines`,
+   `test_padding_with_blank_and_comment_lines_does_not_offset`.
+3. **Emptying a file evaded the delete flag, `deletions_requested` and the
+   destructive counts.** `_sections` now yields `gate.Section` objects
+   with an `emptied` flag (hunks remove every line, add none, no context
+   line, not `+++ /dev/null`, not a new file — in both the parsed and the
+   raw-scan path); `Section.gone` (deleted or emptied) drives the delete
+   flag (`empties tests/test_x.py (3 lines; file kept)`), the deleted-files
+   count, the test-file rule (`empties test file …`), `deleted_paths`
+   (`path (emptied)`), and `stat`/`stat_text` (now 5-tuples with an
+   `emptied` column; `| +0 -3 emptied`, `1 file(s) emptied: …` in the
+   packet summary). Pinned by `test_emptied_file_is_a_delete_flag_and_
+   destructive`, `test_emptied_needs_every_line_gone`,
+   `test_emptied_in_an_unparsable_diff`, `test_stat_renders_emptied_files`,
+   verbs `test_emptied_test_file_asks`.
+4. **The baseline and the diff came from a `.git` the worker could rewrite
+   (the copy was mounted rw including `.git`).** Two belts. (a)
+   `colima.run` mounts the copy's `.git` read-only on top of the rw copy
+   mount (`-v <copy>/.git:/work/.git:ro`, only when the copy has a `.git`
+   directory); the integration test
+   `test_git_dir_is_read_only_in_the_container` shows a write to
+   `.git/HEAD` and an `rmtree('.git')` fail inside the container while a
+   normal write succeeds and the host's `git diff` sees it. (b)
+   `prepare_copy` records the baseline sha as a `baseline: <sha>` line in
+   `COPY_MARKER`; `colima.check_baseline` compares it with `git rev-parse
+   HEAD`, and both `diff` and `show_baseline` call it first — a mismatch
+   raises `colima.BaselineChanged` (a `RuntimeError`), which every verb
+   turns into `Refused: sandbox copy baseline changed; the copy was
+   discarded — run a sandbox verb to make a fresh one` and discards the
+   copy. A marker without a sha is refused too. Caveat recorded: the
+   marker itself sits in the rw copy, so belt (b) alone would not survive
+   a worker that rewrites both `.git` and the marker; with belt (a) the
+   worker cannot rewrite `.git` at all. Pinned by
+   `TestGitReadOnlyMount`, `TestBaseline` (real temp repos: a commit or an
+   amend in the copy is refused by both readers), verbs
+   `test_baseline_changed_is_refused_and_the_copy_discarded`.
+5. **`code_health` read through symlinks.** The unchanged-file branch
+   refuses when `target.resolve()` is not under `copy.resolve()`
+   (`Refused: 'pkg/link.py' resolves outside the sandbox copy.`); a link
+   that stays inside the copy still works. Pinned by
+   `test_symlink_out_of_the_copy_is_refused`.
+6. **`colima.show_baseline` had no unit tests.** `TestShowBaseline` on a
+   temp repository: absolute path → None, `..` → None, `''` → None,
+   missing file / file created after the baseline → None, content over
+   `DIFF_OUT_KB` (truncated) → None, normal → the baseline content.
+7. **Minor.** `_renames` runs only when `patch.parse` failed (a parsed
+   diff has no rename, so a `-- foo` body line can never be read as a
+   header pair; the `--- a / +++ b` header-pair rename test is kept and
+   `test_renames_only_looked_for_in_an_unparsable_diff` shows the scan's
+   false positive is never consulted). `is_test_path` also matches
+   `tests_*/`, `testing/` and `*_tests.py` (`pkg/testing.py`, `mytests/`,
+   `tests_/` stay non-tests). Dead code removed: `gate.health_flags` and
+   `health.notable`; the single path is `gate.health_flags_from(deltas)`
+   over `gate.health_deltas(...)`, used by `verbs._verdict`. Health deltas
+   are computed only when the deterministic flags are not already
+   suspicious, and at most `HEALTH_MAX_FILES = 20` Python files are
+   measured per diff. `code_health(path=...)` passes `paths={path}` to
+   `health_deltas`, which filters the parsed diff before reading any
+   baseline. The anthropic `cached_messages` empty-last-block case belongs
+   to another package and was skipped.
+
+Coordinator addition (dogfood run): the container had no writable `HOME`
+(uid 1000, read-only root), so guru's own tests could not run; `colima.run`
+now sets `-e HOME=/tmp -e XDG_CACHE_HOME=/tmp/.cache` (`CONTAINER_ENV`,
+tmpfs, non-persistent) ahead of the caller's env, the rest of the
+environment stays scrubbed. The `sandbox_run` tool description says argv
+must be a JSON list of strings (a plain string is split on whitespace
+only). Pinned by `TestContainerEnv` and an assertion in the new
+integration test. The exact-argv assertions in `tests/test_sandbox.py`
+and `tests/test_sandbox_provision.py` were updated for the two `-e`
+pairs, and the provision `fake_run` fixture answers faked git calls with
+a sha so `prepare_copy` can record a baseline.
+
+`GATE_QUESTIONS` is unchanged; the pinned sha `c8292068e5e9fd25` stands.

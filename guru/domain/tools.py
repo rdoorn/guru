@@ -374,10 +374,12 @@ def fetch_github_releases(repo: str) -> str:
 def sandbox_run(argv: str, detail: str = '') -> str:
     """
     Run a command inside the project's sandbox container on this task's copy
-    of the project (no network; nothing touches the real tree). argv is a
-    JSON list or a whitespace-separated command whose first word is one of
-    python, python3, pytest, uv, ruff, mypy, flake8, make. Returns the exit
-    code and the first lines of output; detail=true returns the last 4 KB.
+    of the project (no network; nothing touches the real tree). argv must be
+    a JSON list of strings, e.g. ["pytest", "-q"], whose first item is one
+    of python, python3, pytest, uv, ruff, mypy, flake8, make (a plain
+    string is only split on whitespace: no quoting, no shell). Returns the
+    exit code and the first lines of output; detail=true returns the last
+    4 KB.
     """
     from guru.sandbox import verbs
     return verbs.sandbox_run(argv, detail)
@@ -787,19 +789,21 @@ TOOL_REGISTRY: dict = {
         "description": (
             "Run a command (pytest, python, uv, ruff, mypy, flake8, make)"
             " inside the project's sandbox container on this task's copy of"
-            " the project: no network, nothing touches the real tree. argv is"
-            " a JSON list or a whitespace-separated command. Returns the exit"
-            " code and the first 30 lines of stdout/stderr; detail=true"
-            " returns the last 4 KB instead. Use sandbox_submit to bring"
-            " changes back."
+            " the project: no network, nothing touches the real tree. argv"
+            " must be a JSON list of strings, e.g. [\"pytest\", \"-q\"] —"
+            " not a plain command string (a string is only split on"
+            " whitespace: no quoting, no shell). Returns the exit code and"
+            " the first 30 lines of stdout/stderr; detail=true returns the"
+            " last 4 KB instead. Use sandbox_submit to bring changes back."
         ),
         "tags": [
             "sandbox", "container", "run", "command", "isolated", "pytest",
             "python", "execute", "docker", "safe", "test", "local",
         ],
         "parameters": {
-            "argv": ("The command as a JSON list (e.g. [\"pytest\", \"-q\"])"
-                     " or whitespace-separated words"),
+            "argv": ("The command as a JSON list of strings, e.g."
+                     " [\"python\", \"-c\", \"print(1)\"]; a plain string is"
+                     " split on whitespace only"),
             "detail": "true to return the last 4 KB of output",
         },
         "optional": ["detail"],

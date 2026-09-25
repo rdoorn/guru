@@ -12,9 +12,17 @@
 #           "Rubric grading")
 #   note  = where the grade comes from (triage note, date)
 #
-# Add a grade after triage: read the answer in the run's transcript, grade
-# it against the case's [expect.rubric] text, append a table here. Grade
-# the answer, not the judge; a disagreement with the judge is the point.
+# Add a grade after triage:
+#
+#   .venv/bin/python -m guru.evals grade RUN_ID --show
+#
+# prints prompt, rubric, evidence and answer per case with a [[label]]
+# stub; grade on the judge's scale (2 = the intent of every rubric point
+# is met, equivalents count, what the evidence confirms counts; 1 = one
+# substantive point missing or wrong; 0 = wrong, unsupported or
+# contradicted by the evidence), paste the stub here. Grade the answer,
+# not the judge; a disagreement with the judge is the point. See
+# evals/README.md, "Grading by hand".
 
 [[label]]
 case = "guru-add-version-flag"

@@ -279,8 +279,3 @@ def delta(before_src: Optional[str], after_src: str) -> list[FunctionDelta]:
         verdict, reasons = _judge(was, fh)
         out.append(FunctionDelta(fh.name, was, fh, verdict, reasons))
     return out
-
-
-def notable(deltas: list[FunctionDelta]) -> list[FunctionDelta]:
-    """The ``degraded`` and ``improved`` deltas (what a report lists)."""
-    return [d for d in deltas if d.verdict != UNCHANGED]

@@ -449,6 +449,7 @@ class TestRun:
             '--read-only', '--tmpfs', '/tmp',
             '--pids-limit', '256', '--memory', '2048m', '--cpus', '2.0',
             '-v', f'{copy}:/work', '-w', '/work',
+            '-e', 'HOME=/tmp', '-e', 'XDG_CACHE_HOME=/tmp/.cache',
             spec.image_tag, 'pytest', '-q', 'tests']
         assert res.docker_argv == call['argv']
         assert call['cwd'] == spec.project

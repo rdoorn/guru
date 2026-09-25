@@ -281,10 +281,3 @@ class TestDelta:
     def test_unparsable_side_is_empty(self) -> None:
         assert health.delta('def f(:', _fn('f', 7)) == []
         assert health.delta(_fn('f'), 'def f(:') == []
-
-    def test_notable(self) -> None:
-        deltas = health.delta(_fn('f', 9) + _fn('g'), _fn('f', 2)
-                              + _fn('g', 2) + _fn('h', 7))
-        assert [d.verdict for d in deltas] == [
-            health.IMPROVED, health.UNCHANGED, health.DEGRADED]
-        assert [d.name for d in health.notable(deltas)] == ['f', 'h']

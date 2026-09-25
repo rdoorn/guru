@@ -177,6 +177,44 @@ def test_run_no_network_no_persistence_and_diff(built, project) -> None:
     assert denied.denied and denied.returncode == -1
 
 
+def test_git_dir_is_read_only_in_the_container(built, project) -> None:
+    """The copy is rw, its ``.git`` is not: a write to ``.git/HEAD`` or a
+    ``rmtree('.git')`` fails inside the container, a normal file write
+    works (as does one under ``HOME``, the tmpfs), and the host's ``git
+    diff`` (baseline verified against the recorded sha) still sees it."""
+    spec, copy = built
+    sha = colima.baseline_sha(copy)
+    assert len(sha) == 40
+    head = colima.run(spec, ['python', '-c',
+                             "open('.git/HEAD', 'a').write('x')"], copy)
+    assert head.returncode != 0, '.git/HEAD was writable in the container'
+    assert 'Read-only file system' in head.stderr or 'Permission' in \
+        head.stderr, head.stderr
+    assert f'{copy}/.git:/work/.git:ro' in head.docker_argv
+    wipe = colima.run(spec, ['python', '-c',
+                             "import shutil; shutil.rmtree('.git')"], copy)
+    assert wipe.returncode != 0, '.git was removable in the container'
+    assert (copy / '.git' / 'HEAD').is_file()
+    wrote = colima.run(spec, ['python', '-c',
+                              "open('note.txt', 'w').write('hi\\n')"], copy)
+    assert wrote.returncode == 0, wrote.stderr
+    # HOME is the tmpfs: writable for tool caches, gone with the container
+    home = colima.run(spec, ['python', '-c',
+                             "import os, pathlib; pathlib.Path(os.environ["
+                             "'HOME'], 'x').write_text('1'); "
+                             "print(os.environ['HOME'])"], copy)
+    assert home.returncode == 0, home.stderr
+    assert home.stdout.strip() == '/tmp'
+    assert 'HOME=/tmp' in home.docker_argv
+    assert not (copy / 'x').exists()
+    assert colima.check_baseline(copy, project) == sha
+    text = colima.diff(copy, project=project)
+    assert 'b/note.txt' in text and '+hi' in text
+    assert colima.show_baseline(copy, 'hello.py', project) == \
+        'print("ok")\n'
+    assert not (project / 'note.txt').exists()
+
+
 def test_timeout_kills_the_container(built) -> None:
     spec, copy = built
     quick = sb.SandboxSpec(**{**spec.__dict__, 'timeout_s': 3})

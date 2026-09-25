@@ -67,6 +67,7 @@ class FakeColima:
         self.scripts: list = []          # (name, content) sandbox_python ran
         self.baseline_calls: list = []   # paths show_baseline was asked for
         self.project: Path = Path('.')
+        self.diff_error: object = None   # an exception ``diff`` raises
 
     def prepare_copy(self, project, dest, excludes):
         shutil.copytree(project, dest, symlinks=True,
@@ -84,6 +85,8 @@ class FakeColima:
                                 0.25)
 
     def diff(self, copy, project=None):
+        if self.diff_error is not None:
+            raise self.diff_error
         return self.diff_text
 
     def show_baseline(self, copy, path, project=None):
@@ -316,7 +319,7 @@ class TestSubmit:
         assert out.startswith('Gate verdict: intended\n')
         assert '  - delete: deletes pkg/mod.py (2 lines)' in out
         assert 'pkg/mod.py | +0 -2 deleted' in out
-        assert 'Deleted files: pkg/mod.py' in out
+        assert 'Deleted or emptied files: pkg/mod.py' in out
         assert f'deleted {root / "pkg" / "mod.py"} (2 lines)' in out
         assert not (root / 'pkg' / 'mod.py').exists()
         assert verbs.copies() == {}
@@ -324,6 +327,10 @@ class TestSubmit:
         assert '1 file(s) deleted: pkg/mod.py' in q.state
         [submit] = _events(fake_repo, 'submit')
         assert submit['detail'].endswith('; deletes: pkg/mod.py')
+        [apply] = _events(fake_repo, 'apply')
+        assert apply['detail'] == ('applied; task so far: 1 file(s) touched, '
+                                   '1 deleted, 2 line(s) removed')
+        assert verbs.task_tally('main') == gate.Tally(1, 2, 1)
 
     def test_unrequested_deletion_asks(self, sandboxed) -> None:
         root, fake = sandboxed
@@ -392,6 +399,125 @@ class TestSubmit:
         assert (root / 'tests' / 'test_mod.py').is_file()
         [q] = asked
         assert '  - destructive: tests/test_mod.py: deletes test file' in q
+
+    def test_emptied_test_file_asks(self, sandboxed) -> None:
+        root, fake = sandboxed
+        (root / 'tests').mkdir()
+        (root / 'tests' / 'test_mod.py').write_text('def test_f():\n'
+                                                    '    pass\n')
+        fake.diff_text = ('--- a/tests/test_mod.py\n+++ b/tests/test_mod.py\n'
+                          '@@ -1,2 +0,0 @@\n-def test_f():\n-    pass\n')
+        decisions.set_judge('gate', FakeReviewer())
+        asked: list = []
+        provision.set_approve_asker(lambda q: asked.append(q) or False)
+        out = verbs.sandbox_submit('trim the test')
+        assert out.startswith('Declined: ') and 'unclear' in out
+        assert ('destructive: tests/test_mod.py: empties test file '
+                'tests/test_mod.py') in out
+        assert 'delete: empties tests/test_mod.py (2 lines; file kept)' in out
+        assert (root / 'tests' / 'test_mod.py').read_text().startswith('def')
+        [q] = asked
+        assert 'tests/test_mod.py | +0 -2 emptied' in q
+
+    def test_deletions_split_across_submits_are_counted(self, sandboxed,
+                                                        fake_repo) -> None:
+        root, fake = sandboxed
+        for name in 'abcd':
+            (root / 'pkg' / f'{name}.py').write_text('X = 1\n')
+
+        def gone(*names: str) -> str:
+            return ''.join(f'--- a/pkg/{n}.py\n+++ /dev/null\n'
+                           f'@@ -1,1 +0,0 @@\n-X = 1\n' for n in names)
+        decisions.set_judge('gate', FakeReviewer())
+        asked: list = []
+        provision.set_approve_asker(lambda q: asked.append(q) or False)
+        fake.diff_text = gone('a', 'b')
+        out = verbs.sandbox_submit('remove a and b as asked')
+        assert out.startswith('Gate verdict: intended'), out
+        assert not (root / 'pkg' / 'a.py').exists()
+        assert verbs.task_tally('main') == gate.Tally(deleted=2, removed=2,
+                                                      files=2)
+        assert verbs.copies() == {}          # the copy went with the apply
+        # the second submit alone is under the threshold; the task is not
+        fake.diff_text = gone('c', 'd')
+        out = verbs.sandbox_submit('remove c and d as asked')
+        assert out.startswith('Declined: ') and 'unclear' in out, out
+        assert ('destructive: deletes 2 files now, 4 in this task (more '
+                'than 3): pkg/c.py, pkg/d.py') in out
+        assert (root / 'pkg' / 'c.py').exists()
+        [q] = asked
+        assert '4 in this task' in q
+        assert verbs.task_tally('main') == gate.Tally(2, 2, 2)  # unchanged
+        applied, declined = _events(fake_repo, 'apply')
+        assert applied['detail'] == ('applied; task so far: 2 file(s) '
+                                     'touched, 2 deleted, 2 line(s) removed')
+        assert declined['detail'] == 'declined'
+        # the tally is the task's: cleanup_task clears it, another task
+        # starts from zero
+        assert verbs.task_tally('other') == gate.Tally()
+        verbs.cleanup_task('main')
+        assert verbs.task_tally('main') == gate.Tally()
+        fake.diff_text = gone('c', 'd')
+        out = verbs.sandbox_submit('remove c and d as asked')
+        assert out.startswith('Gate verdict: intended'), out
+
+    def test_removed_lines_accumulate_across_submits(self, sandboxed):
+        root, fake = sandboxed
+        body = ''.join(f'L{i} = {i}\n' for i in range(150))
+        (root / 'pkg' / 'big.py').write_text(body)
+        (root / 'pkg' / 'big2.py').write_text(body)
+
+        def shrink(name: str) -> str:
+            removed = ''.join(f'-L{i} = {i}\n' for i in range(150))
+            return (f'--- a/pkg/{name}.py\n+++ b/pkg/{name}.py\n'
+                    f'@@ -1,150 +1,1 @@\n{removed}+L = 0\n')
+        decisions.set_judge('gate', FakeReviewer())
+        provision.set_approve_asker(lambda q: False)
+        fake.diff_text = shrink('big')
+        assert verbs.sandbox_submit('shrink big').startswith(
+            'Gate verdict: intended')
+        assert verbs.task_tally('main').removed == 150
+        fake.diff_text = shrink('big2')
+        out = verbs.sandbox_submit('shrink big2')
+        assert out.startswith('Declined: ')
+        assert ('destructive: removes 150 lines now, 300 in this task (more '
+                'than 200); +1 added, 1 of them content') in out
+
+    def test_health_is_not_measured_once_the_rules_are_suspicious(
+            self, sandboxed) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = EXEC_DIFF
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        out = verbs.sandbox_submit('add a helper')
+        assert out.startswith('Refused: the quality gate found the change '
+                              'suspicious')
+        assert fake.baseline_calls == [] and reviewer.calls == []
+
+    def test_baseline_changed_is_refused_and_the_copy_discarded(
+            self, sandboxed) -> None:
+        root, fake = sandboxed
+        verbs.sandbox_run(['pytest'])
+        (_key, copy), = verbs.copies().items()
+        fake.diff_error = colima.BaselineChanged('sandbox copy baseline '
+                                                 'changed: at aaa, recorded '
+                                                 'bbb')
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        assert verbs.sandbox_submit('x') == verbs.BASELINE_CHANGED
+        assert verbs.BASELINE_CHANGED.startswith(
+            'Refused: sandbox copy baseline changed')
+        assert verbs.copies() == {} and not copy.exists()
+        assert reviewer.calls == []
+        assert (root / 'pkg' / 'mod.py').read_text() == MOD
+        # every reader refuses the same way (and a fresh copy is made first)
+        assert verbs.sandbox_diff() == verbs.BASELINE_CHANGED
+        assert verbs.copies() == {}
+        assert verbs.code_health() == verbs.BASELINE_CHANGED
+        assert verbs.copies() == {}
+        fake.diff_error = None
+        assert verbs.sandbox_diff() == 'The sandbox copy is unchanged.'
+        assert len(verbs.copies()) == 1
 
     def test_task_text_reaches_the_reviewer(self, sandboxed, monkeypatch):
         _root, fake = sandboxed
@@ -657,9 +783,32 @@ class TestCodeHealth:
         fake.diff_text = FAT_DIFF + OTHER_NEW_DIFF
         out = verbs.code_health('./pkg/other.py')
         assert 'pkg/mod.py' not in out and 'pkg/other.py: g:' in out
-        out = verbs.code_health('pkg/mod.py')
+        assert fake.baseline_calls == []      # the other file's baseline
+        out = verbs.code_health('pkg/mod.py')  # was never read
         assert out.splitlines()[1:] == ['pkg/mod.py: f: degraded (args 0→7 '
                                         '>6)']
+        assert fake.baseline_calls == ['pkg/mod.py']
+
+    def test_symlink_out_of_the_copy_is_refused(self, sandboxed, tmp_path):
+        root, fake = sandboxed
+        outside = tmp_path / 'outside.py'
+        outside.write_text('def wide(a, b, c, d, e, f, g):\n    return a\n')
+        fake.diff_text = MOD_DIFF
+        verbs.sandbox_run(['pytest'])
+        (_key, copy), = verbs.copies().items()
+        (copy / 'pkg' / 'link.py').symlink_to(outside)
+        (copy / 'pkg' / 'dirlink').symlink_to(tmp_path)
+        assert verbs.code_health('pkg/link.py') == \
+            "Refused: 'pkg/link.py' resolves outside the sandbox copy."
+        assert verbs.code_health('pkg/dirlink/outside.py') == \
+            "Refused: 'pkg/dirlink/outside.py' resolves outside the " \
+            'sandbox copy.'
+        # a link that stays inside the copy is read like any file
+        (copy / 'pkg' / 'alias.py').symlink_to(copy / 'pkg' / 'mod.py')
+        out = verbs.code_health('pkg/alias.py')
+        assert out.startswith('pkg/alias.py is unchanged in the sandbox '
+                              'copy: 1 function(s)')
+        assert (root / 'pkg' / 'mod.py').read_text() == MOD
 
     def test_unchanged_file_reports_its_metrics(self, sandboxed) -> None:
         root, fake = sandboxed
@@ -694,7 +843,10 @@ class TestCodeHealth:
             for i in range(40))
         out = verbs.code_health()
         assert len(out) <= verbs.HEALTH_DIGEST_CHARS + 40
-        assert out.endswith('more chars)') and '40 degraded' in out
+        assert out.endswith('more chars)')
+        # at most HEALTH_MAX_FILES files are measured per diff
+        assert f'{gate.HEALTH_MAX_FILES} degraded' in out
+        assert fake.baseline_calls == []
 
     def test_diff_failure_is_a_refusal(self, sandboxed, monkeypatch) -> None:
         def boom(copy, project=None):

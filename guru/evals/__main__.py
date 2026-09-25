@@ -10,7 +10,9 @@ grades the rubric cases with a model (default with ``--allow-spend`` and
 that off); a grade is reported, and fails the case only under
 ``--rubric-min N``. ``grade RUN_ID --rubric SPEC [--rubric SPEC2]``
 re-grades a stored run offline (no case re-runs) with one column per
-judge next to the hand grade from ``evals/rubric-labels.toml``.
+judge next to the hand grade from ``evals/rubric-labels.toml``; ``grade
+RUN_ID --show`` prints what the judge sees per case (prompt, rubric,
+evidence, answer) with a ``[[label]]`` stub, for grading by hand.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from guru import config
+from guru import config, log
 from guru.evals import cases, grading, labels, runner, runs
 from guru.evals.runs import CaseResult, Run
 from guru.repositories.settings import RoutingSettings
@@ -328,17 +330,39 @@ def _print_regrade(result: grading.Regrade) -> None:
           f' · grading cost {_fmt_cost(result.cost_usd)}')
 
 
+def _show_cases(run: Run, hand: list, cases_dir: Path) -> None:
+    """``grade --show``: the judge's packet per rubric case, for a human
+    grader (no model call)."""
+    for i, res in enumerate(c for c in run.cases if c.rubric):
+        answer, prompt = grading.answer_and_prompt(res, cases_dir)
+        if i:
+            print()
+        print(grading.show_text(
+            run, res, answer, prompt,
+            hand=labels.hand_label(hand, res.case, run.run_id)))
+
+
 def _cmd_grade(args: argparse.Namespace) -> int:
+    specs = [s.strip() for s in args.rubric or []]
+    if not specs and not args.show:
+        print('error: grade needs --rubric SPEC (a judge) and/or --show '
+              '(print the packet for grading by hand)', file=sys.stderr)
+        return 2
     try:
         run = runs.load(runs.find_run(Path(args.out), args.run_id))
         hand = labels.load_labels(Path(args.labels))
-        judge_list = grading.resolve_judges([s.strip() for s in args.rubric])
+        judge_list = grading.resolve_judges(specs) if specs else []
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
     if not any(c.rubric for c in run.cases):
         print(f'run {run.run_id}: no case carries a rubric; nothing to grade')
         return 0
+    if args.show:
+        _show_cases(run, hand, Path(args.cases_dir))
+        if not judge_list:
+            return 0
+        print()
     result = grading.regrade(run, Path(args.out), judge_list, hand,
                              cases_dir=Path(args.cases_dir))
     print(f'run {run.run_id} ({run.ts}, {run.model_label()})')
@@ -417,13 +441,19 @@ def _parser() -> argparse.ArgumentParser:
 
     grade_p = sub.add_parser(
         'grade', help='re-grade a stored run offline with one or more '
-                      'rubric judges and compare with the hand grades')
+                      'rubric judges and compare with the hand grades; '
+                      '--show prints the packet for grading by hand')
     grade_p.add_argument('run_id', metavar='RUN_ID',
                          help='the 12-hex run id (or a path to a run file)')
     grade_p.add_argument('--rubric', action='append', default=None,
-                         metavar='SPEC', required=True,
+                         metavar='SPEC',
                          help="'Adapter|model' judge; repeat for a column "
-                              'per judge')
+                              'per judge (required unless --show)')
+    grade_p.add_argument('--show', action='store_true',
+                         help='print what the judge sees per rubric case '
+                              '(prompt, rubric, evidence, answer) with a '
+                              '[[label]] stub, for grading by hand; '
+                              'without --rubric nothing is graded')
     grade_p.add_argument('--out', default=str(DEFAULT_OUT),
                          help=f'run directory (default: {DEFAULT_OUT})')
     grade_p.add_argument('--labels', default=str(labels.DEFAULT_LABELS_FILE),
@@ -446,7 +476,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list] = None) -> int:
-    """Entry point; returns the exit code."""
+    """Entry point; returns the exit code. Logging goes to
+    ``~/.guru/guru.log`` as in the TUI (an agent turn that raises is only
+    logged by the orchestrator; without this it vanished)."""
+    log.setup()
     args = _parser().parse_args(argv)
     return int(args.func(args))
 
