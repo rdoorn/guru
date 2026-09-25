@@ -175,6 +175,20 @@ class TestAvailable:
         assert verbs.sandbox_submit('x') == verbs.NOT_PROVISIONED
         assert verbs.request_dependency('six') == verbs.NOT_PROVISIONED
 
+    def test_enabled_false_is_the_off_switch(self, sandboxed) -> None:
+        """A provisioned project is sandboxed by default; enabled = false
+        in .guru/sandbox.toml hides the verbs and refuses them by name."""
+        root, _fake = sandboxed
+        assert verbs.enabled() is True and verbs.available() is True
+        (root / '.guru' / 'sandbox.toml').write_text(
+            '[sandbox]\nenabled = false\n')
+        assert verbs.enabled() is False and verbs.available() is False
+        assert verbs.spec_for() is not None          # still a valid spec
+        assert verbs.sandbox_run(['python', '-c', '1']) == verbs.DISABLED
+        assert verbs.sandbox_submit('x') == verbs.DISABLED
+        (root / '.guru' / 'sandbox.toml').write_text('[sandbox]\ncpus = 1\n')
+        assert verbs.available() is True             # tweak only: still on
+
     def test_no_lockfile_or_bad_settings(self, sandboxed) -> None:
         root, _fake = sandboxed
         (root / '.guru' / 'sandbox.toml').write_text('[sandbox]\ncpus="x"\n')

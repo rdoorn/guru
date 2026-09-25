@@ -52,6 +52,7 @@ Requires the Ollama app running in the menu bar (for local models).
 | `/ledger` | Print this run's spend: calls, tokens and cost per model, tasks per model, the three most expensive tasks |
 | `/tools` | Print the last turn's tool calls from the audit stream: tool, args head, seconds, bytes shown/produced, denials |
 | `/routing`, `/routing off`, `/routing on` | Show the active routing configuration (mode, ladders, judges) or flip `mode` in `settings.toml` and reload it |
+| `/sandbox [status \| provision [--force] \| gate \| deps …]` | Inspect the project's sandbox, build its image, review the pending gate, manage dependency requests (see **Sandbox**) |
 | `exit` / `quit` | Exit |
 
 ## Roles & skills
@@ -321,7 +322,9 @@ off, the ladder's `default` rung. With `type_router` on, a task whose
 `kind` has a per-kind ladder (`[[routing.ladders.<kind>]]`) uses it — the
 default block gives `review` its own ladder starting at Sonnet, so a
 trivial-labelled review never lands on Haiku; every other kind uses the
-default ladder. A rung naming an adapter that is not configured is dropped
+default ladder. Like `controller`, `type_router` needs no setting: it is on
+whenever a per-kind ladder is configured and `type_router = false` turns it
+off. A rung naming an adapter that is not configured is dropped
 with a warning at startup; an invalid table logs a warning and the defaults
 apply. The parent's own adapter/model is always *pre-approved*: it is the
 "no change" fallback, it never needs a spend confirmation and neither a scan
@@ -469,6 +472,16 @@ Remote models are queried for their context window; no memory is shown.
 
 ## Configuration
 
+**Defaults.** guru works without any settings file: every feature that is
+meant to be used is on by default, and a parameter exists only to turn it
+off or to tweak a number or a choice — never to switch the intended
+behaviour on. The routing block is written for you when a remote adapter
+is enabled, the ledger records from the first call, a provisioned project
+is sandboxed without a `.guru/sandbox.toml`, and an eval that may spend
+grades its rubric cases. [`docs/defaults.md`](docs/defaults.md) lists every
+knob with its default, what it does and why it exists; the tables below
+name the defaults inline.
+
 **Global** — `~/.guru/`:
 
 - `GURU.md` — the base system prompt, appended to the built-in one. Edit it to
@@ -507,7 +520,13 @@ Remote models are queried for their context window; no memory is shown.
     benchmark; a model that stalls past it is cancelled and recorded as a
     timeout (default `600`; `0` disables the guard).
 - `[routing]`, `[[routing.ladder]]`, `[[routing.ladders.<kind>]]` — see
-  **Routing (controller and ladder)** above.
+  **Routing (controller and ladder)** above (written for you at startup when
+  a remote adapter is enabled; `/routing off` turns it off).
+- `[decisions]`, `[ledger]` (`enabled`, `turn_line`, both `true`),
+  `[pricing."<model>"]` — see **Ledger and decisions** above.
+- `[evals]` (`model`, `num_ctx = 8192`) — see `evals/README.md`.
+- `[sandbox]` — global container limits and pinned images; see **Sandbox**
+  below.
 
 **Per-project** — a `.guru/` folder in the current directory, so project
 state travels with the project (created lazily on first write):
@@ -519,6 +538,8 @@ state travels with the project (created lazily on first write):
 - `.guru/read_dirs_allow.txt` / `.guru/write_dirs_allow.txt` — approved
   file-read / file-write directories.
 - `.guru/tools.toml` — the project's tool policy (see **Audited tools**).
+- `.guru/sandbox.toml` — optional: `enabled = false` turns the sandbox off
+  for this project, other keys tweak its limits (see **Sandbox**).
 - `.guru/memory/*.memory` — saved conversations, one JSON file per `/save`.
 
 ## Access modes & safeguards
@@ -658,19 +679,27 @@ gate. Design and plan:
 `pyproject.toml` + `uv.lock`. Only lockfile-declared packages exist in the
 image; the model never installs anything.
 
-**Enable.** Create `.guru/sandbox.toml` in the project (global defaults live
-in `[sandbox]` of `~/.guru/settings.toml`; the project file overrides key by
-key and is the only place `enabled` is read from):
+**Default: on once provisioned.** No file is needed: as soon as the
+project has a provisioned image (below) the sandbox verbs replace the
+direct write tools. Guru does not provision by itself (an image build takes
+minutes, needs Colima and asks to allow the PyPI hosts), so
+`/sandbox provision` is the one explicit step. `.guru/sandbox.toml` is
+optional — the off switch for a project, or a per-project tweak of the
+`[sandbox]` limits in `~/.guru/settings.toml` (the project file wins key by
+key; `enabled` is read from the project file only):
 
 ```toml
 [sandbox]
-enabled = true
+# enabled = false                            # turn the sandbox off for this project
 # base_image = "python:3.12-slim@sha256:…"   # digest-pinned, or refused
 # cpus = 2.0
 # memory_mb = 2048
 # pids = 256
 # timeout_s = 600                            # wall clock per container run
 ```
+
+With `enabled = false` the verbs are hidden (and refused if named), the
+write tools come back and `/sandbox provision` refuses.
 
 **Provision.** `/sandbox provision` (or `--force`) generates a Dockerfile
 from `pyproject.toml` + `uv.lock`, asks once to allow `pypi.org` and

@@ -25,7 +25,8 @@ evals/
 .venv/bin/python -m guru.evals run --cases greet,logic-bug
 .venv/bin/python -m guru.evals run --model 'Ollama|qwen3:14b' --num-ctx 16384 --note 'after nudge fix'
 .venv/bin/python -m guru.evals compare evals/runs/<old>.json evals/runs/<new>.json
-.venv/bin/python -m guru.evals run --routing evals/routing/<file>.toml --allow-spend
+.venv/bin/python -m guru.evals run --routing evals/routing/<file>.toml --allow-spend   # routed; rubric cases graded by the file's cheapest rung
+.venv/bin/python -m guru.evals run --tags fast --allow-spend                             # unrouted; graded by the cheapest remote tier (Haiku)
 .venv/bin/python -m guru.evals run --tags fast --repeat 3                 # the x3 gate (make eval-fast)
 .venv/bin/python -m guru.evals run --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric-min 1
 .venv/bin/python -m guru.evals grade fa5c42d05059 --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric 'SBP Litellm|aws/claude-5-sonnet' --samples 3
@@ -37,8 +38,12 @@ before any commit; `make eval-fast` is the measurement.
 `--routing FILE` routes sub-agents through a `[routing]` table (same shape
 as `settings.toml`; the main agent becomes a controller when the table says
 so) and `--allow-spend` grants the remote-spend question for the run
-(default: deny, so remote rungs are skipped) and lets sandbox cases apply an
-`intended` submit (see "Sandbox cases"). The run records the file
+(default: deny, so remote rungs are skipped), lets sandbox cases apply an
+`intended` submit (see "Sandbox cases") and has the rubric cases graded by
+a model (see "Rubric grading"; `--rubric none` turns that off). The runner
+never reads `[routing]` from `settings.toml`: a run is reproducible from
+its file alone, and without `--routing` the main model does everything.
+Defaults for every flag: `docs/defaults.md`. The run records the file
 stem (`+routed:<stem>` in the model label) and the table's detail column
 lists the `Adapter|model` each case's sub-agents ran on. See
 `evals/routing/README.md` for the local-vs-remote cost experiment.
@@ -110,10 +115,15 @@ when the answer does not paste the diff, and a claim the evidence
 contradicts is false. The run error in that block is one line, clipped
 to 200 characters, with the home directory replaced by `~`.
 
-The default: with `--allow-spend` and `--routing FILE`, the file's
-cheapest rung (the lowest rung of its `default` ladder — Haiku in the
-measured configuration) grades; `--rubric none` turns that off; without
-either flag nothing is graded. A grade never fails a case by itself:
+The default: whenever the run may spend (`--allow-spend`) a judge grades.
+With `--routing FILE` it is the file's cheapest rung (the lowest rung of
+its `default` ladder — Haiku in the measured configuration); without a
+routing file, or with one that names no rung, it is the cheapest Claude
+tier of the first enabled remote adapter in `adapters.toml`
+(`aws/claude-4-5-haiku` on a LiteLLM adapter, `claude-haiku-4-5` on an
+Anthropic one). `--rubric none` turns grading off; without `--allow-spend`
+nothing is graded (grading is a paid call), and without a remote adapter
+there is nothing to grade with. A grade never fails a case by itself:
 `--rubric-min N` makes a score below N (or a failed grading) fail the
 case with a `rubric_min` check row. An empty answer scores 0 without a
 model call. The grading call's own cost goes to the run's ledger, not to

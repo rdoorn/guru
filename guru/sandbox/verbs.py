@@ -69,6 +69,8 @@ from guru.repositories.settings import load_sandbox
 from guru.sandbox import colima, provision
 
 NOT_PROVISIONED = 'Refused: sandbox not provisioned; run /sandbox provision'
+DISABLED = ('Refused: sandbox disabled for this project (enabled = false in '
+            '.guru/sandbox.toml)')
 COPY_GONE = ('Refused: sandbox copy no longer exists; run a sandbox verb to '
              'make a fresh one')
 BASELINE_CHANGED = ('Refused: sandbox copy baseline changed; the copy was '
@@ -131,12 +133,24 @@ def spec_for(project: Optional[Path] = None) -> Optional[sb.SandboxSpec]:
         return None
 
 
+def enabled() -> bool:
+    """False only when the project's ``.guru/sandbox.toml`` says
+    ``enabled = false`` (the off switch); True otherwise, including for
+    settings that do not parse (the spec check reports those)."""
+    try:
+        return load_sandbox().enabled
+    except ValueError:
+        return True
+
+
 def available(project: Optional[Path] = None) -> bool:
     """True when ``project`` (default the current one) has a recorded
-    sandbox image, so the verbs can run. Never raises."""
+    sandbox image and is not switched off, so the verbs can run. Never
+    raises."""
     try:
         spec = spec_for(project)
-        return spec is not None and images.load_record(spec) is not None
+        return (enabled() and spec is not None
+                and images.load_record(spec) is not None)
     except Exception:                            # noqa: BLE001
         log.exc('sandbox: availability check failed')
         return False
@@ -145,6 +159,8 @@ def available(project: Optional[Path] = None) -> bool:
 def _ready(project: Optional[Path] = None
            ) -> tuple[Optional[sb.SandboxSpec], str]:
     """``(spec, '')`` when the verbs may run, else ``(None, refusal)``."""
+    if not enabled():
+        return None, DISABLED
     spec = spec_for(project)
     if spec is None or images.load_record(spec) is None:
         return None, NOT_PROVISIONED
