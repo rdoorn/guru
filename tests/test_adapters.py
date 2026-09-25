@@ -839,6 +839,20 @@ class TestCallRecords:
                 message=SimpleNamespace(content=text, tool_calls=None),
                 finish_reason='stop')])
 
+    def test_litellm_complete_sends_the_adapter_ceiling(
+            self, monkeypatch, fake_repo) -> None:
+        # The proxy enforces a thinking budget: a 300-token cap is a 400
+        # error, so complete() always asks for _MAX_TOKENS at least.
+        self._arm(monkeypatch, fake_repo)
+        seen: dict = {}
+        resp = self._litellm_resp(text='{"score": 2}', prompt_tokens=3,
+                                  completion_tokens=2)
+        a = lite.LiteLLMAdapter(base_url='http://proxy')
+        monkeypatch.setattr(a, '_client', lambda: _fake_openai_client(
+            resp, create=lambda **kw: seen.update(kw)))
+        assert a.complete('grade this', max_tokens=300) == '{"score": 2}'
+        assert seen['max_tokens'] == lite._MAX_TOKENS
+
     def test_litellm_step_prefers_cost_header(
             self, monkeypatch, fake_repo) -> None:
         repo = self._arm(monkeypatch, fake_repo)

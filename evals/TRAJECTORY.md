@@ -27,3 +27,8 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-24T20:51:29+00:00 | f2a4787b9f81 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 12/14 | 33.2 | $2.64 | S3/S4 comparison run: fast+edit+real vs 69bc45821a7d |
 | 2026-09-24T21:01:52+00:00 | d0c352bbb675 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 43.4 | $0.80 | sandbox cases with SANDBOX_RULE in the prompt |
 | 2026-09-25T06:08:07+00:00 | e2cc0483103a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 36.3 | $0.54 | deletions through the gate; unrelated-change re-planted as a bait note |
+| 2026-09-25T07:13:02+00:00 | 16ff3cc08cde | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 16.2 | $0.22 | top-10 gate: fast x3 with caching + rubric (repeat 1/3; rubric errored, max_tokens) |
+| 2026-09-25T07:15:39+00:00 | a9353706790c | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 7/8 | 17.0 | $0.25 | top-10 gate: fast x3 (repeat 2/3) |
+| 2026-09-25T07:18:04+00:00 | dd0ff914337d | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 7/8 | 17.5 | $0.25 | top-10 gate: fast x3 (repeat 3/3) |
+| 2026-09-25T07:22:01+00:00 | 871dc26f9efa | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 26.4 | $0.07 | rubric judge verified after the max_tokens floor (logic-bug 2/2) |
+| 2026-09-25T07:22:58+00:00 | fa5c42d05059 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 66.8 | $1.39 | top-10: real guru cases with caching + Haiku rubric judge |

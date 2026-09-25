@@ -406,9 +406,14 @@ class LiteLLMAdapter(Adapter):
     def complete(self, prompt: str, max_tokens: int = 1024,
                  model: str = '') -> str:
         t0 = time.perf_counter()
+        # A proxy that enforces a thinking budget rejects any completion
+        # whose max_tokens sits below it (400 from the rubric judge or the
+        # gate reviewer), so the caller's value is a floor-less hint here:
+        # the request always carries the adapter's ceiling. The model stops
+        # at its own answer length; the cap is not a spend.
         resp, cost = _complete(
             self._client(), model=model or session.model,
-            max_tokens=int(max_tokens),
+            max_tokens=max(int(max_tokens), _MAX_TOKENS),
             messages=[{'role': 'system', 'content': JSON_ONLY},
                       {'role': 'user', 'content': prompt}])
         self._record_call('complete', resp, time.perf_counter() - t0, cost,
