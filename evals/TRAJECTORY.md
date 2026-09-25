@@ -40,3 +40,11 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-25T10:10:11+00:00 | 61c2e3bb32d3 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 79.5 | $0.32 | loop 1: review-multi-file x3 with panel active (1/3) |
 | 2026-09-25T10:12:03+00:00 | cc4411c400e3 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 78.4 | $0.18 | loop 1: panel (2/3), spawned_min miss |
 | 2026-09-25T10:13:39+00:00 | c1362a8ac39a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 86.2 | $0.32 | loop 1: panel (3/3) |
+| 2026-09-25T10:50:18+00:00 | 94437405450e | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 15.8 | $0.27 | loop 2: fast x3 (1/3) |
+| 2026-09-25T10:53:26+00:00 | c33bed3bb374 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 14.4 | $0.20 | loop 2: fast x3 (2/3) |
+| 2026-09-25T10:55:55+00:00 | 30e56fd72375 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 7/8 | 18.2 | $0.29 | loop 2: fast x3 (3/3), one whole-file read miss |
+| 2026-09-25T10:59:07+00:00 | fe9e21c94f43 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/4 | 145.7 | $1.05 | loop 2: real + dogfood; dogfood applied, fixture check wrong (TMPDIR inside repo) |
+| 2026-09-25T11:12:06+00:00 | c47045f45c31 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 51.7 | $0.23 | loop 2: sandbox 3/3 after the runner fix |
+| 2026-09-25T11:15:41+00:00 | 9da2e374999f | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 69.6 | $0.17 | loop 2: panel x3 (1/3), single worker |
+| 2026-09-25T11:17:57+00:00 | 714c3ae9f649 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 75.0 | $0.18 | loop 2: panel x3 (2/3), single worker |
+| 2026-09-25T11:19:44+00:00 | a213997e4d9d | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 67.2 | $0.16 | loop 2: panel x3 (3/3), single worker |
