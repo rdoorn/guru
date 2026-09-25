@@ -15,7 +15,13 @@ Prompt caching (``cache = true`` in the adapter record, the default): the
 system prompt is sent as one text block and it and the last tool
 definition carry ``cache_control: {type: ephemeral}``, so the stable prefix
 (tools, then system) is cached across the rounds of a turn and across
-turns; the messages themselves stay uncached.
+turns. A third marker sits on the last content block of the conversation
+(the user's text, or the last ``tool_result`` of a tool round): the model
+caches the whole history up to it, and the next round reads that prefix
+back and only pays for what was appended since. Three of Anthropic's four
+breakpoints per request are used; a prefix under the model's minimum
+(4096 tokens on Haiku 4.5, 1024-2048 on the larger models) is silently
+not cached.
 """
 import os
 import pathlib
@@ -118,6 +124,31 @@ def cached_tools(defs: list, cache: bool) -> list:
     out = [dict(d) for d in defs]
     out[-1]['cache_control'] = dict(CACHE_CONTROL)
     return out
+
+
+def cached_messages(messages: list, cache: bool) -> list:
+    """``messages`` with the cache marker on the last content block of the
+    last message — the conversation breakpoint — when that message is the
+    user's: a string becomes a one-block list, a block list (a tool round's
+    ``tool_result`` blocks) gets the marker on its last block. Copies: the
+    list, the message and the block. Unchanged when ``cache`` is off, the
+    list is empty, or the last message is not a user message."""
+    if not cache or not messages:
+        return messages
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get('role') != 'user':
+        return messages
+    content = last.get('content')
+    if isinstance(content, str) and content:
+        blocks: list = [{'type': 'text', 'text': content,
+                         'cache_control': dict(CACHE_CONTROL)}]
+    elif (isinstance(content, list) and content
+            and isinstance(content[-1], dict)):
+        blocks = list(content[:-1]) + [
+            {**content[-1], 'cache_control': dict(CACHE_CONTROL)}]
+    else:
+        return messages
+    return messages[:-1] + [{**last, 'content': blocks}]
 
 
 def neutral_assistant(text: str, tool_calls: list) -> dict:
@@ -317,7 +348,7 @@ class AnthropicAdapter(Adapter):
             kwargs: dict = {
                 'model': session.model,
                 'max_tokens': _MAX_TOKENS,
-                'messages': native,
+                'messages': cached_messages(native, self.cache),
                 'tools': anth_tools,
             }
             if system_field is not None:

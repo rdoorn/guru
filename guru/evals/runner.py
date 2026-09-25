@@ -111,6 +111,10 @@ _GIT_EXCLUDE = '__pycache__/\n.pytest_cache/\n*.pyc\n'
 _GIT_IDENTITY = ['-c', 'user.name=evals', '-c', 'user.email=evals@local',
                  '-c', 'commit.gpgsign=false']
 FIXTURE_PYTEST_TIMEOUT_S = 300
+# Tests a fixture's own pytest never runs for the verdict: container tests
+# (guru's ``sandbox`` marker) build images and take minutes; a fixture
+# without that marker is unaffected by the deselection.
+FIXTURE_PYTEST_DESELECT = 'not sandbox'
 WORKER_DRAIN_S = 30.0          # how long to wait for leftover worker threads
 JUDGE_WARM_UP_S = 30.0         # model loading before the first case
 _WORKER_POLL_S = 0.2
@@ -322,10 +326,12 @@ def _fixture_env(repo: Path) -> dict:
 def fixture_tests_pass(repo: Path,
                        timeout: float = FIXTURE_PYTEST_TIMEOUT_S) -> bool:
     """Run the fixture's own pytest in ``repo`` (this interpreter, the copy
-    first on ``PYTHONPATH``); True when it exits 0."""
+    first on ``PYTHONPATH``, tests marked ``sandbox`` deselected); True
+    when it exits 0."""
     try:
         proc = subprocess.run(
-            [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider'],
+            [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
+             '-m', FIXTURE_PYTEST_DESELECT],
             cwd=repo, capture_output=True, text=True, timeout=timeout,
             env=_fixture_env(repo))
     except (OSError, subprocess.TimeoutExpired):
@@ -761,8 +767,9 @@ def grade_case(case: Case, res: CaseResult, judge: rubric.Judge,
         if not answer.strip():
             grade = rubric.Grade(0, 'empty answer')
         else:
-            grade = rubric.grade(case.prompt, case.expect.rubric, answer,
-                                 judge)
+            grade = rubric.grade(
+                case.prompt, case.expect.rubric, answer, judge,
+                evidence_text=rubric.evidence(res.observed, res.cost_usd))
     except Exception as e:                           # noqa: BLE001
         res.rubric_reason = f'error: {e}'
         log.warning('evals: rubric grading of %s failed: %s', case.name, e)

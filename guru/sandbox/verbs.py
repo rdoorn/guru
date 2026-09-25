@@ -1,6 +1,7 @@
 """The sandbox verbs (design plan §1 tools, §2 steps 2-4, chunk S3):
-``sandbox_run``, ``sandbox_python``, ``sandbox_diff``, ``sandbox_submit``
-and ``request_dependency``, plus the per-task working copies they share.
+``sandbox_run``, ``sandbox_python``, ``sandbox_diff``, ``code_health``,
+``sandbox_submit`` and ``request_dependency``, plus the per-task working
+copies they share.
 
 Every verb is refused until the project's sandbox image exists
 (``/sandbox provision``); ``guru.domain.tools`` registers thin wrappers
@@ -19,16 +20,21 @@ sees a digest (exit code, first lines of output) with ``detail`` for the
 last 4 KB; the full output goes to guru's log.
 
 ``sandbox_submit`` is the only way changes reach the real tree: the
-copy's diff runs through the deterministic rules (``gate.rules``), then
-the reviewer (``decisions.decide_review`` on the configured ``gate``
-judge, else ``judges.llm.default_reviewer``) with the user's request, the
-task, the agent's intent and the diff, and ``gate.decide`` gives the
-verdict. ``intended`` applies via ``patch.apply_patch`` (auto mode) or
-asks first (ask mode); ``unclear`` asks in every mode with the reviewer's
-reasons; ``suspicious`` refuses; read-only mode reports the diff without
-consulting the reviewer. The copy's lock is held from the diff through
-the review to the apply, so what the reviewer saw is what lands. Each
-submit is a ``sandbox_events`` row.
+copy's diff runs through the deterministic rules (``gate.rules``) and the
+code-health rules (``gate.health_flags`` with a baseline reader over
+``git show HEAD:<path>`` in the copy — the copy's commit is the project
+as it was when the task started), then the reviewer
+(``decisions.decide_review`` on the configured ``gate`` judge, else
+``judges.llm.default_reviewer``) with the user's request, the task, the
+agent's intent, the change summary, the code-health rows and the diff,
+and ``gate.decide`` gives the verdict. ``code_health`` shows a worker the
+same rows before it submits. ``intended`` applies via
+``patch.apply_patch`` (auto mode) or asks first (ask mode); ``unclear``
+asks in every mode with the reviewer's reasons; ``suspicious`` refuses;
+read-only mode reports the diff without consulting the reviewer. The
+copy's lock is held from the diff through the review to the apply, so
+what the reviewer saw is what lands. Each submit is a ``sandbox_events``
+row.
 """
 from __future__ import annotations
 
@@ -38,10 +44,10 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from guru import config, log, session
-from guru.domain import decisions, gate, patch
+from guru.domain import decisions, gate, health, patch
 from guru.domain import sandbox as sb
 from guru.domain.decisions import Judge
 from guru.repositories import sandbox_images as images
@@ -53,6 +59,7 @@ COPY_GONE = ('Refused: sandbox copy no longer exists; run a sandbox verb to '
              'make a fresh one')
 DIGEST_LINES = 30           # lines of stdout/stderr in a run digest
 DETAIL_BYTES = 4096         # tail returned by detail
+HEALTH_DIGEST_CHARS = 600   # cap on a code_health digest
 SCRIPT_PREFIX = colima.SCRIPT_PREFIX
 # First line of the question ``sandbox_submit`` puts to the approval asker;
 # :func:`question_verdict` reads the state back (the eval runner's asker
@@ -309,6 +316,85 @@ def sandbox_diff(project: Optional[Path] = None) -> str:
             'your intent to apply them):\n' + gate.stat_text(diff))
 
 
+def _baseline_reader(copy: Path, project: Path
+                     ) -> Callable[[str], Optional[str]]:
+    """A ``gate.BaselineReader`` over the copy's baseline commit."""
+    def read(path: str) -> Optional[str]:
+        return colima.show_baseline(copy, path, project)
+    return read
+
+
+def _clip(text: str, limit: int = HEALTH_DIGEST_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit('\n', 1)[0].rstrip()
+    return f'{cut}\n… ({len(text) - len(cut)} more chars)'
+
+
+def _file_health_text(rel: str, source: str) -> str:
+    """Every function of one unchanged file with its metrics, the ones
+    over a threshold first."""
+    rows = health.file_health(source)
+    if not rows:
+        return f'{rel}: no functions (or the file does not parse).'
+    over = [fh for fh in rows if fh.over()]
+    lines = [f'{rel} is unchanged in the sandbox copy: {len(rows)} '
+             f'function(s), {len(over)} over a threshold.']
+    lines += [f'{fh.name}: {fh.describe()}'
+              for fh in over + [fh for fh in rows if not fh.over()]]
+    return '\n'.join(lines)
+
+
+def code_health(path: str = '', project: Optional[Path] = None) -> str:
+    """The code-health deltas of the task's copy against the project
+    (``gate.health_deltas`` over the copy's diff): every changed or new
+    function with its verdict and before→after metrics, degraded first.
+    With ``path`` only that file — or, when the copy did not change it,
+    the file's current metrics. Digest capped at ``HEALTH_DIGEST_CHARS``;
+    nothing is applied or run."""
+    spec, refusal = _ready(project)
+    if spec is None:
+        return refusal
+    want = str(path or '').strip().replace('\\', '/')
+    while want.startswith('./'):
+        want = want[2:]
+    if want and (Path(want).is_absolute() or '..' in Path(want).parts):
+        return f'Refused: {want!r} is not a project-relative path.'
+    copy = _copy(spec)
+    try:
+        diff = colima.diff(copy, spec.project)
+    except RuntimeError as e:
+        return f'Refused: cannot read the sandbox diff: {e}'
+    deltas = gate.health_deltas(diff, _baseline_reader(copy, spec.project))
+    if want:
+        deltas = [(rel, d) for rel, d in deltas if rel == want]
+        if not deltas and want not in {rel for rel, *_r in gate.stat(diff)}:
+            target = copy / want
+            if not target.is_file() or not want.endswith('.py'):
+                return f'{want}: not a Python file in the sandbox copy.'
+            try:
+                source = target.read_text(encoding='utf-8')
+            except (OSError, UnicodeDecodeError) as e:
+                return f'{want}: cannot read: {e}'
+            return _clip(_file_health_text(want, source))
+    if not deltas:
+        what = want or 'the changed Python files'
+        return (f'Code health: no function of {what} changed its metrics '
+                'in the sandbox copy.')
+    ordered = sorted(deltas, key=lambda item: (
+        health.VERDICTS[::-1].index(item[1].verdict)))
+    counts = {v: sum(1 for _rel, d in deltas if d.verdict == v)
+              for v in health.VERDICTS}
+    head = ('Code health of the sandbox changes: '
+            + ', '.join(f'{counts[v]} {v}' for v in health.VERDICTS
+                        if counts[v])
+            + f' (thresholds: lines >{health.LINES_MAX}, complexity '
+              f'>{health.COMPLEXITY_MAX}, nesting >{health.NESTING_MAX}, '
+              f'args >{health.ARGS_MAX}).')
+    return _clip('\n'.join([head] + [f'{rel}: {d.describe()}'
+                                     for rel, d in ordered]))
+
+
 def _reviewer(diff: str) -> Optional[Judge]:
     """The configured ``gate`` judge, else the default LLM reviewer."""
     judge = decisions.judge_for(gate.GATE_POINT)
@@ -323,14 +409,19 @@ def _user_request() -> str:
     return turn.turn_request()
 
 
-def _verdict(diff: str, intent: str, project: Path) -> gate.Verdict:
-    """Rules first; the reviewer only when the rules found nothing that
+def _verdict(diff: str, intent: str, project: Path,
+             baseline: Optional[gate.BaselineReader] = None) -> gate.Verdict:
+    """Rules first (the deterministic ones, then the code-health ones over
+    ``baseline``); the reviewer only when the rules found nothing that
     already settles the verdict."""
     flags = gate.rules(diff, project)
+    deltas = gate.health_deltas(diff, baseline) if baseline else []
+    flags += [gate.Flag(gate.HEALTH_KIND, rel, d.describe())
+              for rel, d in deltas if d.verdict == health.DEGRADED]
     review = None
     if not gate.has_suspicious(flags):
         packet = gate.packet_text(_user_request(), session.task_text, intent,
-                                  diff)
+                                  diff, health_block=gate.health_text(deltas))
         review = decisions.decide_review(gate.GATE_POINT,
                                          gate.review_question(packet),
                                          judge=_reviewer(diff))
@@ -377,7 +468,8 @@ def sandbox_submit(intent: str, project: Optional[Path] = None) -> str:
             return (f'read-only: not applied. The sandbox copy differs from '
                     f'the project:\n{stat}\nChange the access mode to '
                     'submit through the gate.')
-        verdict = _verdict(diff, what, spec.project)
+        verdict = _verdict(diff, what, spec.project,
+                           _baseline_reader(copy, spec.project))
         return _settle(spec, key, what, diff, stat, verdict, started)
 
 

@@ -897,8 +897,9 @@ class TestCallRecords:
 
 
 class TestPromptCaching:
-    """cache_control markers (system prompt + last tool) on both remote
-    adapters, the ``cache`` switch, and LiteLLM cache-usage parsing."""
+    """cache_control markers (system prompt, last tool, last message of the
+    conversation) on both remote adapters, the ``cache`` switch, and
+    LiteLLM cache-usage parsing."""
 
     SPECS = [{'name': 'a', 'description': 'A', 'parameters': {'x': 'X'}},
              {'name': 'b', 'description': 'B', 'parameters': {}}]
@@ -921,6 +922,41 @@ class TestPromptCaching:
         assert anth.cached_tools(defs, False) is defs
         assert anth.cached_tools([], True) == []
 
+    def test_anthropic_cached_messages_marks_last_user_text(self) -> None:
+        msgs = [{'role': 'user', 'content': 'q1'},
+                {'role': 'assistant', 'content': 'a1'},
+                {'role': 'user', 'content': 'q2'}]
+        out = anth.cached_messages(msgs, True)
+        assert out[:2] == msgs[:2]
+        assert out[2] == {'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q2',
+             'cache_control': {'type': 'ephemeral'}}]}
+        assert msgs[2]['content'] == 'q2'                # untouched
+        assert anth.cached_messages(msgs, False) is msgs
+        assert anth.cached_messages([], True) == []
+
+    def test_anthropic_cached_messages_marks_last_tool_result(self) -> None:
+        results = [{'type': 'tool_result', 'tool_use_id': 'a', 'content': 'x'},
+                   {'type': 'tool_result', 'tool_use_id': 'b', 'content': 'y'}]
+        msgs = [{'role': 'user', 'content': 'q'},
+                {'role': 'assistant', 'content': []},
+                {'role': 'user', 'content': results}]
+        out = anth.cached_messages(msgs, True)
+        assert 'cache_control' not in out[2]['content'][0]
+        assert out[2]['content'][1] == {
+            'type': 'tool_result', 'tool_use_id': 'b', 'content': 'y',
+            'cache_control': {'type': 'ephemeral'}}
+        assert 'cache_control' not in results[1]         # copy, not in place
+
+    def test_anthropic_cached_messages_skips_unmarkable_tail(self) -> None:
+        ends_assistant = [{'role': 'user', 'content': 'q'},
+                          {'role': 'assistant', 'content': 'a'}]
+        assert anth.cached_messages(ends_assistant, True) is ends_assistant
+        empty_text = [{'role': 'user', 'content': ''}]
+        assert anth.cached_messages(empty_text, True) is empty_text
+        empty_blocks = [{'role': 'user', 'content': []}]
+        assert anth.cached_messages(empty_blocks, True) is empty_blocks
+
     # --- pure helpers: litellm ----------------------------------------------
 
     def test_litellm_cached_messages_marks_last_system_part(self) -> None:
@@ -932,11 +968,38 @@ class TestPromptCaching:
         assert out[1]['content'] == [{
             'type': 'text', 'text': 'SUMMARY',
             'cache_control': {'type': 'ephemeral'}}]
-        assert out[2] == {'role': 'user', 'content': 'q'}
+        assert out[2] == {'role': 'user', 'content': [{
+            'type': 'text', 'text': 'q',
+            'cache_control': {'type': 'ephemeral'}}]}
         assert msgs[1]['content'] == 'SUMMARY'          # untouched
+        assert msgs[2]['content'] == 'q'
         assert lite.cached_messages(msgs, False) is msgs
-        no_system = [{'role': 'user', 'content': 'q'}]
-        assert lite.cached_messages(no_system, True) is no_system
+        no_marks = [{'role': 'user', 'content': 'q'},
+                    {'role': 'assistant', 'content': 'a'}]
+        assert lite.cached_messages(no_marks, True) is no_marks
+
+    def test_litellm_cached_messages_marks_last_tool_result(self) -> None:
+        # What the SBP proxy forwards to Anthropic as a marked tool_result
+        # (probe 2026-09-25: cache reads on the whole history).
+        msgs = [{'role': 'user', 'content': 'q'},
+                {'role': 'assistant', 'content': None, 'tool_calls': [
+                    {'id': 'c1', 'type': 'function',
+                     'function': {'name': 'a', 'arguments': '{}'}}]},
+                {'role': 'tool', 'tool_call_id': 'c1', 'content': 'result'}]
+        out = lite.cached_messages(msgs, True)
+        assert out[0] == msgs[0] and out[1] is msgs[1]
+        assert out[2] == {'role': 'tool', 'tool_call_id': 'c1', 'content': [
+            {'type': 'text', 'text': 'result',
+             'cache_control': {'type': 'ephemeral'}}]}
+        assert msgs[2]['content'] == 'result'
+        # Only the last message carries the breakpoint; an empty tail or a
+        # non-string content is left alone (the system marker still goes on).
+        tail_empty = [{'role': 'system', 'content': 'S'},
+                      {'role': 'tool', 'tool_call_id': 'c1', 'content': ''}]
+        out = lite.cached_messages(tail_empty, True)
+        assert out[0]['content'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert out[1] is tail_empty[1]
+        assert lite.cached_messages([], True) == []
 
     def test_litellm_cached_tools_marks_last_only(self) -> None:
         defs = lite.openai_tool_defs(self.SPECS)
@@ -1013,12 +1076,16 @@ class TestPromptCaching:
         assert kw['system'][0]['text'] == 'SYS'
         assert kw['tools'][-1]['cache_control'] == {'type': 'ephemeral'}
         assert 'cache_control' not in kw['tools'][0]
-        assert all('cache_control' not in str(m) for m in kw['messages'])
+        assert kw['messages'] == [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q',
+             'cache_control': {'type': 'ephemeral'}}]}]
 
     def test_anthropic_cache_off(self, monkeypatch) -> None:
         kw = self._anthropic_kwargs(monkeypatch, cache=False)
         assert kw['system'] == 'SYS'
         assert 'cache_control' not in str(kw['tools'])
+        # The native list itself (no copy); the reply was appended after.
+        assert kw['messages'][0] == {'role': 'user', 'content': 'q'}
 
     def _litellm_kwargs(self, monkeypatch, cache: bool, fake_repo) -> tuple:
         self._arm(monkeypatch)
@@ -1046,7 +1113,9 @@ class TestPromptCaching:
         assert system['content'][0]['cache_control'] == {'type': 'ephemeral'}
         assert kw['tools'][-1]['cache_control'] == {'type': 'ephemeral'}
         assert 'cache_control' not in kw['tools'][0]
-        assert kw['messages'][1] == {'role': 'user', 'content': 'q'}
+        assert kw['messages'][1] == {'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q',
+             'cache_control': {'type': 'ephemeral'}}]}
         [row] = rows
         assert row['tokens_in'] == 360 and row['cache_read'] == 6386
         assert row['cache_write'] == 0 and row['tokens_out'] == 47
@@ -1054,6 +1123,7 @@ class TestPromptCaching:
     def test_litellm_cache_off(self, monkeypatch, fake_repo) -> None:
         kw, _ = self._litellm_kwargs(monkeypatch, False, fake_repo)
         assert kw['messages'][0] == {'role': 'system', 'content': 'SYS'}
+        assert kw['messages'][1] == {'role': 'user', 'content': 'q'}
         assert 'cache_control' not in str(kw['tools'])
 
     def test_cache_defaults_on_and_config_switch(self) -> None:

@@ -29,6 +29,7 @@ answer_contains = ["path traversal"]
 answer_not_contains = ["I'll start by"]
 answer_regex = ["swapp?ed|operands"]
 files_changed = []
+files_changed_any = ["app/upload.py"]
 files_unchanged = ["README.md"]
 fixture_tests_pass = true
 
@@ -83,6 +84,7 @@ class TestLoadCase:
         assert e.answer_not_contains == ["I'll start by"]
         assert e.answer_regex == ['swapp?ed|operands']
         assert e.files_changed == []
+        assert e.files_changed_any == ['app/upload.py']
         assert e.files_unchanged == ['README.md']
         assert e.fixture_tests_pass is True
         assert e.rubric.startswith('Names the unchecked')
@@ -377,7 +379,7 @@ class TestGitFixture:
                 if 'real' in c.tags]
         assert {c.name for c in real} == {
             'guru-explain-gpu-fit', 'guru-review-adapters',
-            'guru-add-version-flag'}
+            'guru-add-version-flag', 'guru-sandbox-ledger-origin'}
         for c in real:
             assert c.fixture_git is not None, c.name
             assert c.fixture_git.path == cases.REPO_ROOT
@@ -436,10 +438,13 @@ class TestSandboxKeys:
                                                        tags=['sandbox'])}
         assert set(by_name) == {'sandbox-fix-and-submit',
                                 'sandbox-unrelated-change',
-                                'sandbox-dependency-request'}
+                                'sandbox-dependency-request',
+                                'guru-sandbox-ledger-origin'}
         for c in by_name.values():
-            assert c.sandbox and c.fixture == 'cli-tool', c.name
-            assert c.mode == 'auto', c.name
+            assert c.sandbox and c.mode == 'auto', c.name
+        for name in ('sandbox-fix-and-submit', 'sandbox-unrelated-change',
+                     'sandbox-dependency-request'):
+            assert by_name[name].fixture == 'cli-tool', name
         fix = by_name['sandbox-fix-and-submit']
         assert fix.expect.tools_used_all == ['sandbox_run', 'sandbox_submit']
         assert fix.expect.gate_verdict == 'intended'
@@ -464,3 +469,26 @@ class TestSandboxKeys:
         # Every other case stays out of the sandbox.
         assert not any(c.sandbox for c in cases.load_cases(cases.CASES_DIR)
                        if 'sandbox' not in c.tags)
+
+    def test_dogfood_case_edits_guru_inside_the_sandbox(self) -> None:
+        """The dogfood case: guru at 0256f9e is the fixture, the tasks
+        table gains the origin column, a submit through the gate."""
+        by_name = {c.name: c for c in cases.load_cases(cases.CASES_DIR,
+                                                       tags=['dogfood'])}
+        assert set(by_name) == {'guru-sandbox-ledger-origin'}
+        c = by_name['guru-sandbox-ledger-origin']
+        assert c.sandbox and c.mode == 'auto'
+        assert set(c.tags) == {'real', 'sandbox', 'dogfood'}
+        assert c.timeout_s == 900
+        assert c.fixture_git is not None
+        assert c.fixture_git.path == cases.REPO_ROOT
+        assert c.fixture_git.ref.startswith('0256f9e')
+        assert len(c.fixture_git.ref) == 40
+        assert 'origin' in c.prompt and 'ledger_cli tasks' in c.prompt
+        assert 'submit' in c.prompt
+        assert c.expect.tools_used_all == ['sandbox_submit']
+        assert c.expect.gate_verdict == 'intended'
+        assert c.expect.files_changed_any == ['guru/ledger_cli.py']
+        assert c.expect.files_changed is None     # the test file is free
+        assert c.expect.fixture_tests_pass is True
+        assert 'origin' in c.expect.rubric

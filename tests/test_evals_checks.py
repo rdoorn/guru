@@ -121,6 +121,17 @@ class TestFiles:
         r = one(e, obs(files_changed=['app/session.py']))
         assert not r.passed and 'app/session.py' in r.detail
 
+    def test_files_changed_any_needs_one_of_them(self) -> None:
+        e = Expect(files_changed_any=['guru/ledger_cli.py', 'other.py'])
+        ok = evaluate(e, obs(files_changed=['guru/ledger_cli.py',
+                                            'tests/test_new.py']))
+        assert ok == [CheckResult('files_changed_any', True, '')]
+        bad = evaluate(e, obs(files_changed=['tests/test_new.py']))
+        assert bad[0].passed is False
+        assert "none of ['guru/ledger_cli.py', 'other.py']" in bad[0].detail
+        assert "['tests/test_new.py']" in bad[0].detail
+        assert evaluate(Expect(), obs(files_changed=['x'])) == []
+
     def test_files_unchanged(self) -> None:
         e = Expect(files_unchanged=['tests/test_wordcount.py'])
         assert one(e, obs(files_changed=['wordcount.py'])).passed

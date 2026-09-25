@@ -10,6 +10,7 @@ evals/
   fixtures/<name>/       frozen repos (see each FIXTURE.md for the planted facts)
                          (or a [fixture_git] pin to a real repo, see below)
   runs/                  run files, transcripts and ledgers (git-ignored)
+  rubric-labels.toml     hand rubric grades, the reference for `grade` (committed)
   TRAJECTORY.md          one row per recorded run (committed)
   triage/<run>.md        triage notes per run (committed)
 ```
@@ -27,7 +28,11 @@ evals/
 .venv/bin/python -m guru.evals run --routing evals/routing/<file>.toml --allow-spend
 .venv/bin/python -m guru.evals run --tags fast --repeat 3                 # the x3 gate (make eval-fast)
 .venv/bin/python -m guru.evals run --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric-min 1
+.venv/bin/python -m guru.evals grade fa5c42d05059 --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric 'SBP Litellm|aws/claude-5-sonnet'
 ```
+
+`make check` (lint, typecheck, unit tests, container tests) is the gate
+before any commit; `make eval-fast` is the measurement.
 
 `--routing FILE` routes sub-agents through a `[routing]` table (same shape
 as `settings.toml`; the main agent becomes a controller when the table says
@@ -80,6 +85,16 @@ diff. The grade lands in the case result (`rubric_score`,
 `labeller = rubric:<model>`, `label = "0" | "1" | "2"`, `note` = the
 reason), so the judge can later be scored against hand labels.
 
+The packet also carries **evidence**: a block guru computes from the
+case's observed data — files changed, the fixture's pytest verdict, tools
+used with counts, gate verdicts, sub-agents spawned with their roles,
+cost and seconds — placed outside the answer fence, and the instructions
+say it is authoritative over the answer's claims. The judge used to see
+the answer text only and marked a correct edit down for "no code shown"
+(triage 2026-09-25); now a change the evidence shows counts even when the
+answer does not paste the diff, and a claim the evidence contradicts is
+false.
+
 The default: with `--allow-spend` and `--routing FILE`, the file's
 cheapest rung (the lowest rung of its `default` ladder — Haiku in the
 measured configuration) grades; `--rubric none` turns that off; without
@@ -89,6 +104,38 @@ case with a `rubric_min` check row. An empty answer scores 0 without a
 model call. The grading call's own cost goes to the run's ledger, not to
 the case's cost column. The judge resolves through the same adapter
 registry as the gate reviewer, so its adapter must be one of the suite's.
+
+### Re-grading a stored run and hand grades
+
+```sh
+.venv/bin/python -m guru.evals grade RUN_ID --rubric 'Adapter|model' [--rubric 'Adapter|model2'] [--labels FILE] [--out DIR]
+```
+
+grades a run that already happened, offline: nothing is re-run. For every
+rubric case the answer is the run file's `observed.answer` (the
+transcript's last main-agent message when that is empty), the prompt is
+the transcript's first user message (the case file when the transcript is
+gone) and the evidence block comes from the stored observed data, so the
+packet is the one `run --rubric` sends. Each `--rubric` judge grades every
+case; the output is one table with a column per judge and a `hand`
+column, then `agreement with hand: <spec> agreed/compared` per judge over
+the cases that have both grades. `RUN_ID` is the 12-hex id from the run
+line (a path to a run file also works).
+
+The hand grades live in `evals/rubric-labels.toml`, one `[[label]]` table
+each — `case`, `run` (a run id, or `"*"` for any run of that case; the
+specific one wins), `score` (0-2) and a `note` saying where the grade
+comes from. The first entries are the three real guru cases graded 2 by
+hand on 2026-09-24. To add one: read the answer in the run's transcript,
+grade it against the case's `[expect.rubric]` text, append a table; grade
+the answer, not the judge. Every grade `grade` produces is a `labels` row
+in the run's ledger directory (`evals/runs/<run_id>/ledger`,
+`target_id = <run_id>:<case>`, labeller `rubric:<model>`), the applicable
+hand grades are recorded there too (labeller `hand`), and the judges'
+own `calls` rows land in the same directory, so the grading cost is
+printed and the ledger report can score the judges later. Use it to
+compare graders (Haiku vs Sonnet on the same run) before trusting
+`--rubric-min` in a gate.
 
 ### Repeats and the x3 gate
 
@@ -203,6 +250,7 @@ answer_contains = ["traversal"]      # case-insensitive substrings
 answer_not_contains = ["I'll start by"]
 answer_regex = ["\\byes\\b|os\\.path\\.join"]
 files_changed = []                   # exact set; omit to not check
+files_changed_any = ["app/upload.py"]  # at least one of these changed
 files_unchanged = ["tests/test_upload.py"]
 fixture_tests_pass = true            # runs the fixture's own pytest after
 
@@ -248,17 +296,20 @@ has no venv of its own in the copy); the case's `observed.fixture_git`
 records `{path, ref}` for traceability, and `list` shows the pin as
 `git:<dir>@<sha7>`.
 
-Three `real` cases run guru itself this way (`--tags real`):
+Four `real` cases run guru itself this way (`--tags real`):
 `guru-explain-gpu-fit` (read), `guru-review-adapters` (review, delegation)
 and `guru-add-version-flag` (auto edit; its `fixture_tests_pass` runs
-guru's whole suite, about 30-60 s). They are pinned to the literal sha in
-each file, so runs stay comparable when the checkout moves on. **Re-pin
-deliberately**: bump the sha in the three files in one commit, say so in
-the trajectory note, and re-check the expectations still hold at the new
-commit (the prompts name files and symbols of that revision). Never
-re-pin as a side effect of another change. `--version` must not exist in
-`guru/cli.py` at the pinned commit for `guru-add-version-flag` to mean
-anything.
+guru's suite, about 30-60 s) at `dc0cd31`, and the dogfood case
+`guru-sandbox-ledger-origin` (sandbox edit + submit, see "Sandbox cases")
+at `0256f9e`. They are pinned to the literal sha in each file, so runs
+stay comparable when the checkout moves on. **Re-pin deliberately**: bump
+the sha in the files in one commit, say so in the trajectory note, and
+re-check the expectations still hold at the new commit (the prompts name
+files and symbols of that revision). Never re-pin as a side effect of
+another change. `--version` must not exist in `guru/cli.py` at the pinned
+commit for `guru-add-version-flag` to mean anything. A fixture's pytest
+runs with `-m "not sandbox"`: guru's own container tests (minutes, and
+they build images) never count for `fixture_tests_pass`.
 
 ## Sandbox cases
 
@@ -318,6 +369,18 @@ sandbox project before the prompt runs:
 .venv/bin/python -m guru.evals run --tags sandbox --allow-spend
 ```
 
+The fourth sandbox case is the **dogfood** one, `guru-sandbox-ledger-origin`
+(tags `real`, `sandbox`, `dogfood`): guru itself, pinned at `0256f9e`, is
+the fixture, and the prompt asks for the tasks stream's `origin` column
+in `guru.ledger_cli tasks` output with a test, the tests run and a
+submit. It expects `sandbox_submit`, a last gate verdict of `intended`,
+`guru/ledger_cli.py` among the changed files (`files_changed_any`: the
+test file's name is the model's choice) and the copy's pytest passing;
+`timeout_s = 900`. The guru image builds in about a minute the first time
+(measured 2026-09-25: 54 s, 1.03 GB on disk, 282 MB venv; the `judge`
+extra with torch is not in it — `uv sync --all-groups` installs dependency
+groups, never extras) and is reused while `uv.lock` is unchanged.
+
 ## Triage
 
 After a run, read the failures and the rubric transcripts and write
@@ -359,6 +422,8 @@ wrong — a disagreement is a `labels` row worth keeping).
 - `guru/evals/cases.py` — TOML case format (domain)
 - `guru/evals/checks.py` — pure assertions, `Observed` -> `CheckResult` rows (domain)
 - `guru/evals/rubric.py` — the rubric judge: fixed prompt, nonce-fenced answer, strict JSON grade (domain)
-- `guru/evals/runs.py` — run files, `compare`, `--repeat` aggregate, trajectory table (repository)
+- `guru/evals/labels.py` — hand rubric grades, `evals/rubric-labels.toml` (repository + pure lookup)
+- `guru/evals/runs.py` — run files, transcripts, `compare`, `--repeat` aggregate, trajectory table (repository)
 - `guru/evals/runner.py` — fixture copy, sandbox, `BenchRun`, `Observed` (endpoint)
+- `guru/evals/grading.py` — `grade`: offline re-grading of a stored run, labels rows (endpoint)
 - `guru/evals/__main__.py` — the CLI

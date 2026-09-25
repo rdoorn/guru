@@ -9,7 +9,15 @@ secret scanner, and the ``RED_FLAG_PATTERNS`` (process/network/eval
 primitives, encoded blobs, skipped tests, removed asserts, CI/config
 edits) are matched; a deleted file is an informational ``delete`` flag
 (the reviewer's ``deletions_requested`` question decides whether the
-user asked for it). The patterns are a *triage filter*, not a parser: a
+user asked for it); a rename, more than ``DESTRUCTIVE_DELETED_FILES``
+files deleted, more than ``DESTRUCTIVE_NET_REMOVED`` lines removed net or
+a deleted test file is a ``destructive`` flag (the change needs a human,
+whatever the reviewer says). :func:`health_flags` — computed by the
+submit with the baseline sources in hand — adds a ``health`` flag per
+function :mod:`guru.domain.health` finds degraded, so a change that
+pushes a function over the size, complexity, nesting or argument
+thresholds is asked about, never auto-applied. The patterns are a
+*triage filter*, not a parser: a
 determined author can spell ``os.system`` in ways no regex anticipates,
 so a clean rules pass proves nothing — the reviewer is the backstop, and
 the rules exist to refuse the obvious without spending a review and to
@@ -25,7 +33,7 @@ handling per access mode lives in the endpoint
 (``guru.sandbox.verbs.sandbox_submit``).
 
 Stdlib only; imports sibling domain modules (``patch``, ``policy``,
-``files``, ``decisions``).
+``files``, ``decisions``, ``health``).
 """
 from __future__ import annotations
 
@@ -34,9 +42,9 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from guru.domain import decisions, files, patch, policy
+from guru.domain import decisions, files, health, patch, policy
 
 INTENDED, UNCLEAR, SUSPICIOUS = 'intended', 'unclear', 'suspicious'
 STATES = (INTENDED, UNCLEAR, SUSPICIOUS)
@@ -47,15 +55,33 @@ PACKET_DIFF_CHARS = 120_000         # diff text handed to the reviewer
 
 # Flag kinds. The first group makes a verdict suspicious on its own; the
 # second blocks ``intended`` (the change needs a human) but is not proof
-# of bad intent. ``delete`` is informational: it names what the diff
-# removes so the user and the reviewer see it; the verdict comes from the
-# reviewer's ``deletions_requested`` answer (and from the config/test
+# of bad intent: ``destructive`` (renames, mass deletions, deleted test
+# files) and ``health`` (a function degraded past a threshold) are
+# informational findings the user must see before anything is applied,
+# so they map to ``unclear`` at most. ``delete`` is informational and
+# blocks nothing: it names what the diff removes so the user and the
+# reviewer see it; the verdict comes from the reviewer's
+# ``deletions_requested`` answer (and from the config/test/destructive
 # flags a deleted file raises like an edited one would).
 SUSPICIOUS_KINDS = frozenset(('secret', 'noise', 'outside', 'exec',
                               'exec-alias', 'network'))
+HEALTH_KIND = 'health'
+DESTRUCTIVE_KIND = 'destructive'
 BLOCKING_KINDS = frozenset(('config', 'skip', 'assert-removed', 'size',
-                            'parse'))
+                            'parse', DESTRUCTIVE_KIND, HEALTH_KIND))
 DELETE_KIND = 'delete'
+# ``destructive`` thresholds for one submit: files deleted, and lines
+# removed net (removed minus added over the whole diff).
+DESTRUCTIVE_DELETED_FILES = 3
+DESTRUCTIVE_NET_REMOVED = 200
+# A deleted file under a ``tests``/``test`` directory or named like a test
+# module is a destructive change on its own.
+TEST_DIRS = frozenset(('tests', 'test'))
+_TEST_NAME_RX = re.compile(r'^(?:test_.*\.py|.*_test\.py|conftest\.py)$')
+_RENAME_RX = re.compile(r'^rename (from|to) (.+)$')
+# The baseline reader a submit hands ``health_flags``: the pre-change
+# source of a project-relative path, None when the file did not exist.
+BaselineReader = Callable[[str], Optional[str]]
 
 # Patterns matched against ADDED lines only: (kind, label, regex).
 _IMPORT = r'^\s*(?:import\s+{m}\b|from\s+{m}\s+import)'
@@ -278,8 +304,11 @@ def rules(diff_text: str, project: Path,
     (``exec``), asserts removed without being re-added
     (``assert-removed``) and one informational ``delete`` flag per deleted
     file (``deletes <path> (N lines)``; the path, config and assert rules
-    apply to a deleted file as to an edited one). Order: whole-diff flags,
-    then per file in diff order. Never raises for odd input.
+    apply to a deleted file as to an edited one), plus the
+    :func:`destructive_flags`. Order: whole-diff flags (size, parse,
+    destructive), then per file in diff order. Never raises for odd
+    input. The ``health`` flags need the baseline sources and are added
+    by the caller (:func:`health_flags`).
     """
     text = diff_text or ''
     flags: list = []
@@ -292,6 +321,7 @@ def rules(diff_text: str, project: Path,
     sections, error = _sections(text)
     if error is not None:
         flags.append(Flag('parse', '', f'diff not applicable: {error}'))
+    flags.extend(destructive_flags(text, sections))
     for rel, added, removed, deleted in sections:
         if deleted:
             flags.append(Flag(DELETE_KIND, '',
@@ -313,6 +343,131 @@ def rules(diff_text: str, project: Path,
             flags.append(Flag('assert-removed', rel,
                               f'{gone} assert line(s) removed'))
     return flags
+
+
+def _renames(diff_text: str) -> list[tuple[str, str]]:
+    """``(old, new)`` for every rename the diff's headers announce: git's
+    ``rename from``/``rename to`` pairs, and a ``---``/``+++`` pair naming
+    two different files. :func:`patch.parse` refuses these, so they are
+    found by a header scan before parsing."""
+    out: list[tuple[str, str]] = []
+    pending_from = ''
+    pending_old = ''
+    for line in (diff_text or '').replace('\r\n', '\n').split('\n'):
+        m = _RENAME_RX.match(line)
+        if m:
+            if m.group(1) == 'from':
+                pending_from = m.group(2).strip()
+            elif pending_from:
+                pair = (pending_from, m.group(2).strip())
+                if pair[0] != pair[1] and pair not in out:
+                    out.append(pair)
+                pending_from = ''
+            continue
+        if line.startswith('--- '):
+            pending_old = patch._strip_prefix(line[4:])
+        elif line.startswith('+++ ') and pending_old:
+            new = patch._strip_prefix(line[4:])
+            real = patch._DEV_NULL not in (pending_old, new)
+            if (pending_old != new and real
+                    and (pending_old, new) not in out):
+                out.append((pending_old, new))
+            pending_old = ''
+    return out
+
+
+def is_test_path(rel: str) -> bool:
+    """Whether ``rel`` is a test file: under a ``TEST_DIRS`` directory, or
+    named ``test_*.py`` / ``*_test.py`` / ``conftest.py``."""
+    parts = Path(rel).parts
+    return (any(part in TEST_DIRS for part in parts[:-1])
+            or bool(_TEST_NAME_RX.match(Path(rel).name)))
+
+
+def destructive_flags(diff_text: str,
+                      sections: Optional[list] = None) -> list:
+    """The ``destructive`` flags of one submit: every rename (``renames
+    old -> new``), more than ``DESTRUCTIVE_DELETED_FILES`` files deleted
+    (one flag naming them), more than ``DESTRUCTIVE_NET_REMOVED`` lines
+    removed net over the whole diff, and every deleted test file
+    (:func:`is_test_path`). ``sections`` is :func:`_sections`'s list when
+    the caller has it. Never raises."""
+    text = diff_text or ''
+    if sections is None:
+        sections, _error = _sections(text)
+    flags: list = []
+    for old, new in _renames(text):
+        flags.append(Flag(DESTRUCTIVE_KIND, old, f'renames {old} -> {new}'))
+    gone = [rel for rel, _a, _r, deleted in sections if deleted]
+    if len(gone) > DESTRUCTIVE_DELETED_FILES:
+        flags.append(Flag(DESTRUCTIVE_KIND, '',
+                          f'deletes {len(gone)} files (more than '
+                          f'{DESTRUCTIVE_DELETED_FILES}): '
+                          + ', '.join(gone)))
+    added = sum(len(a) for _rel, a, _r, _d in sections)
+    removed = sum(len(r) for _rel, _a, r, _d in sections)
+    if removed - added > DESTRUCTIVE_NET_REMOVED:
+        flags.append(Flag(DESTRUCTIVE_KIND, '',
+                          f'removes {removed - added} lines net (+{added} '
+                          f'-{removed}; more than {DESTRUCTIVE_NET_REMOVED})'))
+    for rel in gone:
+        if is_test_path(rel):
+            flags.append(Flag(DESTRUCTIVE_KIND, rel,
+                              f'deletes test file {rel}'))
+    return flags
+
+
+# --- code health -------------------------------------------------------------
+
+def health_deltas(diff_text: str, baseline_reader: BaselineReader
+                  ) -> list[tuple[str, health.FunctionDelta]]:
+    """``(path, delta)`` for every changed or new function of every Python
+    file the diff edits or creates, in diff order (:func:`health.delta`
+    over the baseline the reader returns and the after-text rebuilt with
+    :func:`patch.apply_hunks`). Deleted files, non-Python files, a diff
+    :func:`patch.parse` refuses, a file whose hunks do not apply to the
+    baseline and a source that does not parse contribute nothing; a
+    reader that raises counts as no baseline. Never raises."""
+    try:
+        parsed = patch.parse(diff_text or '')
+    except patch.PatchError:
+        return []
+    out: list[tuple[str, health.FunctionDelta]] = []
+    for fp in parsed:
+        if fp.deleted or not fp.path.endswith('.py'):
+            continue
+        before: Optional[str] = None
+        if not fp.new_file:
+            try:
+                before = baseline_reader(fp.path)
+            except Exception:                            # noqa: BLE001
+                before = None
+        try:
+            after = patch.apply_hunks(before or '', fp.hunks, fp.path)
+        except patch.PatchError:
+            continue
+        out.extend((fp.path, d) for d in health.delta(before, after))
+    return out
+
+
+def health_flags(diff_text: str, baseline_reader: BaselineReader) -> list:
+    """One ``health`` flag per function :func:`health_deltas` finds
+    ``degraded`` (``'health: pkg/x.py: f: degraded (lines 55→72 >60)'``).
+    Informational: the kind is in ``BLOCKING_KINDS``, so the verdict is
+    ``unclear`` at most, never ``suspicious``."""
+    return [Flag(HEALTH_KIND, rel, d.describe())
+            for rel, d in health_deltas(diff_text, baseline_reader)
+            if d.verdict == health.DEGRADED]
+
+
+def health_text(deltas: list) -> str:
+    """The ``degraded`` and ``improved`` rows of ``deltas`` (as
+    :func:`health_deltas` returns them), one ``path: name: verdict
+    (metric before→after)`` line each, degraded first; ``''`` when
+    nothing is notable."""
+    rows = [(rel, d) for rel, d in deltas if d.verdict != health.UNCHANGED]
+    rows.sort(key=lambda item: item[1].verdict != health.DEGRADED)
+    return '\n'.join(f'{rel}: {d.describe()}' for rel, d in rows)
 
 
 def has_suspicious(flags: list) -> bool:
@@ -452,18 +607,20 @@ def decide(flags: list, review: Optional[dict]) -> Verdict:
 
 def packet_text(user_request: str, task: str, intent: str, diff: str,
                 max_diff_chars: int = PACKET_DIFF_CHARS,
-                nonce: Optional[str] = None) -> str:
+                nonce: Optional[str] = None, health_block: str = '') -> str:
     """The reviewer's input: the user's request, the sub-agent task (or a
-    note that the request is the task), the agent's stated intent and the
-    diff (cut at ``max_diff_chars`` with a marker).
+    note that the request is the task), the agent's stated intent, the
+    change summary, the code-health rows (``health_block``, as
+    :func:`health_text` renders them; omitted when empty) and the diff
+    (cut at ``max_diff_chars`` with a marker).
 
     The intent and the diff are the agent's own text, so each is fenced
     in ``<<<INTENT nonce>>> … <<<END nonce>>>`` / ``<<<DIFF nonce>>> …
     <<<END nonce>>>`` with a per-call random ``nonce`` the agent could not
     know when it wrote them; ``GATE_QUESTIONS`` tells the reviewer that
-    what lies inside is untrusted evidence. Between them sits guru's own
-    :func:`stat_text` of the diff, so deleted files are named outside the
-    fence.
+    what lies inside is untrusted evidence. Between them sit guru's own
+    :func:`stat_text` of the diff and the code-health rows, so deleted
+    files and degraded functions are named outside the fence.
     """
     tag = nonce or secrets.token_hex(8)
     body = diff or ''
@@ -480,6 +637,9 @@ def packet_text(user_request: str, task: str, intent: str, diff: str,
         f'<<<END {tag}>>>',
         '', 'Change summary (computed by guru from the diff):',
         stat_text(diff) or '(empty diff)',
+        *(('', 'Code health (computed by guru from the diff and the '
+            'original files; degraded functions need a human):',
+           health_block.strip()) if health_block.strip() else ()),
         '', 'Unified diff:', f'<<<DIFF {tag}>>>', body, f'<<<END {tag}>>>'))
 
 

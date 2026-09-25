@@ -53,6 +53,7 @@ class Expect:
     answer_not_contains: list[str] = field(default_factory=list)
     answer_regex: list[str] = field(default_factory=list)
     files_changed: Optional[list[str]] = None  # exact set; None = no check
+    files_changed_any: list[str] = field(default_factory=list)  # >= 1 of
     files_unchanged: list[str] = field(default_factory=list)
     fixture_tests_pass: Optional[bool] = None
     # The quality gate's LAST verdict of the case (``intended`` | ``unclear``
@@ -116,7 +117,8 @@ _EXPECT_TYPES: dict[str, type] = {
     'spawned_min': int, 'spawned_max': int, 'roles_include': list,
     'stall_nudges_max': int, 'max_seconds': float,
     'answer_contains': list, 'answer_not_contains': list,
-    'answer_regex': list, 'files_changed': list, 'files_unchanged': list,
+    'answer_regex': list, 'files_changed': list, 'files_changed_any': list,
+    'files_unchanged': list,
     'fixture_tests_pass': bool, 'gate_verdict': str, 'gate_verdict_any': list,
 }
 _EXPECT_SECTIONS = ('behaviour', 'content', 'rubric')

@@ -1,4 +1,4 @@
-.PHONY: bench bench-plot test test-sandbox lint typecheck yarn ledger-report eval-fast
+.PHONY: bench bench-plot check test test-sandbox lint typecheck yarn ledger-report eval-fast
 
 VENV ?= .venv/bin
 RESULTS ?= $(shell ls -t bench/results-*.json 2>/dev/null | head -1)
@@ -22,6 +22,8 @@ ledger-report:    ## Judge vs heuristic vs labels per decision point (guru.ledge
 
 eval-fast:        ## Fast eval gate x3: --tags fast --repeat 3; extra flags via EVAL_ARGS='--routing ... --allow-spend'
 	$(VENV)/python -m guru.evals run --tags fast --repeat 3 $(EVAL_ARGS)
+
+check: lint typecheck test test-sandbox  ## The gate before a commit: lint + typecheck + test + test-sandbox (needs Colima)
 
 test:             ## Run the test suite (container tests excluded)
 	$(VENV)/python -m pytest -q -m "not sandbox"

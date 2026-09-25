@@ -37,7 +37,7 @@ _STOP_WORDS = {
 # The sandbox verbs (guru.sandbox.verbs): advertised and pre-activated only
 # while the project has a provisioned sandbox image; refused otherwise.
 SANDBOX_TOOLS = ('sandbox_run', 'sandbox_python', 'sandbox_diff',
-                 'sandbox_submit', 'request_dependency')
+                 'code_health', 'sandbox_submit', 'request_dependency')
 # In a sandbox-enabled project the quality gate is the ONLY write path: the
 # direct write tools are neither advertised nor executable by an agent
 # (apply_patch stays a module function sandbox_submit and provisioning call).
@@ -400,6 +400,18 @@ def sandbox_diff() -> str:
     """
     from guru.sandbox import verbs
     return verbs.sandbox_diff()
+
+
+def code_health(path: str = '') -> str:
+    """
+    Code-health check of this task's sandbox changes before you submit: for
+    every changed or new Python function, lines, cyclomatic complexity,
+    nesting depth, argument count and returns, with a verdict (degraded |
+    improved | unchanged) against the gate's thresholds. A degraded function
+    makes the gate ask the user; fix it first. path narrows to one file.
+    """
+    from guru.sandbox import verbs
+    return verbs.code_health(path)
 
 
 def sandbox_submit(intent: str) -> str:
@@ -824,6 +836,27 @@ TOOL_REGISTRY: dict = {
             "review", "pending", "local",
         ],
         "parameters": {},
+        "retain": "keep",
+    },
+    "code_health": {
+        "fn": code_health,
+        "description": (
+            "Check the code health of this task's sandbox changes before"
+            " submitting: per changed or new Python function, lines,"
+            " cyclomatic complexity, nesting depth, argument count and"
+            " returns with a verdict (degraded | improved | unchanged)"
+            " against the gate's thresholds (lines >60, complexity >10,"
+            " nesting >4, args >6). A degraded function makes sandbox_submit"
+            " ask the user, so fix it first. path narrows to one file."
+        ),
+        "tags": [
+            "sandbox", "health", "quality", "complexity", "metrics",
+            "refactor", "lint", "functions", "review", "local",
+        ],
+        "parameters": {
+            "path": "Optional project-relative Python file to report on",
+        },
+        "optional": ["path"],
         "retain": "keep",
     },
     "sandbox_submit": {

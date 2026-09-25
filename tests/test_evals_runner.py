@@ -173,6 +173,20 @@ class TestFilesChanged:
 
 
 class TestFixtureTests:
+    def test_sandbox_marked_tests_are_deselected(self, tmp_path: Path):
+        """A fixture's container tests (guru's ``sandbox`` marker) never
+        count: with them selected this copy would fail."""
+        copy = tmp_path / 'proj'
+        (copy / 'tests').mkdir(parents=True)
+        (copy / 'pyproject.toml').write_text(
+            '[tool.pytest.ini_options]\nmarkers = ["sandbox: containers"]\n')
+        (copy / 'tests' / 'test_x.py').write_text(
+            'import pytest\n\n\ndef test_ok():\n    assert True\n\n\n'
+            '@pytest.mark.sandbox\ndef test_container():\n'
+            '    assert False, "would need docker"\n')
+        assert runner.fixture_tests_pass(copy) is True
+        assert runner.FIXTURE_PYTEST_DESELECT == 'not sandbox'
+
     def test_cli_tool_fails_and_flaskish_passes(self, tmp_path: Path):
         assert runner.fixture_tests_pass(
             runner.prepare_fixture('cli-tool', tmp_path)) is False
@@ -2009,6 +2023,33 @@ class TestGradeCase:
         assert 'the answer' in judge.prompts[0]
         assert config.LEDGER_ENABLED is False             # restored
         assert ledger.repository() is not repo
+
+    def test_packet_carries_the_observed_evidence(self, tmp_path,
+                                                  monkeypatch) -> None:
+        """The judge sees what guru observed (files, tests, tools, gate,
+        cost) outside the answer fence, never only the answer text."""
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        case = _case(name='a')
+        case.expect.rubric = 'adds the flag with a test'
+        res = _result(answer='Done; I did not paste the diff.')
+        res.observed.update({
+            'files_changed': ['guru/cli.py', 'tests/test_misc.py'],
+            'fixture_tests_pass': True,
+            'tools_used': ['edit_file', 'edit_file', 'run_tests'],
+            'gate_verdicts': [], 'spawned': 1, 'roles': ['developer']})
+        res.cost_usd = 0.128
+        judge = FakeJudge('{"score": 2, "reason": "evidence shows both"}')
+        runner.grade_case(case, res, judge, self._repo(tmp_path), 'r:a')
+        packet = judge.prompts[0]
+        before, _, fenced = packet.rpartition('<<<ANSWER ')
+        assert rubric_mod.EVIDENCE_HEADER in before
+        assert '- files changed: guru/cli.py, tests/test_misc.py' in before
+        assert '- fixture tests: pass' in before
+        assert '- tools used: edit_file(2), run_tests' in before
+        assert '- sub-agents spawned: 1 (roles: developer)' in before
+        assert '- cost: $0.128' in before
+        assert 'files changed' not in fenced
+        assert res.rubric_score == 2
 
     def test_no_rubric_no_call(self, tmp_path: Path) -> None:
         judge = FakeJudge('{"score": 2}')

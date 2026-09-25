@@ -1,0 +1,32 @@
+# Dogfood case: guru edits guru inside the sandbox (see evals/README.md,
+# "Git-pinned fixtures" and "Sandbox cases"). Pinned to 0256f9e (merged
+# main of 2026-09-25); re-pin deliberately, never by search-and-replace.
+# Needs Colima and --allow-spend (without it an "intended" submit is
+# declined and nothing is applied). The guru image builds in about a
+# minute (uv.lock without the `judge` extra: `uv sync --all-groups` installs
+# dependency groups only, never extras) and is reused across runs.
+# fixture_tests_pass runs the copy's pytest with `-m "not sandbox"`
+# (~30-60 s); the container tests never count for the verdict.
+name = "guru-sandbox-ledger-origin"
+sandbox = true
+prompt = "Add the tasks stream's origin column to the `guru.ledger_cli tasks` table output, add a test for it, run the tests, then submit."
+mode = "auto"
+timeout_s = 900
+tags = ["real", "sandbox", "dogfood"]
+
+[fixture_git]
+path = "."
+ref = "0256f9ea1c11e64b70fb5f46ef0f0f7db6ba16aa"
+
+[expect.behaviour]
+tools_used_all = ["sandbox_submit"]
+gate_verdict = "intended"
+
+[expect.content]
+# The CLI must change; the test may land in tests/test_ledger_cli.py or a
+# new file, so the set is not pinned.
+files_changed_any = ["guru/ledger_cli.py"]
+fixture_tests_pass = true
+
+[expect.rubric]
+text = "guru.ledger_cli.cmd_tasks prints the task row's origin (e.g. 'panel', '-' when empty) in each task line; ledger_report.unlabelled_tasks flattens `origin` from the tasks row (it did not before), or cmd_tasks reads it another way that survives an empty value; a new or extended test in tests/ asserts the origin appears in the tasks output; the tests were run inside the sandbox (sandbox_run pytest) before sandbox_submit and the answer reports the gate verdict rather than a guess."

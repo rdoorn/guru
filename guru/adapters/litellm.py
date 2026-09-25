@@ -18,7 +18,11 @@ Config (adapters.toml):
 Prompt caching: with ``cache`` on, system messages are sent as content
 parts and the last part and the last tool definition carry
 ``cache_control: {type: ephemeral}`` — the OpenAI-compatible shape a LiteLLM
-proxy forwards to Anthropic and Bedrock. Cache usage comes back either as
+proxy forwards to Anthropic and Bedrock. A third marker sits on the last
+message of the conversation (the user's text or the last tool result, each
+turned into a one-part content list) so the growing history is cached up
+to that point and the next round reads it back; three of Anthropic's four
+breakpoints per request are used. Cache usage comes back either as
 Anthropic-style ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
 on ``usage`` or as ``prompt_tokens_details.cached_tokens``; both are read.
 """
@@ -105,26 +109,50 @@ def openai_tool_defs(specs: list) -> list:
     return defs
 
 
+# Roles whose message may carry the conversation breakpoint: the user's
+# text and a tool result (a LiteLLM proxy forwards a marked text part of
+# either to Anthropic's ``tool_result`` / text block; probed 2026-09-25).
+_BREAKPOINT_ROLES = ('user', 'tool')
+
+
 def cached_messages(messages: list, cache: bool) -> list:
     """``messages`` with every system message's text as one content part
-    and the cache marker on the last system message (copies); unchanged
-    when ``cache`` is off or there is no system message."""
+    and the cache marker on the last system message, plus the conversation
+    breakpoint: the last message, when it is a user or tool message with
+    text content, becomes a one-part content list carrying the marker.
+    Copies throughout; ``messages`` unchanged when ``cache`` is off or
+    nothing is markable."""
     if not cache:
         return messages
-    last = max((i for i, m in enumerate(messages)
-                if m.get('role') == 'system'), default=-1)
-    if last < 0:
+    last_system = max((i for i, m in enumerate(messages)
+                       if m.get('role') == 'system'), default=-1)
+    tail = len(messages) - 1
+    if last_system < 0 and not _markable(messages, tail):
         return messages
     out = []
     for i, m in enumerate(messages):
-        if m.get('role') != 'system' or not isinstance(m.get('content'), str):
+        if m.get('role') == 'system' and isinstance(m.get('content'), str):
+            part: dict = {'type': 'text', 'text': m['content']}
+            if i == last_system:
+                part['cache_control'] = dict(CACHE_CONTROL)
+            out.append({**m, 'content': [part]})
+        elif i == tail and _markable(messages, i):
+            out.append({**m, 'content': [
+                {'type': 'text', 'text': m['content'],
+                 'cache_control': dict(CACHE_CONTROL)}]})
+        else:
             out.append(m)
-            continue
-        part: dict = {'type': 'text', 'text': m['content']}
-        if i == last:
-            part['cache_control'] = dict(CACHE_CONTROL)
-        out.append({**m, 'content': [part]})
     return out
+
+
+def _markable(messages: list, i: int) -> bool:
+    """True when ``messages[i]`` exists, is a user or tool message and has
+    non-empty string content (the shape the breakpoint is put on)."""
+    if i < 0 or i >= len(messages):
+        return False
+    m = messages[i]
+    return (isinstance(m, dict) and m.get('role') in _BREAKPOINT_ROLES
+            and isinstance(m.get('content'), str) and bool(m['content']))
 
 
 def cached_tools(defs, cache: bool):

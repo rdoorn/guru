@@ -1,0 +1,35 @@
+# Hand rubric grades: the reference the rubric judges are scored against.
+#
+#   .venv/bin/python -m guru.evals grade RUN_ID --rubric 'Adapter|model' [--rubric ...]
+#
+# prints one column per judge next to the `hand` column from this file and
+# the agreement per judge. One [[label]] table per grade:
+#
+#   case  = the case name (evals/cases/<name>.toml)
+#   run   = a run id, or "*" for any run of that case (a run-specific grade
+#           wins over the "*" one)
+#   score = 0 | 1 | 2, exactly as the rubric judge scores (see evals/README.md,
+#           "Rubric grading")
+#   note  = where the grade comes from (triage note, date)
+#
+# Add a grade after triage: read the answer in the run's transcript, grade
+# it against the case's [expect.rubric] text, append a table here. Grade
+# the answer, not the judge; a disagreement with the judge is the point.
+
+[[label]]
+case = "guru-add-version-flag"
+run = "*"
+score = 2
+note = "hand grade 2026-09-24, controller runs 6/6 (evals/triage/2026-09-24-real-cases.md): --version added, test in tests/test_misc.py, suite run"
+
+[[label]]
+case = "guru-explain-gpu-fit"
+run = "*"
+score = 2
+note = "hand grade 2026-09-24, controller runs 6/6 (evals/triage/2026-09-24-real-cases.md): both probe loads, KV-per-token estimate and model_ctx.json named"
+
+[[label]]
+case = "guru-review-adapters"
+run = "*"
+score = 2
+note = "hand grade 2026-09-24, controller runs 6/6 (evals/triage/2026-09-24-real-cases.md): shared _note_error/_record_call pattern vs ollama.py, concrete divergence and risk named"

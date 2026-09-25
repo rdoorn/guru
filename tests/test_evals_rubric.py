@@ -49,6 +49,70 @@ class TestGradingPrompt:
         assert '(none recorded)' in text and '(empty rubric)' in text
         assert '<<<ANSWER n>>>\n\n<<<END n>>>' in text
 
+    def test_evidence_sits_outside_the_fence_and_is_declared_authoritative(
+            self) -> None:
+        ev = rubric.evidence({'files_changed': ['a.py'],
+                              'fixture_tests_pass': True}, 0.5)
+        text = rubric.grading_prompt('p', 'r', 'the answer', nonce='n',
+                                     evidence_text=ev)
+        # rpartition: the instructions name the marker too.
+        before, _, fenced = text.rpartition('<<<ANSWER n>>>')
+        assert rubric.EVIDENCE_HEADER in before
+        assert '- files changed: a.py' in before
+        assert 'files changed' not in fenced
+        assert 'Rubric:\nr\n\n' + rubric.EVIDENCE_HEADER in text
+        assert 'authoritative over the answer' in before
+        assert 'claim the evidence contradicts is false' in before
+
+    def test_without_evidence_the_prompt_is_unchanged(self) -> None:
+        plain = rubric.grading_prompt('p', 'r', 'a', nonce='n')
+        blank = rubric.grading_prompt('p', 'r', 'a', nonce='n',
+                                      evidence_text='  ')
+        assert plain == blank and rubric.EVIDENCE_HEADER not in plain
+
+
+class TestEvidence:
+    OBSERVED = {
+        'answer': 'done', 'files_changed': ['guru/cli.py',
+                                            'tests/test_misc.py'],
+        'fixture_tests_pass': True,
+        'tools_used': ['read_file', 'edit_file', 'read_file', 'run_tests'],
+        'gate_verdicts': ['unclear', 'intended'], 'spawned': 1,
+        'roles': ['developer'], 'seconds': 39.458, 'timed_out': False,
+        'error': ''}
+
+    def test_every_line_from_observed_and_cost(self) -> None:
+        text = rubric.evidence(self.OBSERVED, 0.1284)
+        lines = text.splitlines()
+        assert lines[0] == rubric.EVIDENCE_HEADER
+        assert '- files changed: guru/cli.py, tests/test_misc.py' in lines
+        assert '- fixture tests: pass' in lines
+        assert '- tools used: read_file(2), edit_file, run_tests' in lines
+        assert '- gate verdicts: unclear, intended' in lines
+        assert '- sub-agents spawned: 1 (roles: developer)' in lines
+        assert '- cost: $0.128' in lines
+        assert '- seconds: 39.5' in lines
+        assert 'done' not in text                 # never the answer text
+        assert 'timed out' not in text and 'run error' not in text
+
+    def test_empty_run_is_explicit(self) -> None:
+        text = rubric.evidence({}, None)
+        assert '- files changed: none' in text
+        assert '- fixture tests: not run' in text
+        assert '- tools used: none' in text
+        assert '- gate verdicts: none (no sandbox_submit)' in text
+        assert '- sub-agents spawned: 0' in text
+        assert '- cost: n/a' in text and '- seconds: n/a' in text
+
+    def test_failed_tests_timeout_and_error_are_named(self) -> None:
+        text = rubric.evidence({'fixture_tests_pass': False,
+                                'timed_out': True, 'error': 'boom',
+                                'seconds': 300}, None)
+        assert '- fixture tests: fail' in text
+        assert '- timed out: yes' in text
+        assert '- run error: boom' in text
+        assert '- seconds: 300.0' in text
+
 
 class TestParseGrade:
     @pytest.mark.parametrize('text, score, reason', [
@@ -91,6 +155,13 @@ class TestGrade:
         assert len(judge.prompts) == 1
         assert 'Rubric:\nr' in judge.prompts[0]
         assert 'the answer' in judge.prompts[0]
+
+    def test_evidence_reaches_the_judge(self) -> None:
+        judge = FakeJudge('{"score": 2, "reason": "ok"}')
+        rubric.grade('p', 'r', 'a', judge,
+                     evidence_text=rubric.evidence({'seconds': 1}, 0.2))
+        assert rubric.EVIDENCE_HEADER in judge.prompts[0]
+        assert '- cost: $0.200' in judge.prompts[0]
 
     def test_bad_reply_raises(self) -> None:
         with pytest.raises(rubric.GradeError):

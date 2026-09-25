@@ -27,6 +27,13 @@ EXEC_DIFF = ('--- a/pkg/mod.py\n+++ b/pkg/mod.py\n'
 DELETE_DIFF = ('diff --git a/pkg/mod.py b/pkg/mod.py\n'
                'deleted file mode 100644\n--- a/pkg/mod.py\n+++ /dev/null\n'
                '@@ -1,2 +0,0 @@\n-def f():\n-    return 1\n')
+# f grows to seven parameters: over the gate's ARGS threshold (6).
+FAT_DIFF = ('diff --git a/pkg/mod.py b/pkg/mod.py\n'
+            '--- a/pkg/mod.py\n+++ b/pkg/mod.py\n'
+            '@@ -1,2 +1,2 @@\n-def f():\n+def f(a, b, c, d, e, f, g):\n'
+            '     return 1\n')
+OTHER_NEW_DIFF = ('--- /dev/null\n+++ b/pkg/other.py\n@@ -0,0 +1,2 @@\n'
+                  '+def g(a):\n+    return a\n')
 
 
 class FakeReviewer:
@@ -58,6 +65,8 @@ class FakeColima:
         self.diff_text = ''
         self.rc, self.out, self.err = 0, 'ok\n', ''
         self.scripts: list = []          # (name, content) sandbox_python ran
+        self.baseline_calls: list = []   # paths show_baseline was asked for
+        self.project: Path = Path('.')
 
     def prepare_copy(self, project, dest, excludes):
         shutil.copytree(project, dest, symlinks=True,
@@ -76,6 +85,12 @@ class FakeColima:
 
     def diff(self, copy, project=None):
         return self.diff_text
+
+    def show_baseline(self, copy, path, project=None):
+        """The project's file stands in for the copy's baseline commit."""
+        self.baseline_calls.append(path)
+        target = Path(project or self.project) / path
+        return target.read_text() if target.is_file() else None
 
 
 @pytest.fixture
@@ -108,9 +123,11 @@ def sandboxed(tmp_path, monkeypatch, fake_repo):
         {'role': 'system', 'content': 's'},
         {'role': 'user', 'content': 'make f return 2'}])
     fake = FakeColima()
+    fake.project = root
     monkeypatch.setattr(colima, 'prepare_copy', fake.prepare_copy)
     monkeypatch.setattr(colima, 'run', fake.run)
     monkeypatch.setattr(colima, 'diff', fake.diff)
+    monkeypatch.setattr(colima, 'show_baseline', fake.show_baseline)
     monkeypatch.setattr(colima, 'copy_excludes_for', lambda p: [])
     spec = sb.spec_from(root, load_sandbox())
     images.record_built(spec, sb.dockerfile_for(root, spec.base_image),
@@ -321,6 +338,60 @@ class TestSubmit:
         [q] = asked
         assert 'Deleted files' not in q and 'pkg/mod.py | +0 -2 deleted' in q
         assert (root / 'pkg' / 'mod.py').read_text() == MOD
+
+    def test_degraded_function_asks_and_the_reviewer_sees_it(
+            self, sandboxed, fake_repo) -> None:
+        root, fake = sandboxed
+        fake.diff_text = FAT_DIFF
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        asked: list = []
+        provision.set_approve_asker(lambda q: asked.append(q) or False)
+        out = verbs.sandbox_submit('give f more parameters')
+        assert out.startswith('Declined: ') and 'unclear' in out
+        assert 'health: pkg/mod.py: f: degraded (args 0→7 >6)' in out
+        assert 'need a human: health' in out
+        assert fake.baseline_calls == ['pkg/mod.py']
+        [q] = asked
+        assert verbs.question_verdict(q) == gate.UNCLEAR
+        assert '  - health: pkg/mod.py: f: degraded (args 0→7 >6)' in q
+        [rq] = reviewer.calls
+        assert ('Code health (computed by guru from the diff and the '
+                'original files; degraded functions need a human):\n'
+                'pkg/mod.py: f: degraded (args 0→7 >6)') in rq.state
+        assert (root / 'pkg' / 'mod.py').read_text() == MOD
+        [submit] = _events(fake_repo, 'submit')
+        assert submit['ok'] is False and 'health:' in submit['detail']
+
+    def test_healthy_change_has_no_health_block(self, sandboxed) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = MOD_DIFF
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        out = verbs.sandbox_submit('make f return 2 as asked')
+        assert out.startswith('Gate verdict: intended\n')
+        assert 'health:' not in out
+        [q] = reviewer.calls
+        assert 'Code health' not in q.state
+        assert fake.baseline_calls == ['pkg/mod.py']
+
+    def test_destructive_test_deletion_asks(self, sandboxed) -> None:
+        root, fake = sandboxed
+        (root / 'tests').mkdir()
+        (root / 'tests' / 'test_mod.py').write_text('def test_f():\n'
+                                                    '    pass\n')
+        fake.diff_text = ('--- a/tests/test_mod.py\n+++ /dev/null\n'
+                          '@@ -1,2 +0,0 @@\n-def test_f():\n-    pass\n')
+        decisions.set_judge('gate', FakeReviewer())
+        asked: list = []
+        provision.set_approve_asker(lambda q: asked.append(q) or False)
+        out = verbs.sandbox_submit('drop the test')
+        assert out.startswith('Declined: ') and 'unclear' in out
+        assert ('destructive: tests/test_mod.py: deletes test file '
+                'tests/test_mod.py') in out
+        assert (root / 'tests' / 'test_mod.py').is_file()
+        [q] = asked
+        assert '  - destructive: tests/test_mod.py: deletes test file' in q
 
     def test_task_text_reaches_the_reviewer(self, sandboxed, monkeypatch):
         _root, fake = sandboxed
@@ -551,6 +622,86 @@ class TestSubmit:
         assert 'Applied patch' in out
         [(prompt, _max, model)] = adapter.calls
         assert model == 'main-model' and MOD_DIFF in prompt
+
+
+# --- code_health -------------------------------------------------------------
+
+class TestCodeHealth:
+    def test_needs_an_image(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'PROJECT_GURU_DIR', tmp_path / '.guru')
+        monkeypatch.setattr(config, 'SANDBOX_HOME', tmp_path / 'sbhome')
+        assert verbs.code_health() == verbs.NOT_PROVISIONED
+
+    def test_unchanged_copy(self, sandboxed) -> None:
+        _root, fake = sandboxed
+        assert verbs.code_health() == ('Code health: no function of the '
+                                       'changed Python files changed its '
+                                       'metrics in the sandbox copy.')
+        assert len(verbs.copies()) == 1
+
+    def test_deltas_degraded_first_with_thresholds(self, sandboxed) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = FAT_DIFF + OTHER_NEW_DIFF
+        out = verbs.code_health()
+        assert out.splitlines() == [
+            'Code health of the sandbox changes: 1 unchanged, 1 degraded '
+            '(thresholds: lines >60, complexity >10, nesting >4, args >6).',
+            'pkg/mod.py: f: degraded (args 0→7 >6)',
+            'pkg/other.py: g: unchanged (new; lines 2, complexity 1, '
+            'nesting 0, args 1, returns 1)']
+        assert fake.baseline_calls == ['pkg/mod.py']
+        assert len(out) <= verbs.HEALTH_DIGEST_CHARS
+
+    def test_path_narrows_to_one_file(self, sandboxed) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = FAT_DIFF + OTHER_NEW_DIFF
+        out = verbs.code_health('./pkg/other.py')
+        assert 'pkg/mod.py' not in out and 'pkg/other.py: g:' in out
+        out = verbs.code_health('pkg/mod.py')
+        assert out.splitlines()[1:] == ['pkg/mod.py: f: degraded (args 0→7 '
+                                        '>6)']
+
+    def test_unchanged_file_reports_its_metrics(self, sandboxed) -> None:
+        root, fake = sandboxed
+        (root / 'pkg' / 'big.py').write_text(
+            'def wide(a, b, c, d, e, f, g):\n    return a\n\n'
+            'def small():\n    pass\n')
+        fake.diff_text = MOD_DIFF
+        out = verbs.code_health('pkg/big.py')
+        assert out.splitlines() == [
+            'pkg/big.py is unchanged in the sandbox copy: 2 function(s), '
+            '1 over a threshold.',
+            'wide: lines 2, complexity 1, nesting 0, args 7 >6, returns 1',
+            'small: lines 2, complexity 1, nesting 0, args 0, returns 0']
+        assert verbs.code_health('pkg/mod.py') == (
+            'Code health: no function of pkg/mod.py changed its metrics '
+            'in the sandbox copy.')
+
+    def test_refusals(self, sandboxed) -> None:
+        _root, fake = sandboxed
+        assert verbs.code_health('/etc/passwd').startswith('Refused: ')
+        assert verbs.code_health('../x.py').startswith('Refused: ')
+        assert verbs.code_health('pkg/nope.py') == \
+            'pkg/nope.py: not a Python file in the sandbox copy.'
+        assert verbs.code_health('pyproject.toml') == \
+            'pyproject.toml: not a Python file in the sandbox copy.'
+
+    def test_digest_is_capped(self, sandboxed) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = ''.join(
+            f'--- /dev/null\n+++ b/pkg/n{i}.py\n@@ -0,0 +1,2 @@\n'
+            f'+def f{i}(a, b, c, d, e, f, g):\n+    return a\n'
+            for i in range(40))
+        out = verbs.code_health()
+        assert len(out) <= verbs.HEALTH_DIGEST_CHARS + 40
+        assert out.endswith('more chars)') and '40 degraded' in out
+
+    def test_diff_failure_is_a_refusal(self, sandboxed, monkeypatch) -> None:
+        def boom(copy, project=None):
+            raise RuntimeError('git down')
+        monkeypatch.setattr(colima, 'diff', boom)
+        assert verbs.code_health() == \
+            'Refused: cannot read the sandbox diff: git down'
 
 
 # --- copies per task ---------------------------------------------------------

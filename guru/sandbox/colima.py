@@ -13,7 +13,8 @@ real tree is never mounted. A run that outlives its timeout is
 docker CLI's process group does not stop the container the daemon owns.
 
 Working copies (:func:`prepare_copy`) are ``git init``\\ ed and committed so
-:func:`diff` can return the sandbox's changes as a unified diff; they live
+:func:`diff` can return the sandbox's changes as a unified diff and
+:func:`show_baseline` the pre-change content of one file; they live
 under ``~/.guru/sandbox/<name>/work/``, a path Colima mounts into its VM.
 When the project is a git repository the copy is the *positive* list
 ``git ls-files --cached --others --exclude-standard`` — tracked and
@@ -445,6 +446,25 @@ def diff(copy: Path, project: Optional[Path] = None) -> str:
         raise RuntimeError(f'git diff failed in {repo}: '
                            f'{res.denied or res.stderr.strip()}')
     return res.stdout + ('\n[diff truncated]\n' if res.truncated else '')
+
+
+def show_baseline(copy: Path, path: str,
+                  project: Optional[Path] = None) -> Optional[str]:
+    """The baseline (``HEAD``) content of the copy-relative ``path`` in a
+    working copy (``git show HEAD:<path>``), or None when the baseline
+    has no such file (a file the sandbox created), the path is not a
+    plain relative one, or git fails. Read-only; the git CLI runs from
+    ``project`` (default the current directory)."""
+    rel = Path(path)
+    if not path or rel.is_absolute() or '..' in rel.parts:
+        return None
+    repo = Path(copy)
+    cwd = Path(project) if project is not None else Path.cwd()
+    res = _git(['show', f'HEAD:{rel.as_posix()}'], repo, cwd,
+               out_kb=DIFF_OUT_KB)
+    if res.returncode != 0 or res.denied or res.truncated:
+        return None
+    return res.stdout
 
 
 def remove_copy(copy: Path) -> None:

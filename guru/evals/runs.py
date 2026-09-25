@@ -1,11 +1,15 @@
 """Run files, run-to-run comparison and the trajectory table.
 
-Repository layer: JSON under ``evals/runs/<ts>-<run_id>.json`` and the
+Repository layer: JSON under ``evals/runs/<ts>-<run_id>.json``, the
+gzipped transcripts under ``evals/runs/<run_id>/transcripts/`` and the
 Markdown table ``evals/TRAJECTORY.md``. Nothing here runs a case; the
-runner hands over a :class:`Run`.
+runner hands over a :class:`Run`. :func:`find_run` locates a run file by
+id (``grade RUN_ID``) and :func:`load_transcript` reads a case transcript
+back for offline grading.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import statistics
@@ -172,6 +176,63 @@ def load(path: Path) -> Run:
         return Run(**kw)
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise ValueError(f'{path}: not a run file: {e}') from e
+
+
+def find_run(directory: Path, run_id: str) -> Path:
+    """The run file ``<stamp>-<run_id>.json`` under ``directory`` (or
+    ``run_id`` itself when it is a path to a run file); ``ValueError``
+    when there is none, or more than one."""
+    given = Path(run_id)
+    if given.suffix == '.json' and given.is_file():
+        return given
+    hits = sorted(Path(directory).glob(f'*-{run_id}.json'))
+    if not hits:
+        raise ValueError(f'no run {run_id!r} under {directory}')
+    if len(hits) > 1:
+        raise ValueError(f'run id {run_id!r} is ambiguous under {directory}: '
+                         + ', '.join(h.name for h in hits))
+    return hits[0]
+
+
+def load_transcript(path: Path) -> list[dict[str, Any]]:
+    """The agents of a ``<case>.json.gz`` transcript written by the runner
+    (``[{'title', 'model', 'messages': [{'role', 'content', ...}]}]``);
+    ``ValueError`` when the file is missing or not a transcript."""
+    try:
+        with gzip.open(Path(path), 'rt', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError, EOFError) as e:
+        raise ValueError(f'{path}: not a transcript: {e}') from e
+    if not isinstance(data, list) or not all(
+            isinstance(a, dict) and isinstance(a.get('messages'), list)
+            for a in data):
+        raise ValueError(f'{path}: not a transcript (expected a list of '
+                         'agents with messages)')
+    return data
+
+
+def _main_messages(transcript: list[dict[str, Any]]) -> list[dict]:
+    return [m for m in (transcript[0]['messages'] if transcript else [])
+            if isinstance(m, dict)]
+
+
+def transcript_prompt(transcript: list[dict[str, Any]]) -> str:
+    """The user's prompt of a run: the main agent's first ``user``
+    message; ``''`` when there is none."""
+    for m in _main_messages(transcript):
+        if m.get('role') == 'user':
+            return str(m.get('content') or '')
+    return ''
+
+
+def transcript_answer(transcript: list[dict[str, Any]]) -> str:
+    """The main agent's last non-empty ``assistant`` message (what the
+    runner recorded as ``observed.answer``); ``''`` when there is none."""
+    for m in reversed(_main_messages(transcript)):
+        content = str(m.get('content') or '').strip()
+        if m.get('role') == 'assistant' and content:
+            return content
+    return ''
 
 
 def _delta(old: Optional[float], new: Optional[float]) -> Optional[float]:

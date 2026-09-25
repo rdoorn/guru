@@ -1,4 +1,5 @@
-"""``python -m guru.evals``: run the suite, compare two runs, list cases.
+"""``python -m guru.evals``: run the suite, compare two runs, list cases,
+re-grade a stored run.
 
 Plain-text output (like ``guru.bench``); ``run`` exits 1 when any case
 failed so it can gate a script. ``--repeat N`` runs the selection N times
@@ -7,7 +8,9 @@ case passed at least ``ceil(N/2)`` times. ``--rubric 'Adapter|model'``
 grades the rubric cases with a model (default with ``--allow-spend`` and
 ``--routing``: the routing file's cheapest rung; ``--rubric none`` turns
 that off); a grade is reported, and fails the case only under
-``--rubric-min N``.
+``--rubric-min N``. ``grade RUN_ID --rubric SPEC [--rubric SPEC2]``
+re-grades a stored run offline (no case re-runs) with one column per
+judge next to the hand grade from ``evals/rubric-labels.toml``.
 """
 from __future__ import annotations
 
@@ -17,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from guru import config
-from guru.evals import cases, runner, runs
+from guru.evals import cases, grading, labels, runner, runs
 from guru.evals.runs import CaseResult, Run
 from guru.repositories.settings import RoutingSettings
 
@@ -293,6 +296,56 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _judge_headers(specs: list) -> list:
+    """Short column headers: the model part of each spec, the whole spec
+    when two share a model."""
+    models = [spec.partition('|')[2] or spec for spec in specs]
+    return [m if models.count(m) == 1 else spec
+            for m, spec in zip(models, specs)]
+
+
+def _grade_cell(row: grading.GradeRow, spec: str) -> str:
+    grade = row.grades.get(spec)
+    if grade is not None:
+        return str(grade.score)
+    return 'err' if spec in row.errors else '-'
+
+
+def _print_regrade(result: grading.Regrade) -> None:
+    headers = ['case', *_judge_headers(result.specs), 'hand']
+    rows = [[r.case, *(_grade_cell(r, s) for s in result.specs),
+             '-' if r.hand is None else str(r.hand.score)]
+            for r in result.rows]
+    print(_table(headers, rows))
+    for spec in result.specs:
+        agreed, compared = result.agreement[spec]
+        rate = f' ({agreed / compared:.0%})' if compared else ''
+        print(f'agreement with hand: {spec} {agreed}/{compared}{rate}')
+    for r in result.rows:
+        for spec, err in r.errors.items():
+            print(f'error: {r.case} / {spec}: {err}')
+    print(f'labels rows recorded under {result.ledger_dir}'
+          f' · grading cost {_fmt_cost(result.cost_usd)}')
+
+
+def _cmd_grade(args: argparse.Namespace) -> int:
+    try:
+        run = runs.load(runs.find_run(Path(args.out), args.run_id))
+        hand = labels.load_labels(Path(args.labels))
+        judge_list = grading.resolve_judges([s.strip() for s in args.rubric])
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+    if not any(c.rubric for c in run.cases):
+        print(f'run {run.run_id}: no case carries a rubric; nothing to grade')
+        return 0
+    result = grading.regrade(run, Path(args.out), judge_list, hand,
+                             cases_dir=Path(args.cases_dir))
+    print(f'run {run.run_id} ({run.ts}, {run.model_label()})')
+    _print_regrade(result)
+    return 0
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
     try:
         suite = _load_suite(args)
@@ -361,6 +414,25 @@ def _parser() -> argparse.ArgumentParser:
     cmp_p.add_argument('old')
     cmp_p.add_argument('new')
     cmp_p.set_defaults(func=_cmd_compare)
+
+    grade_p = sub.add_parser(
+        'grade', help='re-grade a stored run offline with one or more '
+                      'rubric judges and compare with the hand grades')
+    grade_p.add_argument('run_id', metavar='RUN_ID',
+                         help='the 12-hex run id (or a path to a run file)')
+    grade_p.add_argument('--rubric', action='append', default=None,
+                         metavar='SPEC', required=True,
+                         help="'Adapter|model' judge; repeat for a column "
+                              'per judge')
+    grade_p.add_argument('--out', default=str(DEFAULT_OUT),
+                         help=f'run directory (default: {DEFAULT_OUT})')
+    grade_p.add_argument('--labels', default=str(labels.DEFAULT_LABELS_FILE),
+                         metavar='FILE',
+                         help='hand grades TOML (default: '
+                              f'{labels.DEFAULT_LABELS_FILE})')
+    grade_p.add_argument('--cases-dir', default=str(cases.CASES_DIR),
+                         help=argparse.SUPPRESS)
+    grade_p.set_defaults(func=_cmd_grade)
 
     list_p = sub.add_parser('list', help='list the cases')
     list_p.add_argument('--cases', default='',

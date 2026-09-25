@@ -545,8 +545,8 @@ Registry tools:
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
 - **Code** — the eight audited verbs below.
 - **Sandbox** — `sandbox_run`, `sandbox_python`, `sandbox_diff`,
-  `sandbox_submit`, `request_dependency`; advertised only in a project
-  with a provisioned sandbox image (see Sandbox below).
+  `code_health`, `sandbox_submit`, `request_dependency`; advertised only
+  in a project with a provisioned sandbox image (see Sandbox below).
 
 `search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
 `check`, `join` are always available and not part of the registry.
@@ -683,6 +683,12 @@ path.
 - `sandbox_python(code)` — runs a Python snippet the same way (arbitrary
   code is fine *inside* the sandbox; that is what it is for).
 - `sandbox_diff()` — per-file `+/-` counts of the copy against the project.
+- `code_health(path='')` — the copy's changed or new Python functions with
+  their metrics (lines, cyclomatic complexity, nesting depth, arguments,
+  returns) and a verdict per function — `degraded | improved | unchanged`
+  against the gate's thresholds — so a worker can fix a degraded function
+  before it submits; `path` narrows to one file (an unchanged file shows
+  its current metrics). Digest capped at 600 chars.
 - `sandbox_submit(intent)` — the only way changes reach the real tree: the
   copy's diff goes through the gate with the agent's stated intent.
 - `request_dependency(name, constraint)` — records a package request;
@@ -690,11 +696,13 @@ path.
 
 **The gate.** Two stages. Deterministic rules first: paths inside the
 project and outside the noise dirs, a size cap, the secret scanner over
-added lines, and red-flag patterns (process/network/eval primitives,
-encoded blobs, skipped tests, removed asserts, CI/config/conftest edits).
+added lines, red-flag patterns (process/network/eval primitives,
+encoded blobs, skipped tests, removed asserts, CI/config/conftest edits),
+the `destructive` rules and the code-health rules (both below).
 Then an AI reviewer (the configured `gate` judge, else the routing ladder's
 `standard` rung, else the session model) answers a fixed question set over
-the user's request, the task, the intent and the diff. Three verdicts:
+the user's request, the task, the intent, guru's change summary and
+code-health rows, and the diff. Three verdicts:
 
 - `intended` — applied via `apply_patch` (auto mode; ask mode shows the
   diff and asks first).
@@ -710,6 +718,32 @@ every deletion is something the *user's request* asked for
 an otherwise clean review is applied like any edit. `apply_patch` accepts
 deletions (`+++ /dev/null`) whose body equals the file exactly, inside and
 outside the sandbox — one patch algebra.
+
+*Destructive changes* are never auto-applied: a rename (the patch algebra
+refuses them; the headers are scanned before parsing), more than 3 files
+deleted in one submit, more than 200 lines removed net (removed minus
+added over the whole diff), or the deletion of any test file (under a
+`tests/`/`test/` directory, or named `test_*.py`, `*_test.py`,
+`conftest.py`) raises a `destructive` flag naming the files, and the
+verdict is `unclear` at most — the user is asked, whatever the reviewer
+says.
+
+*Code health* (`guru/domain/health.py`, pure `ast`): for every Python
+function the diff changes or adds, the gate compares the copy's baseline
+(`git show HEAD:<path>` in the copy) with the result and measures lines,
+cyclomatic complexity (branches, `except`, `with`, `assert`, comprehension
+`if`s, ternaries, `match` cases and boolean operands), maximum nesting
+depth, argument count (`self`/`cls` excluded) and return count. A function
+is `degraded` when a metric crosses a threshold it was under before
+(lines > 60, complexity > 10, nesting > 4, args > 6), when a new function
+is over one, or when a metric already over its threshold grows by more
+than 20%; `improved` when an over-threshold metric shrank; `unchanged`
+otherwise — pre-existing debt the change leaves alone is not flagged.
+Each degraded function is a `health` flag (`unclear` at most, never
+`suspicious`), and the reviewer's packet carries a "Code health" block
+computed by guru outside the untrusted fences listing the degraded and
+improved functions with before→after metrics. A source that does not
+parse is skipped, never an error.
 
 In read-only mode a submit reports the diff and stops before the reviewer
 is consulted (nothing could be applied, so the diff never leaves the
@@ -778,10 +812,12 @@ Provider adapters are configured in `~/.guru/adapters.toml` (see **Providers**).
 
 Make targets (local; there is no CI):
 
+- `make check` — the gate before a commit: `lint`, `typecheck`, `test`
+  and `test-sandbox` in that order (needs Colima for the last).
 - `make test` — run the test suite (pytest; container tests excluded).
 - `make test-sandbox` — the container integration tests against the
   local Colima (skipped when `docker info` fails).
-- `make lint` — flake8 over `guru bench tests`.
+- `make lint` — flake8 over `guru bench tests evals`.
 - `make typecheck` — mypy over `guru`.
 - `make bench` — run the headless coding-model benchmark, writing
   `bench/results-<timestamp>.json` plus a companion `transcript-<timestamp>.json`.
