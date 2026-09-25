@@ -362,8 +362,12 @@ def _fixture_env(repo: Path) -> dict:
     env['PYTHONDONTWRITEBYTECODE'] = '1'
     # A fixture that is guru itself (the dogfood case) runs this runner's
     # own tests, which empty the stable sandbox workdir: give them their
-    # own temp dir and sandbox root inside the copy (removed with it).
-    scratch = Path(repo) / '.guru-eval-tmp'
+    # own temp dir and sandbox root NEXT TO the copy (inside the case's
+    # workdir, removed with it) — not inside the copy, which is a git
+    # repository: tests that build a "not a repo" directory under TMPDIR
+    # would otherwise find themselves inside one (loop-2 dogfood run
+    # fe9e21c94f43 failed two of guru's own tests that way).
+    scratch = Path(repo).parent / '.guru-eval-tmp'
     scratch.mkdir(exist_ok=True)
     env['TMPDIR'] = str(scratch)
     env[SANDBOX_ROOT_ENV] = str(scratch)

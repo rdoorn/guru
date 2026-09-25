@@ -1657,6 +1657,19 @@ class TestGitFixture:
         assert runner._fixture_env(tmp_path)['PYTHONPATH'] == str(tmp_path)
         assert runner._fixture_env(tmp_path)['PYTHONDONTWRITEBYTECODE'] == '1'
 
+    def test_scratch_dir_sits_next_to_the_copy_not_inside(self,
+                                                          tmp_path) -> None:
+        # The copy may be a git repository (guru as its own fixture); a
+        # TMPDIR inside it would put "not a repo" temp dirs inside a repo.
+        copy = tmp_path / 'work' / 'guru'
+        copy.mkdir(parents=True)
+        env = runner._fixture_env(copy)
+        scratch = Path(env['TMPDIR'])
+        assert scratch == tmp_path / 'work' / '.guru-eval-tmp'
+        assert scratch.is_dir()
+        assert copy not in scratch.parents and scratch != copy
+        assert env[runner.SANDBOX_ROOT_ENV] == str(scratch)
+
     def test_run_case_records_fixture_git_in_observed(self, tmp_path, repo,
                                                       canned) -> None:
         d, first, _ = repo
