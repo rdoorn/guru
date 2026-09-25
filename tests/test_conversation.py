@@ -658,3 +658,53 @@ class TestRetentionKeepsToolCallSteps:
         assert out['tool_call_id'] == 'c1' and 'tool_args' not in out
         assert 'tool_call_id' not in conversation.message_to_dict(
             {'role': 'tool', 'tool_name': 'read_file', 'content': 'x'})
+
+
+class TestRequestIn:
+    """``conversation.request_in``: the human request behind a history,
+    skipping the loop's nudges and the mailbox deliveries, capped."""
+
+    def test_skips_mailbox_deliveries_back_to_the_human_request(self):
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'review auth for security'},
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'function': {'name': 'spawn', 'arguments': {}}}]},
+                {'role': 'tool', 'tool_name': 'spawn', 'content': 'ok'},
+                {'role': 'user', 'content': '[result from agent1 · task: t]'
+                                            '\nfindings…'},
+                {'role': 'assistant', 'content': 'spawning another'},
+                {'role': 'user', 'content': '[joined results]\n- a: b'}]
+        assert conversation.request_in(msgs) == 'review auth for security'
+        for prefix in conversation.MAILBOX_PREFIXES:
+            assert conversation.is_mailbox(prefix + ' x')
+        assert not conversation.is_mailbox('review [joined results]')
+
+    def test_only_deliveries_fall_back_to_the_latest_one(self) -> None:
+        msgs = [{'role': 'user', 'content': '[joined results]\nfirst'},
+                {'role': 'assistant', 'content': 'ok'},
+                {'role': 'user', 'content': '[joined results]\nsecond'}]
+        assert conversation.request_in(msgs) == '[joined results]\nsecond'
+
+    def test_skips_nudges_and_caps_the_text(self) -> None:
+        long = 'x' * (conversation.REQUEST_CHARS + 500)
+        msgs = [{'role': 'user', 'content': long},
+                {'role': 'assistant', 'content': 'Let me…'},
+                {'role': 'user', 'content': conversation.NUDGE_TEXT},
+                {'role': 'user', 'content': 'You have read 9 files without '
+                                            'delegating. '
+                                            + conversation.DELEGATION_TEXT}]
+        out = conversation.request_in(msgs)
+        assert out == 'x' * conversation.REQUEST_CHARS
+        assert conversation.REQUEST_CHARS == 1000
+        long_delivery = '[joined results]\n' + 'y' * 2000
+        assert len(conversation.request_in(
+            [{'role': 'user', 'content': long_delivery}])) == 1000
+
+    def test_empty_cases(self) -> None:
+        assert conversation.request_in([]) == ''
+        assert conversation.request_in(
+            [{'role': 'system', 'content': 's'},
+             {'role': 'user', 'content': '   '}]) == ''
+        # provider objects, not only dicts
+        assert conversation.request_in(
+            [SimpleNamespace(role='user', content='hi')]) == 'hi'

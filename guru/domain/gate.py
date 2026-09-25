@@ -257,9 +257,6 @@ class Tally:
         return Tally(self.deleted + other.deleted,
                      self.removed + other.removed, self.files + other.files)
 
-    def __bool__(self) -> bool:
-        return bool(self.deleted or self.removed or self.files)
-
     def describe(self) -> str:
         """``'3 file(s) touched, 1 deleted, 42 line(s) removed'``."""
         return (f'{self.files} file(s) touched, {self.deleted} deleted, '
@@ -270,11 +267,12 @@ class Tally:
 
 def _emptied(added: list, removed: list, context: bool, deleted: bool,
              new_file: bool) -> bool:
-    """Whether a section empties its file: lines removed, none added, no
-    context line (so every line went), and the file neither deleted nor
-    new."""
-    return bool(removed) and not added and not context and not deleted \
-        and not new_file
+    """Whether a section empties its file: lines removed, nothing
+    substantive added (no line, or only blank and comment lines — a
+    ``# removed`` left behind is still an emptied file), no context line
+    (so every line went), and the file neither deleted nor new."""
+    return bool(removed) and not substantive(added) and not context \
+        and not deleted and not new_file
 
 
 def _sections(diff_text: str) -> tuple[list[Section], Optional[str]]:
@@ -488,16 +486,24 @@ def tally(diff_text: str, sections: Optional[list] = None) -> Tally:
                  files=len(sections))
 
 
+def _count(n: int, noun: str) -> str:
+    """``'1 file'``, ``'2 files'`` (``noun`` is the plural)."""
+    return f'{n} {noun[:-1] if n == 1 else noun}'
+
+
 def _over(now: int, prior: int, limit: int, noun: str) -> str:
-    """``''`` when ``now + prior`` is within ``limit``; else the clause
-    naming the numbers: ``'4 files (more than 3)'`` without a prior,
-    ``'2 files now, 5 in this task (more than 3)'`` with one."""
+    """``''`` when ``now + prior`` is within ``limit`` — or when this
+    submit adds nothing (``now`` is 0): a task already over the threshold
+    is not flagged again for a submit that does not remove; else the
+    clause naming the numbers: ``'4 files (more than 3)'`` without a
+    prior, ``'2 files now, 5 in this task (more than 3)'`` with one."""
     total = now + prior
-    if total <= limit:
+    if total <= limit or now <= 0:
         return ''
     if prior <= 0:
-        return f'{now} {noun} (more than {limit})'
-    return f'{now} {noun} now, {total} in this task (more than {limit})'
+        return f'{_count(now, noun)} (more than {limit})'
+    return (f'{_count(now, noun)} now, {total} in this task '
+            f'(more than {limit})')
 
 
 def destructive_flags(diff_text: str,
@@ -513,9 +519,12 @@ def destructive_flags(diff_text: str,
     (:func:`is_test_path`). With ``prior`` — the :class:`Tally` of the
     task's earlier applied submits — the two thresholds are also checked
     against the running total, and the flag names both numbers
-    (``deletes 2 files now, 5 in this task (more than 3)``). ``parsed``
-    is :func:`_sections`'s return when the caller has it. Never
-    raises."""
+    (``deletes 2 files now, 5 in this task (more than 3)``); once the
+    task is over the removed-lines threshold, a later submit is flagged
+    for it only when it removes at least one substantive (non-blank,
+    non-comment) line itself, and a submit that deletes no file is never
+    flagged for the task's deletions. ``parsed`` is :func:`_sections`'s
+    return when the caller has it. Never raises."""
     text = diff_text or ''
     if parsed is None:
         parsed = _sections(text)
@@ -533,7 +542,16 @@ def destructive_flags(diff_text: str,
         flags.append(Flag(DESTRUCTIVE_KIND, '',
                           f"deletes {clause}: {', '.join(gone)}"))
     removed = sum(len(sec.removed) for sec in sections)
-    clause = _over(removed, before.removed, DESTRUCTIVE_REMOVED, 'lines')
+    content_removed = substantive([ln for sec in sections
+                                   for ln in sec.removed])
+    if before.removed > DESTRUCTIVE_REMOVED and not content_removed:
+        # The task crossed the line-removal threshold in an earlier
+        # submit; this one removes no content (blank or comment lines at
+        # most), so it is not flagged for it again.
+        clause = ''
+    else:
+        clause = _over(removed, before.removed, DESTRUCTIVE_REMOVED,
+                       'lines')
     if clause:
         added = [ln for sec in sections for ln in sec.added]
         flags.append(Flag(DESTRUCTIVE_KIND, '',

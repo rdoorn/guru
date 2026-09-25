@@ -807,12 +807,26 @@ def _record_grade(repo: JsonlLedger, target_id: str, labeller: str,
         config.LEDGER_ENABLED = prev_enabled
 
 
+EMPTY_ANSWER_REASON = 'empty answer'
+
+
 def empty_answer_grade(samples: int = 1) -> rubric.SampledGrade:
     """The grade of an empty answer: 0 without a judge call, one
-    ``Grade(0, 'empty answer')`` per sample asked for (so the cell and
-    the stability count read like a graded case)."""
+    ``Grade(0, EMPTY_ANSWER_REASON)`` per sample asked for (so the cell
+    reads like a graded case; :func:`is_empty_answer_grade` tells it
+    apart, and the stability share leaves it out — nothing was
+    sampled)."""
     return rubric.SampledGrade(
-        tuple(rubric.Grade(0, 'empty answer') for _ in range(max(1, samples))))
+        tuple(rubric.Grade(0, EMPTY_ANSWER_REASON)
+              for _ in range(max(1, samples))))
+
+
+def is_empty_answer_grade(grade: Optional[rubric.SampledGrade]) -> bool:
+    """Whether ``grade`` is the synthetic :func:`empty_answer_grade`
+    (every sample a 0 with ``EMPTY_ANSWER_REASON``), not a judge's."""
+    return grade is not None and all(
+        g.score == 0 and g.reason == EMPTY_ANSWER_REASON
+        for g in grade.samples)
 
 
 def grade_case(case: Case, res: CaseResult, judge: rubric.Judge,

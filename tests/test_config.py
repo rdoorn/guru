@@ -77,6 +77,14 @@ class TestControllerHint:
         assert '[project]' in hint
         assert 'refer to it' in hint
 
+    def test_one_worker_per_named_concern(self) -> None:
+        """Iteration-2 suite: the controller folded 'correctness and
+        security' into one security worker in 3/3 repeats."""
+        hint = config.CONTROLLER_HINT
+        assert 'one worker per named concern' in hint
+        assert 'correctness AND security' in hint
+        assert 'never fold distinct concerns into one worker' in hint
+
     def test_task_names_the_project_path(self) -> None:
         assert 'project path' in config.CONTROLLER_HINT
 

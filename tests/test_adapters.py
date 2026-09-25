@@ -1348,6 +1348,35 @@ class TestControllerExecuted:
             row = fake_repo.stream('turns')[-1]
             assert row['controller_executed'] is False, prefix
 
+    def test_mailbox_turn_records_the_human_request(self, monkeypatch,
+                                                    fake_repo) -> None:
+        """A synthesis turn is still recognised as one (never flips) when
+        a human request precedes the delivery, and the TurnRecord names
+        that request, not the delivery."""
+        from guru.adapters import turn
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'review auth for security'},
+            {'role': 'assistant', 'content': 'spawned'},
+            {'role': 'user', 'content': '[joined results]\n- agent1: A1'}])
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'task_id', '')
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', True)
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 0)
+        assert turn._mailbox_turn() is True
+        assert turn.turn_request() == 'review auth for security'
+        it = iter([("x" * 601, [])])
+        turn.run_loop(step=lambda: next(it), run_tools=lambda p: None,
+                      add_user=lambda t: None)
+        from guru.domain import ledger
+        ledger.flush()
+        row = fake_repo.stream('turns')[-1]
+        assert row['controller_executed'] is False
+        assert row['request'] == 'review auth for security'
+        assert turn.request_in is conversation.request_in
+
     def test_turn_start_clears_last_error(self, monkeypatch, fake_repo):
         monkeypatch.setattr(session, 'last_error', 'old failure')
         self._run(monkeypatch, fake_repo, [("ok.", [])])
@@ -1714,3 +1743,112 @@ class TestRequestIn:
         assert turn.request_in(msgs) == 'review the auth service'
         assert turn.request_in([{'role': 'system', 'content': 's'}]) == ''
         assert turn.request_in([]) == ''
+
+
+class TestThinkingLastRound:
+    """With extended thinking on, the Anthropic API requires the *last*
+    assistant message to start with a thinking block when it carries
+    ``tool_use``; previous turns' thinking is not kept, so the rebuilt
+    round that would be that last message is flattened to text instead,
+    and every earlier round is still rebuilt from its ids."""
+
+    ROUND = [
+        {'role': 'user', 'content': 'q'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'toolu_1',
+             'function': {'name': 'join', 'arguments': {'targets': 'a'}}}]},
+        {'role': 'tool', 'tool_name': 'join', 'tool_call_id': 'toolu_1',
+         'content': 'Waiting for agent1'},
+    ]
+    DELIVERY = {'role': 'user', 'content': '[joined results]\nA1'}
+
+    def test_last_round_flattened_with_thinking(self) -> None:
+        # a turn that ended on a join, resumed by the mailbox delivery
+        msgs = self.ROUND + [self.DELIVERY]
+        _, out = anth.to_anthropic_messages(msgs, thinking=True)
+        assert out[1] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[2] == {'role': 'user',
+                          'content': '[tool join result]\nWaiting for agent1'}
+        assert out[3] == self.DELIVERY
+        assert anth.native_round(msgs, 1, thinking=True) is None
+
+    def test_last_round_rebuilt_without_thinking(self) -> None:
+        msgs = self.ROUND + [self.DELIVERY]
+        _, out = anth.to_anthropic_messages(msgs)
+        assert out[1]['content'] == [
+            {'type': 'tool_use', 'id': 'toolu_1', 'name': 'join',
+             'input': {'targets': 'a'}}]
+        assert out[2]['content'][0]['type'] == 'tool_result'
+        assert anth.native_round(msgs, 1, thinking=False) is not None
+        assert anth.native_round(msgs, 1) is not None       # the default
+
+    def test_earlier_round_rebuilt_with_thinking(self) -> None:
+        # an assistant text follows the round: it is not the last assistant
+        # message, so the API accepts it without its thinking blocks
+        msgs = self.ROUND + [
+            {'role': 'assistant', 'content': 'done'},
+            {'role': 'user', 'content': 'and then?'}]
+        _, out = anth.to_anthropic_messages(msgs, thinking=True)
+        assert out[1]['content'][0]['type'] == 'tool_use'
+        assert out[2]['content'][0]['type'] == 'tool_result'
+        assert out[3] == {'role': 'assistant', 'content': 'done'}
+        # two rounds, the second last: the first rebuilt, the second flat
+        second = [
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': 'toolu_2',
+                 'function': {'name': 'check', 'arguments': {}}}]},
+            {'role': 'tool', 'tool_name': 'check', 'tool_call_id': 'toolu_2',
+             'content': 'running'}]
+        msgs = self.ROUND + second + [self.DELIVERY]
+        _, out = anth.to_anthropic_messages(msgs, thinking=True)
+        assert out[1]['content'][0]['type'] == 'tool_use'
+        assert out[3] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[4]['content'].startswith('[tool check result]')
+
+    def test_run_turn_passes_the_adapter_thinking_flag(self, monkeypatch):
+        seen: list = []
+        monkeypatch.setattr(anth, 'to_anthropic_messages',
+                            lambda msgs, thinking=False: seen.append(
+                                thinking) or ('', []))
+        monkeypatch.setattr(anth.tools, 'active_specs', lambda: [])
+        monkeypatch.setattr(anth.turn, 'run_loop', lambda **kw: None)
+        for flag in (True, False):
+            a = anth.AnthropicAdapter(thinking=flag)
+            monkeypatch.setattr(a, '_client', lambda: object())
+            a.run_turn()
+        assert seen == [True, False]
+
+    def test_mixed_provider_ids_rebuild_on_either_side(self) -> None:
+        """Ids are opaque: an Anthropic ``toolu_`` round replays through
+        the LiteLLM translation and an OpenAI ``call_`` round through the
+        Anthropic one, both rebuilt (not crashed, not flattened)."""
+        anthropic_history = self.ROUND + [
+            {'role': 'assistant', 'content': 'done'},
+            {'role': 'user', 'content': 'more'}]
+        out = lite.to_openai_messages(anthropic_history)
+        assert out[1]['tool_calls'][0]['id'] == 'toolu_1'
+        assert out[2] == {'role': 'tool', 'tool_call_id': 'toolu_1',
+                          'content': 'Waiting for agent1'}
+        native = lite.native_round(anthropic_history, 1)
+        assert native is not None and native[1] == 3
+        openai_history = [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [
+                {'id': 'call_abc', 'raw_arguments': '{"path": "a.py"}',
+                 'function': {'name': 'read_file',
+                              'arguments': {'path': 'a.py'}}}]},
+            {'role': 'tool', 'tool_name': 'read_file',
+             'tool_call_id': 'call_abc', 'content': 'A'},
+            {'role': 'assistant', 'content': 'done'},
+            {'role': 'user', 'content': 'more'}]
+        for thinking in (False, True):
+            _, out = anth.to_anthropic_messages(openai_history,
+                                                thinking=thinking)
+            assert out[1]['content'] == [
+                {'type': 'tool_use', 'id': 'call_abc', 'name': 'read_file',
+                 'input': {'path': 'a.py'}}]
+            assert out[2]['content'] == [
+                {'type': 'tool_result', 'tool_use_id': 'call_abc',
+                 'content': 'A'}]
+            assert out[3:] == [{'role': 'assistant', 'content': 'done'},
+                               {'role': 'user', 'content': 'more'}]

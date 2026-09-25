@@ -380,8 +380,48 @@ accept it for the eval controller or run the controller on Sonnet.
   `TestSpawnJoinRace`, including an end-to-end run on an instant fake
   model that spawns and joins in one round.
 
-Not done: Anthropic direct with `thinking` on resends previous turns'
-tool rounds without their thinking blocks (the API strips those itself, so
-the cache should still hit; not measured live). `apply_retention`'s
-summarize/outline compaction still rewrites large tool results after a
-turn by design, which changes the prefix from that point on.
+- Controller decomposition: in the iteration-2 suite the Haiku controller
+  answered "Review this repository for correctness and security" with a
+  single security-engineer worker in 3/3 repeats (spawned 1 < 2; in
+  iteration 1 2/3 runs spawned two). `CONTROLLER_HINT` now says: when a
+  request names several concerns (correctness AND security, several
+  files or areas), spawn one worker per named concern in parallel and
+  join them; never fold distinct concerns into one worker. Pinned by
+  `TestControllerHint.test_one_worker_per_named_concern`; to be measured
+  in the next suite run.
+
+Review fixes after the iteration-3 diff (same branch):
+
+- Anthropic direct with `thinking` on: the API requires the *last*
+  assistant message to start with a thinking block when it carries
+  `tool_use`, and previous turns' thinking blocks are not kept — so
+  `anthropic.native_round` flattens the rebuilt round when no assistant
+  message follows it (a turn that ended on a `join`, resumed by the
+  mailbox) and rebuilds earlier rounds (`TestThinkingLastRound`). Not
+  probed live (the adapter is disabled in the user's config).
+- Gate: a file reduced to blank/comment lines counts as emptied
+  (`_emptied` uses `substantive`); once a task is over the removed-lines
+  threshold a later submit is flagged only when it removes a substantive
+  line itself; `1 file`/`1 line` pluralisation; `Tally.__bool__` and the
+  dead `verbs.task_tally` removed.
+- Sandbox: the main agent's destructive tally is keyed on the turn
+  (`_tally_key`) so a new user turn starts clean; the baseline sha is kept
+  in memory next to the copy (`verbs.Copy`) and `colima.check_baseline`
+  compares against it — a worker that deletes the marker gets a clean
+  `MARKER_CHANGED` refusal and the copy is still removed (`remove_copy`
+  accepts a marker-less `task-*` directory under the work root);
+  `git diff --text` so a worker-written `.gitattributes` cannot hide the
+  diff as binary.
+- Orchestrator: `_start` drains the pending set in a `finally`, a launch
+  that raises leaves the child idle in `error` (join resolves at once),
+  `_finish_task` prunes the child from `_pending`.
+- `conversation.request_in` (moved from `turn`): skips mailbox deliveries
+  back to the human request and caps it at 1000 chars; the panel judge,
+  the gate reviewer and the turn ledger read it from there.
+- Evals: synthetic empty-answer grades leave the stability denominator;
+  tests no longer touch the developer's log file (`log.setup` is a no-op
+  under pytest).
+
+Not done: `apply_retention`'s summarize/outline compaction still rewrites
+large tool results after a turn by design, which changes the prefix from
+that point on.

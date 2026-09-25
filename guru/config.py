@@ -363,7 +363,11 @@ CONTROLLER_HINT = (
     " small model can do on trivial, one that needs care on hard.\n"
     "Spawn independent tasks in parallel, use check to poll and join to be"
     " resumed when a group finishes, then SYNTHESISE the results into one"
-    " answer for the user. Reply directly, briefly, for greetings, questions"
+    " answer for the user. When a request names several concerns (e.g."
+    " correctness AND security, or several files or areas), spawn one"
+    " worker per named concern in parallel and join them; never fold"
+    " distinct concerns into one worker."
+    " Reply directly, briefly, for greetings, questions"
     " about yourself, or clarifications that need no work."
 )
 

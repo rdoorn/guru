@@ -65,8 +65,9 @@ class Regrade:
     """What :func:`regrade` produced: the rows, per spec ``(agreed,
     compared)`` of the median against the hand grades and ``(stable,
     graded)`` — the cases whose samples all agreed over the cases the
-    judge graded — where the labels went, how many samples were asked
-    for and what the judges' calls cost (None when unknown)."""
+    judge actually graded (synthetic empty-answer grades excluded) —
+    where the labels went, how many samples were asked for and what the
+    judges' calls cost (None when unknown)."""
     run_id: str
     specs: list[str]
     rows: list[GradeRow]
@@ -228,9 +229,12 @@ def _score(grade: Optional[rubric.SampledGrade]) -> Optional[int]:
 
 def stability(grades: Sequence[Optional[rubric.SampledGrade]]
               ) -> tuple[int, int]:
-    """``(stable, graded)``: how many of the grades that exist have all
-    their samples agreeing, over how many exist."""
-    graded = [g for g in grades if g is not None]
+    """``(stable, graded)``: how many of the grades a judge produced have
+    all their samples agreeing, over how many it produced. A synthetic
+    empty-answer grade (:func:`runner.is_empty_answer_grade`: N zeros
+    without a call) is not a judgement and counts in neither number."""
+    graded = [g for g in grades
+              if g is not None and not runner.is_empty_answer_grade(g)]
     return sum(1 for g in graded if g.stable), len(graded)
 
 

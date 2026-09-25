@@ -51,7 +51,6 @@ from typing import Optional
 from rich.console import Console
 
 from guru import config, log, session, ui
-from guru.adapters import turn
 from guru.agents import Agent, AgentManager
 from guru.domain import (conversation, decisions, ledger, policy, routing,
                          spend, tools)
@@ -91,10 +90,11 @@ _SECURITY_SPAWNED = (
 
 def panel_text(messages: list, task: str) -> str:
     """What the panel judge reads for a spawned ``task``: the parent's
-    request for the turn (:func:`guru.adapters.turn.request_in` over
-    ``messages``) and then the task text, blank-line separated; the task
-    alone when the request is empty or already the task."""
-    request = turn.request_in(messages)
+    request (:func:`guru.domain.conversation.request_in` over
+    ``messages`` — the human request behind a mailbox delivery, capped)
+    and then the task text, blank-line separated; the task alone when the
+    request is empty or already the task."""
+    request = conversation.request_in(messages)
     if not request or request == task:
         return task
     return request + "\n\n" + task
@@ -388,6 +388,19 @@ class Orchestrator:
         assert self.loop is not None
         self.loop.run_in_executor(None, self.work, agent)
 
+    def _launch_all(self, children: list) -> None:
+        """``launch`` each child; one whose launch raises is left on the
+        list idle in ``error`` (logged through ``on_worker_error``) so
+        the parent's ``join`` resolves with its (empty) answer instead of
+        waiting forever on a phantom, and the others still start."""
+        for c in children:
+            try:
+                self.launch(c)
+            except Exception as exc:                     # noqa: BLE001
+                c.busy = False
+                c.status = 'error'
+                self.on_worker_error(c, exc)
+
     def submit(self, agent, text: str) -> None:
         """Queue a user message for ``agent`` and start it if idle."""
         self.notice(agent, f"> {text}")
@@ -512,6 +525,10 @@ class Orchestrator:
         after a provider error is an ``error``, not ``done`` (or
         ``fell_back`` when the caller respawns it locally).
         """
+        if agent.parent is not None:
+            # Whatever happened to its registration, a finished child is
+            # not pending any more.
+            self._drain_pending(agent.parent, [agent])
         if agent.task_rec is None:
             return
         st = agent.state
@@ -705,11 +722,13 @@ class Orchestrator:
         # worker thread while the loop may be iterating it. Until then the
         # children are pending (a join/check in this tool round sees them).
         def _start() -> None:
-            for c in children:
-                self.manager.agents.append(c)
-                self.launch(c)
-            self._drain_pending(parent, children)
-            self.invalidate()
+            try:
+                for c in children:
+                    self.manager.agents.append(c)
+                self._launch_all(children)
+            finally:
+                self._drain_pending(parent, children)
+                self.invalidate()
 
         assert self.loop is not None
         self._register_pending(parent, children)
@@ -802,17 +821,18 @@ class Orchestrator:
             return titles
 
         def _start() -> None:
-            for c in children:
-                self.manager.agents.append(c)
-            # Open the barrier BEFORE launching, so a fast child can't report
-            # into a not-yet-existing barrier.
-            self.barriers[parent] = {
-                'remaining': set(titles), 'results': {},
-                'synthesis': synthesis}
-            for c in children:
-                self.launch(c)
-            self._drain_pending(parent, children)
-            self.invalidate()
+            try:
+                for c in children:
+                    self.manager.agents.append(c)
+                # Open the barrier BEFORE launching, so a fast child can't
+                # report into a not-yet-existing barrier.
+                self.barriers[parent] = {
+                    'remaining': set(titles), 'results': {},
+                    'synthesis': synthesis}
+                self._launch_all(children)
+            finally:
+                self._drain_pending(parent, children)
+                self.invalidate()
 
         assert self.loop is not None
         self._register_pending(parent, children)

@@ -26,6 +26,15 @@ def _isolated_eval_sandbox_root(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _no_log_file(monkeypatch):
+    """``guru.log.setup`` is a no-op under the tests: the eval CLI (and
+    any other entry point a test calls) must not attach a handler to the
+    developer's real ``~/.guru/guru.log``."""
+    from guru import log
+    monkeypatch.setattr(log, 'setup', lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_skill_catalog(tmp_path, monkeypatch):
     """Keep ``skills.REGISTRY`` empty across tests and the catalog directory
     under ``tmp_path``.

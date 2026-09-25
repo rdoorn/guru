@@ -384,7 +384,7 @@ class TestDestructive:
         assert t + gate.Tally(1, 1, 1) == gate.Tally(3, 8, 4)
         assert t.describe() == '3 file(s) touched, 2 deleted, 7 line(s) ' \
             'removed'
-        assert not gate.Tally() and t
+        assert gate.Tally() == gate.Tally(0, 0, 0) and t != gate.Tally()
         assert gate.tally('') == gate.Tally()
 
     def test_emptied_file_is_a_delete_flag_and_destructive(self, tmp_path):
@@ -1097,3 +1097,82 @@ class TestLLMSpec:
     def test_rung_shape(self) -> None:
         assert routing.Rung('a', 'm', 'standard', remote=True).default is False
         assert Path('.').exists()
+
+
+class TestEmptiedToComments:
+    """A file whose every line went, with only blank or comment lines
+    added in their place, is emptied (review I-2: a ``# removed`` left
+    behind hid the emptying from the destructive rule)."""
+
+    def test_reduced_to_a_comment_is_emptied(self, tmp_path) -> None:
+        d = _diff('tests/test_x.py', ['def test_x():', '    assert 1'],
+                  ['# removed'])
+        [sec] = gate._sections(d)[0]
+        assert sec.emptied and sec.gone
+        assert gate.tally(d).deleted == 1
+        assert [f.detail for f in gate.rules(d, tmp_path)
+                if f.kind == gate.DESTRUCTIVE_KIND] == [
+            'empties test file tests/test_x.py']
+
+    def test_reduced_to_a_blank_line_is_emptied(self, tmp_path) -> None:
+        d = _diff('pkg/m.py', ['X = 1', 'Y = 2'], [''])
+        [sec] = gate._sections(d)[0]
+        assert sec.emptied
+        assert gate.deleted_paths(d) == ['pkg/m.py (emptied)']
+        # the raw scan (unparsable diff) agrees
+        raw = d + 'rename from a\nrename to b\n'
+        assert gate.stat(raw)[0][4] is True
+
+    def test_reduced_to_real_code_is_not_emptied(self, tmp_path) -> None:
+        d = _diff('pkg/m.py', ['X = 1', 'Y = 2'], ['# kept', 'Z = 3'])
+        [sec] = gate._sections(d)[0]
+        assert not sec.emptied and not sec.gone
+        assert gate.tally(d).deleted == 0
+        assert gate.deleted_paths(d) == []
+
+
+class TestOverThresholdWording:
+    """``_over``: singular nouns for 1, and no flag for a submit that adds
+    nothing to a task already over a threshold (review M-3)."""
+
+    def test_singular_and_plural(self) -> None:
+        assert gate._over(1, 3, 3, 'files') == \
+            '1 file now, 4 in this task (more than 3)'
+        assert gate._over(2, 3, 3, 'files') == \
+            '2 files now, 5 in this task (more than 3)'
+        assert gate._over(1, 200, 200, 'lines') == \
+            '1 line now, 201 in this task (more than 200)'
+        assert gate._over(201, 0, 200, 'lines') == '201 lines (more than 200)'
+        assert gate._over(0, 5, 3, 'files') == ''         # nothing now
+        assert gate._over(2, 1, 3, 'files') == ''         # within
+
+    def test_over_task_flags_only_a_substantive_removal(self, tmp_path):
+        prior = gate.Tally(deleted=0, removed=250, files=3)
+        # blank and comment lines removed: no content, no flag
+        d = _diff('pkg/m.py', ['', '# old note', '   '], ['X = 1'])
+        assert gate.destructive_flags(d, prior=prior) == []
+        # nothing removed at all: no flag either
+        add = _diff('pkg/n.py', [], ['Y = 2'], new_file=True)
+        assert gate.destructive_flags(add, prior=prior) == []
+        # one substantive line removed: flagged with both numbers
+        d = _diff('pkg/m.py', ['X = 1'], ['X = 2'])
+        [flag] = gate.destructive_flags(d, prior=prior)
+        assert flag.detail == ('removes 1 line now, 251 in this task (more '
+                               'than 200); +1 added, 1 of them content')
+        # not yet over: comment-only removals still count towards crossing
+        d = _diff('pkg/m.py', [f'# c{i}' for i in range(5)], [])
+        [flag] = gate.destructive_flags(
+            d, prior=gate.Tally(removed=198, files=1))
+        assert flag.detail.startswith('removes 5 lines now, 203 in this '
+                                      'task (more than 200)')
+
+    def test_no_deletion_now_is_not_flagged_for_earlier_ones(self, tmp_path):
+        prior = gate.Tally(deleted=5, removed=10, files=5)
+        d = _diff('pkg/m.py', ['X = 1'], ['X = 2'])
+        assert gate.destructive_flags(d, prior=prior) == []
+        [flag] = gate.destructive_flags(_delete_diff('p.py'), prior=prior)
+        assert flag.detail.startswith('deletes 1 file now, 6 in this task '
+                                      '(more than 3): p.py')
+
+    def test_tally_has_no_truthiness(self) -> None:
+        assert '__bool__' not in vars(gate.Tally)

@@ -1867,3 +1867,104 @@ class TestPanelText:
             'Task: review the login for security\n\nreview upload.py']
         assert [a.state.active_role for a in o.manager.agents[1:]] == [
             None, 'security-engineer']
+
+
+class TestLaunchFailure:
+    """A ``launch`` that raises inside ``_start`` (review I-5): the
+    pending set is drained all the same, the child is left idle in
+    ``error`` instead of a phantom running one, and the parent's join
+    resolves at once."""
+
+    @pytest.fixture(autouse=True)
+    def _constant_environment(self, monkeypatch) -> None:
+        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+
+    def _orch(self, failing: set):
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        o.loop = _DeferringLoop()
+        o.launched, o.errors = [], []                       # type: ignore
+
+        def launch(agent):
+            if agent.title in failing:
+                raise RuntimeError('no executor')
+            o.launched.append(agent)
+        o.launch = launch                                   # type: ignore
+        o.on_worker_error = lambda a, e: o.errors.append(  # type: ignore
+            (a.title, str(e)))
+        main = o.manager.active
+        main.busy = True
+        return o, main
+
+    def _spawn(self, o, main, task: str) -> str:
+        token = session.use(main.state)
+        try:
+            return o.spawn(task)
+        finally:
+            session.reset(token)
+
+    def test_spawn_launch_raises(self) -> None:
+        o, main = self._orch({'agent1'})
+        self._spawn(o, main, 'look at x')
+        assert o.children_of(main)[0].busy is True          # pending
+        o.loop.run()                                        # _start runs
+        assert o._pending == {}                             # drained
+        [child] = o.manager.agents[1:]
+        assert child.busy is False and child.status == 'error'
+        assert o.errors == [('agent1', 'no executor')]
+        # join does not block: the child is done (with no answer)
+        main.busy = True                                    # deliver queues
+        out = o.do_join(main.state, ['agent1'])
+        assert 'resuming' in out.lower()
+        assert main.state.turn_waiting is False
+        assert main not in o.barriers
+        assert any('(no answer produced)' in p for p in main.queue)
+
+    def test_one_failing_child_does_not_stop_the_others(self) -> None:
+        o, main = self._orch({'agent1'})
+        titles = o.spawn_panel(main, [
+            ('review a', 'developer', 'code-review'),
+            ('review b', 'security-engineer', 'code-review')])
+        assert titles == ['agent1', 'agent2']
+        o.loop.run()
+        assert o._pending == {}
+        assert [a.title for a in o.launched] == ['agent2']
+        a1, a2 = o.manager.agents[1:]
+        assert a1.status == 'error' and not a1.busy
+        assert a2.busy is True
+        assert o.barriers[main]['remaining'] == {'agent1', 'agent2'}
+
+    def test_finish_task_prunes_pending(self, fake_repo) -> None:
+        o, main = self._orch(set())
+        self._spawn(o, main, 'look at x')
+        [child] = o.children_of(main)
+        assert o._pending[main] == [child]
+        # the child finishes before _start ever ran (a loop that never
+        # came back): its row closes and it leaves the pending set
+        child.started = 0.0
+        o._finish_task(child, 'done')
+        assert o._pending == {}
+        assert child.task_rec is None
+
+
+class TestPanelTextMailbox:
+    """``panel_text`` reads the human request behind a mailbox delivery
+    and caps it (review I-6)."""
+
+    def test_skips_the_delivery(self) -> None:
+        from guru.orchestrator import panel_text
+        msgs = [{'role': 'user', 'content': 'review auth for security'},
+                {'role': 'assistant', 'content': 'spawned'},
+                {'role': 'user', 'content': '[joined results]\n- a: A1'},
+                {'role': 'assistant', 'content': 'one more'},
+                {'role': 'user', 'content': '[result from agent2 · task: t]'
+                                            '\nA2'}]
+        assert panel_text(msgs, 'review upload.py') == \
+            'review auth for security\n\nreview upload.py'
+
+    def test_request_part_is_capped(self) -> None:
+        from guru.orchestrator import panel_text
+        request = 'r' * 3000
+        out = panel_text([{'role': 'user', 'content': request}], 'task')
+        assert out == 'r' * conversation.REQUEST_CHARS + '\n\ntask'
+        assert conversation.REQUEST_CHARS == 1000

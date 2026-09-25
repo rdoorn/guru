@@ -9,7 +9,7 @@ import pytest
 
 from guru import config, judges
 from guru.domain import ledger
-from guru.evals import grading, labels, rubric, runs
+from guru.evals import grading, labels, rubric, runner, runs
 from guru.evals.__main__ import main as cli_main
 from guru.evals.runs import CaseResult, Run
 from guru.repositories.jsonl_ledger import JsonlLedger
@@ -195,7 +195,8 @@ class TestRegrade:
         assert empty.grades == {'A|haiku': _sampled((0, 'empty answer')),
                                 'A|sonnet': _sampled((0, 'empty answer'))}
         assert out.samples == 1
-        assert out.stability == {'A|haiku': (3, 3), 'A|sonnet': (3, 3)}
+        # The synthetic grade is not a judgement: two cases were graded.
+        assert out.stability == {'A|haiku': (2, 2), 'A|sonnet': (2, 2)}
         assert empty.hand is not None and empty.hand.score == 1
         assert out.rows[2].hand is None
         # Two graded cases with an answer x two judges = 4 calls.
@@ -285,8 +286,9 @@ class TestRegrade:
         assert f is not None and f.score == 1 and f.stable
         # Median vs hand: graded 2 vs 2, empty 0 vs 1.
         assert out.agreement == {'A|j': (1, 2)}
-        # Stability over the three graded cases: empty and from-transcript.
-        assert out.stability == {'A|j': (2, 3)}
+        # Stability over the two cases the judge graded (the empty answer's
+        # synthetic zeros are not samples): from-transcript only.
+        assert out.stability == {'A|j': (1, 2)}
         rows = JsonlLedger(out.ledger_dir).rows('labels')
         by = {(r['target_id'], r['labeller']): (r['label'], r['note'])
               for r in rows}
@@ -308,7 +310,7 @@ class TestRegrade:
         assert graded.errors['A|j'] == 'blip'
         ft = from_t.grades['A|j']
         assert ft is not None and ft.scores == (2, 2)
-        assert out.stability == {'A|j': (2, 2)}      # empty + from-transcript
+        assert out.stability == {'A|j': (1, 1)}      # from-transcript only
         assert out.agreement == {'A|j': (0, 1)}      # only empty compared
         rows = JsonlLedger(out.ledger_dir).rows('labels')
         assert (f'{run.run_id}:graded', 'rubric:j') not in {
@@ -463,10 +465,12 @@ class TestCli:
         assert cells['from-transcript'] == ['2', '(2,2,2)', '2', '(0,2,2)',
                                             '2']
         assert 'cells: median of 3 samples' in out
+        # graded (2,1,2) unstable, from-transcript (2,2,2) stable; the
+        # empty answer's synthetic zeros are outside the share.
         assert ('agreement with hand: A|haiku 2/2 (100%) · stability '
-                '2/3 (67%)') in out
+                '1/2 (50%)') in out
         assert ('agreement with hand: A|sonnet 1/2 (50%) · stability '
-                '2/3 (67%)') in out
+                '1/2 (50%)') in out
         note = [r['note'] for r in JsonlLedger(
             tmp_path / run.run_id / 'ledger').rows('labels')
             if r['labeller'] == 'rubric:haiku'
@@ -602,3 +606,27 @@ class TestCli:
         assert cli_main(['grade', 'norubric0000', '--rubric', 'A|m',
                          '--out', str(tmp_path)]) == 0
         assert 'no case carries a rubric' in capsys.readouterr().out
+
+
+class TestStabilityDenominator:
+    """Synthetic empty-answer grades are not judgements: they leave the
+    stability share (review M-4)."""
+
+    def test_empty_answer_grade_is_recognised(self) -> None:
+        g = runner.empty_answer_grade(3)
+        assert runner.is_empty_answer_grade(g)
+        assert g.scores == (0, 0, 0) and g.stable
+        assert not runner.is_empty_answer_grade(None)
+        assert not runner.is_empty_answer_grade(_sampled((0, 'no code')))
+        # a judge's zeros with the same words are still a judgement
+        judged = rubric.SampledGrade((rubric.Grade(0, 'empty answer'),
+                                      rubric.Grade(1, 'thin')))
+        assert not runner.is_empty_answer_grade(judged)
+
+    def test_stability_excludes_synthetic_grades(self) -> None:
+        stable = _sampled((2, 'a'), (2, 'b'))
+        unstable = _sampled((2, 'a'), (1, 'b'))
+        assert grading.stability([stable, unstable, None]) == (1, 2)
+        assert grading.stability(
+            [stable, runner.empty_answer_grade(2), None]) == (1, 1)
+        assert grading.stability([runner.empty_answer_grade(2)]) == (0, 0)

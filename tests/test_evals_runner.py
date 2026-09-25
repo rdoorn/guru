@@ -2763,3 +2763,17 @@ class TestFinalAnswer:
         assert bench._final_answer(agent) == 'Found it.'
         # And the empty-answer shape of collect_metrics is unchanged.
         assert bench._final_answer(self._main([])) == ''
+
+
+class TestNoLogFileUnderTests:
+    """The eval CLI calls ``log.setup``; under pytest that is a no-op so
+    the developer's ``~/.guru/guru.log`` is never touched (review M-7)."""
+
+    def test_cli_attaches_no_file_handler(self) -> None:
+        import logging
+        from guru import log
+        assert cli_main(['list']) == 0
+        assert log.setup() is None
+        assert not [h for h in log.log.handlers
+                    if isinstance(h, logging.FileHandler)]
+        assert log._configured is False

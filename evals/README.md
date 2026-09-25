@@ -168,8 +168,9 @@ reads `2 (2,2,1)` — the median first (the recorded score, ties to the
 lower value), then the samples in call order — and the agreement line
 compares the *median* with the hand grade and gains a **stability**
 share: `agreement with hand: <spec> 2/3 (67%) · stability 1/3 (33%)`,
-where stability is the share of graded cases whose N samples all agree
-(an empty answer counts as stable: N zeros without a call). Read the two
+where stability is the share of cases the judge graded whose N samples
+all agree (an empty answer is scored 0 without a call — synthetic zeros,
+not samples — and is outside both numbers). Read the two
 together: high stability with low agreement is a judge that is
 consistently wrong about the rubric (the instructions need work); low
 stability is a judge that is guessing (more samples, or a bigger judge).

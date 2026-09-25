@@ -40,7 +40,7 @@ import time
 from rich.markdown import Markdown
 
 from guru import config, session, ui
-from guru.domain import decisions, ledger, tools
+from guru.domain import conversation, decisions, ledger, tools
 
 # A controller answer longer than this with no spawn in the turn counts as
 # the controller doing the work itself (design doc §5: measured, not
@@ -50,28 +50,14 @@ _CONTROLLER_ANSWER_CHARS = 600
 # A weak model sometimes ends a turn by announcing an action ("Let me read the
 # files…") without calling a tool; without a nudge that would be taken as the
 # final answer. looks_like_preamble catches that stall so the loop can poke it.
+# The nudge texts live in guru.domain.conversation (request_in skips them);
+# these names are the loop's handles on them.
 _NUDGE_CAP = 2
 _PREAMBLE_RE = re.compile(
     r"\b(let me|i'?ll|i will|let'?s|i'?m going to|i am going to|going to|"
     r"start by|next[,]? i|first[,]? i)\b", re.IGNORECASE)
-
-_NUDGE_TEXT = (
-    "Do not describe what you will do — do it now. Call the tool you need in"
-    " this reply (use search_tools first if it is not active). If you are"
-    " genuinely finished, give the final answer."
-)
-
-_DELEGATION_TEXT = (
-    "You inspected several files yourself. This task spans multiple concerns —"
-    " decompose it now instead of answering directly: spawn parallel"
-    " sub-agents, one per domain, then join and synthesise. For a review,"
-    " spawn(task='review the code for correctness, readability, tests',"
-    " role='developer', skill='code-review') AND spawn(task='review the code"
-    " for injection, authz, secrets, path traversal, vulnerable deps',"
-    " role='security-engineer', skill='code-review'), then join both and give"
-    " one consolidated report. Add architect/SRE sub-agents if design or"
-    " reliability matter."
-)
+_NUDGE_TEXT = conversation.NUDGE_TEXT
+_DELEGATION_TEXT = conversation.DELEGATION_TEXT
 
 
 # A request shaped like a single edit: an edit verb and at most one
@@ -90,11 +76,9 @@ def _single_target_request(request: str) -> bool:
     return len(set(_FILE_TOKEN_RE.findall(request))) <= 1
 
 
-def _is_nudge(text: str) -> bool:
-    """True for a user message the loop itself injected (act, delegation
-    or over-read nudge)."""
-    return (text in (_NUDGE_TEXT, _DELEGATION_TEXT)
-            or text.endswith(_DELEGATION_TEXT))
+# True for a user message the loop itself injected (act, delegation or
+# over-read nudge).
+_is_nudge = conversation.is_nudge
 
 
 def _over_read_text(n: int) -> str:
@@ -176,37 +160,33 @@ def looks_like_preamble(content: str) -> bool:
     return bool(_PREAMBLE_RE.search(content))
 
 
-def request_in(messages: list) -> str:
-    """The user's request in ``messages``: the most recent user message
-    that is not one of the loop's own nudges; ``''`` when there is none.
-    For any agent's history (the orchestrator reads a parent's), not only
-    the bound session's."""
-    for m in reversed(messages):
-        if not isinstance(m, dict) or m.get('role') != 'user':
-            continue
-        text = (m.get('content') or '').strip()
-        if text and not _is_nudge(text):
-            return text
-    return ''
+# The user's request in a history: the most recent user message that is
+# neither a nudge nor a mailbox delivery, capped
+# (:func:`guru.domain.conversation.request_in`).
+request_in = conversation.request_in
 
 
 def _turn_request() -> str:
     """The user's request for this turn (:func:`request_in` over the bound
-    session's messages)."""
+    session's messages): on a mailbox turn the human request the
+    delivery answers, not the delivery."""
     return request_in(session.messages)
 
 
 # Public name: the sandbox gate hands the turn's request to the reviewer.
 turn_request = _turn_request
 
-_MAILBOX_PREFIXES = ('[joined results]', '[result from')
+_MAILBOX_PREFIXES = conversation.MAILBOX_PREFIXES
 
 
 def _mailbox_turn() -> bool:
     """True when this turn was started by a mailbox delivery (a joined or
-    single sub-agent result): the request text is the sub-agents' output,
-    not a task from the user."""
-    return _turn_request().startswith(_MAILBOX_PREFIXES)
+    single sub-agent result): the message that opened the turn (the last
+    user message that is not a nudge) is the sub-agents' output, not a
+    task from the user."""
+    m = session.messages[_turn_start()] if session.messages else None
+    text = (m.get('content') or '').strip() if isinstance(m, dict) else ''
+    return conversation.is_mailbox(text)
 
 
 def controller_executed(tools_used: list, answer: str) -> bool:

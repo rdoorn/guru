@@ -17,7 +17,9 @@ entry, ``tool_call_id`` on the tool message), so the next turn rebuilds it
 as the ``tool_use`` / ``tool_result`` blocks the previous request carried
 and the prompt cache reads the prefix back (previous turns' thinking
 blocks are not resent; the API strips them itself). A round without ids
-(an Ollama history, an older transcript) is flattened to text.
+(an Ollama history, an older transcript) is flattened to text, and so is,
+with ``thinking`` on, a round that is the history's last assistant
+message: the API wants that one to start with a thinking block.
 
 Prompt caching (``cache = true`` in the adapter record, the default): the
 system prompt is sent as one text block and it and the last tool
@@ -54,7 +56,7 @@ CACHE_CONTROL = {'type': 'ephemeral'}
 
 # --- pure translation helpers (unit-tested) ----------------------------------
 
-def to_anthropic_messages(messages: list) -> tuple:
+def to_anthropic_messages(messages: list, thinking: bool = False) -> tuple:
     """Translate neutral messages to (system_str, anthropic_messages).
 
     All ``system`` messages are merged into the top-level system string.
@@ -62,14 +64,16 @@ def to_anthropic_messages(messages: list) -> tuple:
     is rebuilt as ``tool_use`` / ``tool_result`` blocks
     (:func:`native_round`); any other historical tool call or result is
     flattened to plain text, which keeps cross-provider history (e.g. a
-    chat started on Ollama) translatable without fabricated ids.
+    chat started on Ollama) translatable without fabricated ids. With
+    ``thinking`` the round that is the history's last assistant message
+    is flattened too (see :func:`native_round`).
     """
     system_parts: list = []
     out: list = []
     i = 0
     while i < len(messages):
         m = messages[i]
-        rebuilt = native_round(messages, i)
+        rebuilt = native_round(messages, i, thinking=thinking)
         if rebuilt is not None:
             native, i = rebuilt
             out.extend(native)
@@ -101,14 +105,20 @@ def to_anthropic_messages(messages: list) -> tuple:
     return "\n\n".join(system_parts), out
 
 
-def native_round(messages: list, i: int):
+def native_round(messages: list, i: int, thinking: bool = False):
     """The Anthropic-native messages for the tool round starting at
     ``messages[i]`` — an assistant message of a text block (when there is
     text) and one ``tool_use`` block per call, then one user message of
     ``tool_result`` blocks — with the index after the round; None unless
     ``messages[i]`` is an assistant dict whose ``tool_calls`` all carry an
     ``id`` and the tool messages right after it answer exactly those ids
-    (``tool_call_id``)."""
+    (``tool_call_id``). With ``thinking`` also None when no assistant
+    message follows the round: with extended thinking on, the API
+    requires the *last* assistant message to start with a thinking block
+    when it carries ``tool_use``, and previous turns' thinking blocks are
+    not kept — so that round (a turn that ended on a ``join``, resumed by
+    a mailbox delivery) is flattened to text instead; earlier rounds,
+    which the API accepts without their thinking, are rebuilt."""
     m = messages[i]
     if not isinstance(m, dict) or m.get('role') != 'assistant':
         return None
@@ -127,6 +137,8 @@ def native_round(messages: list, i: int):
         j += 1
     if [t['tool_call_id'] for t in results] != ids:
         return None
+    if thinking and not _assistant_follows(messages, j):
+        return None
     blocks: list = []
     text = m.get('content') or ''
     if text:
@@ -142,6 +154,13 @@ def native_round(messages: list, i: int):
             {'type': 'tool_result', 'tool_use_id': t['tool_call_id'],
              'content': t.get('content') or ''} for t in results]}]
     return native, j
+
+
+def _assistant_follows(messages: list, start: int) -> bool:
+    """Whether an assistant message sits at ``messages[start:]``."""
+    return any(
+        (m.get('role') if isinstance(m, dict) else getattr(m, 'role', ''))
+        == 'assistant' for m in messages[start:])
 
 
 def tool_defs(specs: list) -> list:
@@ -434,7 +453,8 @@ class AnthropicAdapter(Adapter):
         except Exception as e:
             ui.console.print(f"[red]Anthropic auth error: {e}[/red]")
             return
-        system, native = to_anthropic_messages(session.messages)
+        system, native = to_anthropic_messages(session.messages,
+                                               thinking=self.thinking)
         anth_tools = cached_tools(tool_defs(tools.active_specs()), self.cache)
         system_field = system_blocks(system, self.cache)
 

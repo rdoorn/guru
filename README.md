@@ -211,9 +211,12 @@ messages, tools, system, `cache_control` markers — as JSON to
 `<dir>/<utc-timestamp>-<adapter>-<n>.json` (`n` counts requests in the
 process, so a listing is the request sequence). The files hold the request
 body only; the API key is held by the SDK client and never appears in
-them. Diff two consecutive files of the same agent to see what moved in
-the cached prefix; the `calls` ledger stream has the matching
-`cache_read` / `cache_write` counts.
+them — but the body *is* the whole conversation: system prompt, every
+file the agent read, every gate diff and tool result. Treat the dump
+directory as sensitive and delete it after use. Diff two consecutive
+files of the same agent to see what moved in the cached prefix; the
+`calls` ledger stream has the matching `cache_read` / `cache_write`
+counts.
 
 ## Multi-agent
 
@@ -748,7 +751,15 @@ hold over the *whole task*, not per submit: guru keeps a per-task tally
 of the files deleted and lines removed by the submits it already
 applied, and a submit that would push the running total over a threshold
 is flagged with both numbers (`deletes 2 files now, 5 in this task (more
-than 3)`). The tally is cleared when the task ends.
+than 3)`). Once a task is over the removed-lines threshold, a later
+submit is flagged for it only when it removes at least one substantive
+(non-blank, non-comment) line itself, and a submit that deletes no file
+is never flagged for the task's earlier deletions. The tally is cleared
+when the task ends; for an agent that runs no task (the main agent in a
+hands-on session) the tally is the current user turn's, so a new turn
+starts from zero while the agent's working copy lives on. A file reduced
+to blank and comment lines only (a `# removed` left behind) counts as
+emptied.
 
 *Code health* (`guru/domain/health.py`, pure `ast`): for every Python
 function the diff changes or adds, the gate compares the copy's baseline
@@ -775,11 +786,17 @@ outside the copy — a symlink out of it included.
 with the commit `prepare_copy` made, so that commit must be out of the
 container's reach: the copy is mounted read-write, but its `.git` is
 mounted read-only on top of it (`-v <copy>/.git:/work/.git:ro`), and the
-baseline commit's sha is recorded in the copy's marker file at creation.
-`sandbox_diff`, `code_health` and `sandbox_submit` all verify
-`git rev-parse HEAD` against the recorded sha before reading anything; a
-copy whose baseline moved is refused (`Refused: sandbox copy baseline
-changed`) and discarded. Inside the container `HOME` and
+baseline commit's sha is kept in guru's memory next to the copy's path
+(the copy's marker file records it too, as documentation — nothing reads
+it back once the copy is made). `sandbox_diff`, `code_health` and
+`sandbox_submit` all verify `git rev-parse HEAD` against the kept sha
+before reading anything; a copy whose baseline moved is refused
+(`Refused: sandbox copy baseline changed`) and discarded, and so is one
+whose marker the worker removed or rewrote (`Refused: the sandbox copy's
+marker file was removed or changed`) — the directory is removed either
+way. The diff is read with `git diff --text`, so a `.gitattributes` the
+worker writes cannot turn it into `Binary files differ`. Inside the
+container `HOME` and
 `XDG_CACHE_HOME` point at the tmpfs `/tmp` (uid 1000 has no home and the
 root is read-only), so tool caches and tests that write under `HOME`
 work and nothing persists.
