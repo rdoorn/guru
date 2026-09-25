@@ -9,10 +9,29 @@ import pytest
 
 from guru import config, judges
 from guru.domain import ledger
-from guru.evals import grading, labels, rubric, runs
+from guru.evals import grading, labels, rubric, runner, runs
 from guru.evals.__main__ import main as cli_main
 from guru.evals.runs import CaseResult, Run
 from guru.repositories.jsonl_ledger import JsonlLedger
+
+
+def _sampled(*pairs) -> rubric.SampledGrade:
+    return rubric.SampledGrade(tuple(rubric.Grade(s, r) for s, r in pairs))
+
+
+class SequenceJudge:
+    """A :class:`rubric.Judge` replying with the next of ``replies`` per
+    call (an exception item is raised)."""
+
+    def __init__(self, replies, model: str = 'judge-model') -> None:
+        self.replies, self.model, self.prompts = list(replies), model, []
+
+    def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
 
 class FakeJudge:
@@ -168,14 +187,16 @@ class TestRegrade:
         assert [r.case for r in out.rows] == ['graded', 'empty',
                                               'from-transcript']
         graded = out.rows[0]
-        assert graded.grades['A|haiku'] == rubric.Grade(0, 'no code shown')
-        assert graded.grades['A|sonnet'] == rubric.Grade(
-            2, 'evidence shows it')
+        assert graded.grades['A|haiku'] == _sampled((0, 'no code shown'))
+        assert graded.grades['A|sonnet'] == _sampled((2, 'evidence shows it'))
         assert graded.hand == labels.HandLabel('graded', '*', 2, 'hand two')
         # The empty answer scores 0 without a call, on both judges.
         empty = out.rows[1]
-        assert empty.grades == {'A|haiku': rubric.Grade(0, 'empty answer'),
-                                'A|sonnet': rubric.Grade(0, 'empty answer')}
+        assert empty.grades == {'A|haiku': _sampled((0, 'empty answer')),
+                                'A|sonnet': _sampled((0, 'empty answer'))}
+        assert out.samples == 1
+        # The synthetic grade is not a judgement: two cases were graded.
+        assert out.stability == {'A|haiku': (2, 2), 'A|sonnet': (2, 2)}
         assert empty.hand is not None and empty.hand.score == 1
         assert out.rows[2].hand is None
         # Two graded cases with an answer x two judges = 4 calls.
@@ -235,6 +256,70 @@ class TestRegrade:
         assert out.rows[0].hand == labels.HandLabel('graded',
                                                     'otherrun00000', 0)
         assert out.agreement == {'A|j': (1, 2)}
+
+    def test_samples_median_note_and_stability(self, tmp_path,
+                                               monkeypatch) -> None:
+        """Three samples per case: the median is the recorded score (ties
+        to the lower value), the labels note lists every sample, the
+        agreement counts the median and stability the all-agree cases."""
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        run = _run(tmp_path)
+        # graded: 2,2,1 -> 2 (unstable); from-transcript: 1,1,1 -> 1.
+        judge = SequenceJudge([
+            '{"score": 2, "reason": "a"}', '{"score": 2, "reason": "b"}',
+            '{"score": 1, "reason": "c"}',
+            '{"score": 1, "reason": "d"}', '{"score": 1, "reason": "e"}',
+            '{"score": 1, "reason": "f"}'], model='j')
+        out = grading.regrade(run, tmp_path, [('A|j', judge)], HAND,
+                              samples=3)
+        assert out.samples == 3
+        assert len(judge.prompts) == 6           # 2 answered cases x 3
+        graded, empty, from_t = out.rows
+        g = graded.grades['A|j']
+        assert g is not None
+        assert g.scores == (2, 2, 1) and g.score == 2 and not g.stable
+        assert g.cell() == '2 (2,2,1)'
+        assert g.note == 'samples 2,2,1 -> median 2; 2: a; 2: b; 1: c'
+        e = empty.grades['A|j']
+        assert e is not None and e.scores == (0, 0, 0) and e.stable
+        f = from_t.grades['A|j']
+        assert f is not None and f.score == 1 and f.stable
+        # Median vs hand: graded 2 vs 2, empty 0 vs 1.
+        assert out.agreement == {'A|j': (1, 2)}
+        # Stability over the two cases the judge graded (the empty answer's
+        # synthetic zeros are not samples): from-transcript only.
+        assert out.stability == {'A|j': (1, 2)}
+        rows = JsonlLedger(out.ledger_dir).rows('labels')
+        by = {(r['target_id'], r['labeller']): (r['label'], r['note'])
+              for r in rows}
+        assert by[(f'{run.run_id}:graded', 'rubric:j')] == (
+            '2', 'samples 2,2,1 -> median 2; 2: a; 2: b; 1: c')
+        assert by[(f'{run.run_id}:from-transcript', 'rubric:j')] == (
+            '1', 'samples 1,1,1 -> median 1; 1: d; 1: e; 1: f')
+
+    def test_one_failed_sample_is_an_error_cell(self, tmp_path,
+                                                monkeypatch) -> None:
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        run = _run(tmp_path)
+        judge = SequenceJudge(['{"score": 2}', RuntimeError('blip'),
+                               '{"score": 2}', '{"score": 2}'], model='j')
+        out = grading.regrade(run, tmp_path, [('A|j', judge)], HAND,
+                              samples=2)
+        graded, _, from_t = out.rows
+        assert graded.grades['A|j'] is None
+        assert graded.errors['A|j'] == 'blip'
+        ft = from_t.grades['A|j']
+        assert ft is not None and ft.scores == (2, 2)
+        assert out.stability == {'A|j': (1, 1)}      # from-transcript only
+        assert out.agreement == {'A|j': (0, 1)}      # only empty compared
+        rows = JsonlLedger(out.ledger_dir).rows('labels')
+        assert (f'{run.run_id}:graded', 'rubric:j') not in {
+            (r['target_id'], r['labeller']) for r in rows}
+
+    def test_samples_below_one_rejected(self, tmp_path) -> None:
+        run = _run(tmp_path)
+        with pytest.raises(ValueError, match='samples'):
+            grading.regrade(run, tmp_path, [], [], samples=0)
 
 
 class TestShowText:
@@ -344,6 +429,68 @@ class TestCli:
             'labels')
         assert {r['labeller'] for r in rows_written} == {
             'rubric:haiku', 'rubric:sonnet', 'hand'}
+
+    def test_samples_cells_note_and_stability_line(self, tmp_path, capsys,
+                                                   monkeypatch) -> None:
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        run = _run(tmp_path)
+        replies = {
+            'haiku': ['{"score": 2, "reason": "a"}',
+                      '{"score": 1, "reason": "b"}',
+                      '{"score": 2, "reason": "c"}',      # graded -> 2
+                      '{"score": 2}', '{"score": 2}', '{"score": 2}'],
+            'sonnet': ['{"score": 1}', '{"score": 1}', '{"score": 1}',
+                       '{"score": 0}', '{"score": 2}', '{"score": 2}']}
+        monkeypatch.setattr(
+            grading, 'resolve_judges',
+            lambda specs, adapters=None: [
+                (s, SequenceJudge(replies[s.partition('|')[2]],
+                                  model=s.partition('|')[2]))
+                for s in specs])
+        labels_file = tmp_path / 'labels.toml'
+        labels_file.write_text(
+            '[[label]]\ncase = "graded"\nscore = 2\n'
+            '[[label]]\ncase = "from-transcript"\nscore = 2\n')
+        code = cli_main(['grade', run.run_id, '--rubric', 'A|haiku',
+                         '--rubric', 'A|sonnet', '--samples', '3',
+                         '--out', str(tmp_path), '--labels',
+                         str(labels_file)])
+        assert code == 0
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        assert lines[1].split() == ['case', 'haiku', 'sonnet', 'hand']
+        cells = {ln.split()[0]: ln.split()[1:] for ln in lines[3:6]}
+        assert cells['graded'] == ['2', '(2,1,2)', '1', '(1,1,1)', '2']
+        assert cells['empty'] == ['0', '(0,0,0)', '0', '(0,0,0)', '-']
+        assert cells['from-transcript'] == ['2', '(2,2,2)', '2', '(0,2,2)',
+                                            '2']
+        assert 'cells: median of 3 samples' in out
+        # graded (2,1,2) unstable, from-transcript (2,2,2) stable; the
+        # empty answer's synthetic zeros are outside the share.
+        assert ('agreement with hand: A|haiku 2/2 (100%) · stability '
+                '1/2 (50%)') in out
+        assert ('agreement with hand: A|sonnet 1/2 (50%) · stability '
+                '1/2 (50%)') in out
+        note = [r['note'] for r in JsonlLedger(
+            tmp_path / run.run_id / 'ledger').rows('labels')
+            if r['labeller'] == 'rubric:haiku'
+            and r['target_id'].endswith(':graded')]
+        assert note == ['samples 2,1,2 -> median 2; 2: a; 1: b; 2: c']
+
+    def test_one_sample_prints_no_stability(self, tmp_path, capsys,
+                                            monkeypatch) -> None:
+        run = self._setup(tmp_path, monkeypatch)
+        cli_main(['grade', run.run_id, '--rubric', 'A|haiku', '--out',
+                  str(tmp_path), '--labels', str(self.labels_file)])
+        out = capsys.readouterr().out
+        assert 'stability' not in out and 'cells:' not in out
+
+    def test_samples_below_one_is_usage_error(self, tmp_path, capsys,
+                                              monkeypatch) -> None:
+        run = self._setup(tmp_path, monkeypatch)
+        assert cli_main(['grade', run.run_id, '--rubric', 'A|haiku',
+                         '--samples', '0', '--out', str(tmp_path)]) == 2
+        assert '--samples must be at least 1' in capsys.readouterr().err
 
     def test_same_model_on_two_adapters_keeps_full_spec_header(
             self, tmp_path, capsys, monkeypatch) -> None:
@@ -459,3 +606,27 @@ class TestCli:
         assert cli_main(['grade', 'norubric0000', '--rubric', 'A|m',
                          '--out', str(tmp_path)]) == 0
         assert 'no case carries a rubric' in capsys.readouterr().out
+
+
+class TestStabilityDenominator:
+    """Synthetic empty-answer grades are not judgements: they leave the
+    stability share (review M-4)."""
+
+    def test_empty_answer_grade_is_recognised(self) -> None:
+        g = runner.empty_answer_grade(3)
+        assert runner.is_empty_answer_grade(g)
+        assert g.scores == (0, 0, 0) and g.stable
+        assert not runner.is_empty_answer_grade(None)
+        assert not runner.is_empty_answer_grade(_sampled((0, 'no code')))
+        # a judge's zeros with the same words are still a judgement
+        judged = rubric.SampledGrade((rubric.Grade(0, 'empty answer'),
+                                      rubric.Grade(1, 'thin')))
+        assert not runner.is_empty_answer_grade(judged)
+
+    def test_stability_excludes_synthetic_grades(self) -> None:
+        stable = _sampled((2, 'a'), (2, 'b'))
+        unstable = _sampled((2, 'a'), (1, 'b'))
+        assert grading.stability([stable, unstable, None]) == (1, 2)
+        assert grading.stability(
+            [stable, runner.empty_answer_grade(2), None]) == (1, 1)
+        assert grading.stability([runner.empty_answer_grade(2)]) == (0, 0)

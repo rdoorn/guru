@@ -35,7 +35,15 @@ fa5c42d05059 against hand 2/2/2: the first instructions 0/3 on both
 judges; this text Haiku 2/3, Sonnet 3/3. A stricter variant that added
 "before docking a point, find the rubric point the answer misses" scored
 1/3 on both — it sent the judges hunting for missing identifiers — and
-was dropped. One sample per judge: treat single grades as noisy.
+was dropped. Single grades are noisy (Sonnet flipped two cases with no
+relevant wording change), so :func:`grade_samples` asks the judge N
+times and :class:`SampledGrade` reduces the samples to one recorded
+score: the MEDIAN, ties (an even N) going to the lower middle value
+(:func:`median_score`). Its ``note`` lists every sample's score and
+reason; ``stable`` says whether all samples agreed. Any sample that
+fails (provider error, unparsable reply) fails the whole grade — a
+median over fewer samples than asked for would be a different
+statistic recorded under the same name.
 
 Which model grades: an ``Adapter|model`` spec (:func:`judge_from_spec`,
 resolved through the adapter registry the runner installs with
@@ -50,7 +58,7 @@ import json
 import os
 import secrets
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Sequence
 
 from guru.judges import llm
 
@@ -102,6 +110,67 @@ class Grade:
     one-line ``reason``."""
     score: int
     reason: str
+
+
+def median_score(scores: Sequence[int]) -> int:
+    """The median of ``scores``; for an even count the LOWER of the two
+    middle values (``[1, 2]`` -> 1). ``ValueError`` for no scores."""
+    if not scores:
+        raise ValueError('median of no scores')
+    ordered = sorted(scores)
+    return int(ordered[(len(ordered) - 1) // 2])
+
+
+@dataclass(frozen=True)
+class SampledGrade:
+    """N independent :class:`Grade` samples of one answer by one judge,
+    reduced to the recorded ``score`` (:func:`median_score`) and a
+    ``note`` for the labels row; ``reason`` is the reason of the median
+    sample (the first sample carrying the median score). One sample is
+    the plain grade: ``score``/``reason``/``note`` are its own."""
+    samples: tuple[Grade, ...]
+
+    def __post_init__(self) -> None:
+        if not self.samples:
+            raise ValueError('a SampledGrade needs at least one sample')
+
+    @property
+    def scores(self) -> tuple[int, ...]:
+        """The sample scores in call order."""
+        return tuple(g.score for g in self.samples)
+
+    @property
+    def score(self) -> int:
+        """The recorded score: the median, ties to the lower value."""
+        return median_score(self.scores)
+
+    @property
+    def reason(self) -> str:
+        """The reason of the first sample that scored the median."""
+        med = self.score
+        return next(g.reason for g in self.samples if g.score == med)
+
+    @property
+    def stable(self) -> bool:
+        """True when every sample gave the same score."""
+        return len(set(self.scores)) == 1
+
+    @property
+    def note(self) -> str:
+        """The labels-row note: the single reason for one sample; for
+        more, ``samples 2,2,1 -> median 2; 2: r1; 2: r2; 1: r3``."""
+        if len(self.samples) == 1:
+            return self.samples[0].reason
+        head = (f'samples {",".join(str(s) for s in self.scores)} -> '
+                f'median {self.score}')
+        return '; '.join([head, *(f'{g.score}: {g.reason or "(no reason)"}'
+                                  for g in self.samples)])
+
+    def cell(self) -> str:
+        """The table cell: ``2`` for one sample, ``2 (2,2,1)`` for more."""
+        if len(self.samples) == 1:
+            return str(self.score)
+        return f'{self.score} ({",".join(str(s) for s in self.scores)})'
 
 
 class Judge(Protocol):
@@ -267,3 +336,16 @@ def grade(prompt: str, rubric_text: str, answer: str, judge: Judge,
     :class:`GradeError`."""
     return parse_grade(judge.complete(grading_prompt(
         prompt, rubric_text, answer, evidence_text=evidence_text)))
+
+
+def grade_samples(prompt: str, rubric_text: str, answer: str, judge: Judge,
+                  evidence_text: str = '', samples: int = 1) -> SampledGrade:
+    """``samples`` independent :func:`grade` calls (each with its own
+    nonce) as one :class:`SampledGrade`; ``ValueError`` for ``samples <
+    1``. The first failing sample propagates (see the module docstring):
+    the caller gets a whole grade or none."""
+    if samples < 1:
+        raise ValueError('samples must be at least 1')
+    return SampledGrade(tuple(
+        grade(prompt, rubric_text, answer, judge, evidence_text=evidence_text)
+        for _ in range(samples)))

@@ -255,6 +255,20 @@ class TestRubricFields:
         r.rubric = 'Fake|judge'
         assert runs.load(runs.save(r, tmp_path)) == r
 
+    def test_samples_round_trip_and_old_files_default(self, tmp_path):
+        r = run(cases=[_graded('a', True, 2)])
+        assert r.rubric_samples == 1 and r.cases[0].rubric_samples == []
+        r.rubric_samples = 3
+        r.cases[0].rubric_samples = [2, 1, 2]
+        path = runs.save(r, tmp_path)
+        assert runs.load(path) == r
+        data = json.loads(path.read_text(encoding='utf-8'))
+        del data['rubric_samples'], data['cases'][0]['rubric_samples']
+        path.write_text(json.dumps(data), encoding='utf-8')
+        loaded = runs.load(path)
+        assert loaded.rubric_samples == 1
+        assert loaded.cases[0].rubric_samples == []
+
     def test_rubric_total_over_graded_cases_only(self) -> None:
         assert run().rubric_total() is None
         r = run(cases=[_graded('a', True, 2), _graded('b', False, 1),

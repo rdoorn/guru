@@ -225,3 +225,104 @@ class TestShowBaseline:
         assert colima.show_baseline(dest, 'pkg/big.py', root) is None
         assert colima.show_baseline(dest, 'pkg/__init__.py', root) == \
             'X = 1\n'
+
+
+# --- review fixes: --text, the kept sha, marker-less removal ---------------
+
+class TestDiffText:
+    """``git diff --text``: a ``.gitattributes`` the sandbox writes cannot
+    turn the gate's diff into ``Binary files differ`` (review M-5)."""
+
+    def test_argv_carries_text(self, allowed, monkeypatch) -> None:
+        root = _project(allowed)
+        copy = colima.prepare_copy(root, allowed / 'copy', [])
+        seen: list = []
+        real = colima._git
+
+        def spy(args, repo, cwd, out_kb=colima.RUN_OUT_KB):
+            seen.append(list(args))
+            return real(args, repo, cwd, out_kb)
+        monkeypatch.setattr(colima, '_git', spy)
+        colima.diff(copy, project=root)
+        assert ['diff', 'HEAD', '--no-color', '--no-ext-diff', '--text'] \
+            in seen
+        assert '--text' in colima.DIFF_ARGS
+
+    def test_gitattributes_cannot_hide_the_change(self, allowed) -> None:
+        root = _project(allowed)
+        copy = colima.prepare_copy(root, allowed / 'copy', [])
+        (copy / '.gitattributes').write_text('* -diff\n*.py binary\n')
+        (copy / 'pkg' / '__init__.py').write_text('import os\nX = 2\n')
+        text = colima.diff(copy, project=root)
+        assert 'Binary files' not in text
+        assert '+import os' in text and '+X = 2' in text
+        assert '+* -diff' in text          # the attributes file itself
+
+
+class TestKeptSha:
+    """``check_baseline``/``diff``/``show_baseline`` compare against the
+    sha the caller kept when given one; the marker is documentation and
+    its loss does not soften the check (review I-4)."""
+
+    def test_expected_sha_replaces_the_marker(self, allowed) -> None:
+        root = _project(allowed)
+        copy = colima.prepare_copy(root, allowed / 'copy', [])
+        sha = colima.baseline_sha(copy)
+        (copy / colima.COPY_MARKER).unlink()
+        assert colima.check_baseline(copy, root, expected=sha) == sha
+        assert colima.diff(copy, project=root, expected=sha) == ''
+        assert colima.show_baseline(copy, 'pkg/__init__.py', root,
+                                    expected=sha) == 'X = 1\n'
+        # without the sha nothing is read (as before)
+        with pytest.raises(RuntimeError, match='records no baseline sha'):
+            colima.diff(copy, project=root)
+        # a wrong sha is a changed baseline, whatever the marker says
+        (copy / colima.COPY_MARKER).write_text(f'x\nbaseline: {sha}\n')
+        with pytest.raises(colima.BaselineChanged):
+            colima.check_baseline(copy, root, expected='d' * 40)
+        with pytest.raises(colima.BaselineChanged):
+            colima.diff(copy, project=root, expected='d' * 40)
+        with pytest.raises(colima.BaselineChanged):
+            colima.show_baseline(copy, 'pkg/__init__.py', root,
+                                 expected='d' * 40)
+
+
+class TestRemoveMarkerless:
+    """``remove_copy`` still refuses an arbitrary marker-less directory,
+    but deletes a ``task-*`` copy right under the work root it is told
+    about even when the marker is gone (review I-4)."""
+
+    def test_task_copy_under_the_work_root(self, tmp_path) -> None:
+        work = tmp_path / 'work'
+        copy = work / f'{colima.TASK_COPY_PREFIX}main-abc123'
+        copy.mkdir(parents=True)
+        (copy / 'f.py').write_text('x')
+        with pytest.raises(ValueError, match='refusing to delete'):
+            colima.remove_copy(copy)                     # no root given
+        assert copy.exists()
+        colima.remove_copy(copy, work_root=work)
+        assert not copy.exists()
+
+    def test_other_directories_still_refused(self, tmp_path) -> None:
+        work = tmp_path / 'work'
+        for path in (work / 'build-old',                  # wrong prefix
+                     work / 'nested' / 'task-x-1',        # not right under
+                     tmp_path / 'task-x-2'):              # other parent
+            path.mkdir(parents=True)
+            with pytest.raises(ValueError):
+                colima.remove_copy(path, work_root=work)
+            assert path.exists()
+        # a symlink named like a copy is not followed
+        real = tmp_path / 'real'
+        real.mkdir()
+        link = work / 'task-link-1'
+        link.symlink_to(real)
+        with pytest.raises(ValueError):
+            colima.remove_copy(link, work_root=work)
+        assert real.exists()
+        # a marked directory anywhere is removed as before
+        marked = tmp_path / 'anything'
+        marked.mkdir()
+        (marked / colima.COPY_MARKER).write_text('copy\n')
+        colima.remove_copy(marked)
+        assert not marked.exists()

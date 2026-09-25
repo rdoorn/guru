@@ -7,8 +7,11 @@ prompt from the transcript's first user message (the case file when the
 transcript is gone), and the evidence block from the stored ``observed``
 dict and cost — the same packet :func:`guru.evals.runner.grade_case`
 sends. Each judge (``Adapter|model`` specs, resolved through the adapter
-registry like the runner's judge) grades every case; the hand grade comes
-from ``evals/rubric-labels.toml`` (:mod:`guru.evals.labels`).
+registry like the runner's judge) grades every case ``samples`` times
+(:func:`guru.evals.rubric.grade_samples`; the recorded score is the
+median, ties to the lower value, and a case is "stable" when all its
+samples agree); the hand grade comes from ``evals/rubric-labels.toml``
+(:mod:`guru.evals.labels`).
 
 Hand grading: :func:`show_text` renders what a judge sees for one case
 (prompt, rubric, evidence, answer) plus a ``[[label]]`` stub for
@@ -18,7 +21,8 @@ the hand-label set without a model call.
 
 Everything graded is recorded in the run's own ledger directory
 (``<out_root>/<run_id>/ledger``): one ``labels`` row per judge grade
-(``target_id = <run_id>:<case>``, labeller ``rubric:<model>``), one per
+(``target_id = <run_id>:<case>``, labeller ``rubric:<model>``, the label
+the median and the note every sample's score and reason), one per
 hand grade that applied (labeller ``hand``), and the judges' own ``calls``
 rows, so the ledger report can score judges against the hand labels
 later. The ledger is pointed at that directory for the duration and
@@ -34,7 +38,7 @@ from typing import Iterator, Optional, Sequence
 from guru import bench, config, judges, log
 from guru.adapters.base import Adapter
 from guru.domain import ledger
-from guru.evals import cases, labels, rubric, runs
+from guru.evals import cases, labels, rubric, runner, runs
 from guru.evals.labels import HandLabel
 from guru.evals.runs import CaseResult, Run
 from guru.repositories.adapters import registry_from
@@ -46,10 +50,12 @@ LEDGER_DIR = 'ledger'          # under <out_root>/<run_id>/
 
 @dataclass
 class GradeRow:
-    """One rubric case of the run: per judge spec its grade (None when the
-    judge failed; ``errors`` says why) and the hand grade, if any."""
+    """One rubric case of the run: per judge spec its sampled grade (None
+    when the judge failed; ``errors`` says why) and the hand grade, if
+    any."""
     case: str
-    grades: dict[str, Optional[rubric.Grade]] = field(default_factory=dict)
+    grades: dict[str, Optional[rubric.SampledGrade]] = field(
+        default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     hand: Optional[HandLabel] = None
 
@@ -57,13 +63,18 @@ class GradeRow:
 @dataclass
 class Regrade:
     """What :func:`regrade` produced: the rows, per spec ``(agreed,
-    compared)`` against the hand grades, where the labels went and what
-    the judges' calls cost (None when unknown)."""
+    compared)`` of the median against the hand grades and ``(stable,
+    graded)`` — the cases whose samples all agreed over the cases the
+    judge actually graded (synthetic empty-answer grades excluded) —
+    where the labels went, how many samples were asked for and what the
+    judges' calls cost (None when unknown)."""
     run_id: str
     specs: list[str]
     rows: list[GradeRow]
     ledger_dir: Path
     agreement: dict[str, tuple[int, int]]
+    stability: dict[str, tuple[int, int]] = field(default_factory=dict)
+    samples: int = 1
     cost_usd: Optional[float] = None
 
 
@@ -194,33 +205,50 @@ def show_text(run: Run, res: CaseResult, answer: str, prompt: str,
 
 
 def _grade_one(res: CaseResult, answer: str, prompt: str,
-               judge: rubric.Judge) -> tuple[Optional[rubric.Grade], str]:
-    """One judge's grade of a stored case, or ``(None, error)``; an empty
-    answer scores 0 without a call, as the runner does."""
+               judge: rubric.Judge, samples: int = 1
+               ) -> tuple[Optional[rubric.SampledGrade], str]:
+    """One judge's ``samples`` grades of a stored case, or ``(None,
+    error)`` when any sample failed; an empty answer scores 0 without a
+    call, as the runner does."""
     if not answer:
-        return rubric.Grade(0, 'empty answer'), ''
+        return runner.empty_answer_grade(samples), ''
     try:
-        return rubric.grade(
+        return rubric.grade_samples(
             prompt, res.rubric, answer, judge,
-            evidence_text=rubric.evidence(res.observed, res.cost_usd)), ''
+            evidence_text=rubric.evidence(res.observed, res.cost_usd),
+            samples=samples), ''
     except Exception as e:                           # noqa: BLE001
         log.warning('evals grade: %s on %s failed: %s', judge.model,
                     res.case, e)
         return None, str(e) or type(e).__name__
 
 
-def _score(grade: Optional[rubric.Grade]) -> Optional[int]:
+def _score(grade: Optional[rubric.SampledGrade]) -> Optional[int]:
     return None if grade is None else grade.score
+
+
+def stability(grades: Sequence[Optional[rubric.SampledGrade]]
+              ) -> tuple[int, int]:
+    """``(stable, graded)``: how many of the grades a judge produced have
+    all their samples agreeing, over how many it produced. A synthetic
+    empty-answer grade (:func:`runner.is_empty_answer_grade`: N zeros
+    without a call) is not a judgement and counts in neither number."""
+    graded = [g for g in grades
+              if g is not None and not runner.is_empty_answer_grade(g)]
+    return sum(1 for g in graded if g.stable), len(graded)
 
 
 def regrade(run: Run, out_root: Path,
             judge_list: Sequence[tuple[str, rubric.Judge]],
-            hand: list[HandLabel], cases_dir: Optional[Path] = None
-            ) -> Regrade:
-    """Grade every rubric case of ``run`` with each judge and record the
-    grades (and the applicable hand grades) as ``labels`` rows in
-    ``out_root/<run_id>/ledger``; see the module docstring. Never raises
-    for a failing judge (the row's ``errors`` says why)."""
+            hand: list[HandLabel], cases_dir: Optional[Path] = None,
+            samples: int = 1) -> Regrade:
+    """Grade every rubric case of ``run`` with each judge ``samples``
+    times and record the grades (median; and the applicable hand grades)
+    as ``labels`` rows in ``out_root/<run_id>/ledger``; see the module
+    docstring. Never raises for a failing judge (the row's ``errors``
+    says why); ``ValueError`` for ``samples < 1``."""
+    if samples < 1:
+        raise ValueError('samples must be at least 1')
     ledger_dir = Path(out_root) / run.run_id / LEDGER_DIR
     repo = JsonlLedger(ledger_dir)
     ledger_dir.mkdir(parents=True, exist_ok=True)
@@ -235,11 +263,12 @@ def regrade(run: Run, out_root: Path,
             target = f'{run.run_id}:{res.case}'
             answer, prompt = answer_and_prompt(res, cases_dir)
             for spec, judge in judge_list:
-                grade, error = _grade_one(res, answer, prompt, judge)
+                grade, error = _grade_one(res, answer, prompt, judge,
+                                          samples)
                 row.grades[spec] = grade
                 if grade is not None:
                     ledger.record_label(target, rubric.labeller(judge),
-                                        str(grade.score), note=grade.reason)
+                                        str(grade.score), note=grade.note)
                 else:
                     row.errors[spec] = error
             if row.hand is not None:
@@ -252,9 +281,11 @@ def regrade(run: Run, out_root: Path,
             (_score(r.grades.get(spec)),
              None if r.hand is None else r.hand.score) for r in rows])
         for spec, _ in judge_list}
+    stable = {spec: stability([r.grades.get(spec) for r in rows])
+              for spec, _ in judge_list}
     calls = repo.rows('calls')[calls_before:]
     cost = (None if not calls or any(c.get('cost_usd') is None
                                      for c in calls)
             else float(sum(c['cost_usd'] for c in calls)))
     return Regrade(run.run_id, [s for s, _ in judge_list], rows, ledger_dir,
-                   agreement, cost)
+                   agreement, stable, samples, cost)

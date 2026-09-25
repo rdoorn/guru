@@ -32,8 +32,11 @@ that has an ``[expect.rubric]`` with :mod:`guru.evals.rubric` after its
 deterministic checks (:func:`grade_case`): the grade lands on the result
 (``rubric_score``, ``rubric_reason``), in the run file and as a ``labels``
 row of the run's ledger (``target_id = <run_id>:<case>``, labeller
-``rubric:<model>``). A grade never fails the case by itself; ``rubric_min``
-does (a score below it, or no grade, adds a failing ``rubric_min`` check).
+``rubric:<model>``). ``rubric_samples=N`` asks the judge N times per case
+and records the median (ties to the lower value; every sample on
+``rubric_samples`` of the result). A grade never fails the case by itself;
+``rubric_min`` does (a score below it, or no grade, adds a failing
+``rubric_min`` check).
 The grading call's own cost goes to the run's ledger, not to the case's
 ``cost_usd``. :func:`default_rubric_spec` names the routing file's
 cheapest rung for the CLI's default.
@@ -359,8 +362,12 @@ def _fixture_env(repo: Path) -> dict:
     env['PYTHONDONTWRITEBYTECODE'] = '1'
     # A fixture that is guru itself (the dogfood case) runs this runner's
     # own tests, which empty the stable sandbox workdir: give them their
-    # own temp dir and sandbox root inside the copy (removed with it).
-    scratch = Path(repo) / '.guru-eval-tmp'
+    # own temp dir and sandbox root NEXT TO the copy (inside the case's
+    # workdir, removed with it) — not inside the copy, which is a git
+    # repository: tests that build a "not a repo" directory under TMPDIR
+    # would otherwise find themselves inside one (loop-2 dogfood run
+    # fe9e21c94f43 failed two of guru's own tests that way).
+    scratch = Path(repo).parent / '.guru-eval-tmp'
     scratch.mkdir(exist_ok=True)
     env['TMPDIR'] = str(scratch)
     env[SANDBOX_ROOT_ENV] = str(scratch)
@@ -783,52 +790,83 @@ def default_rubric_spec(routing: RoutingSettings) -> str:
 
 
 def _record_grade(repo: JsonlLedger, target_id: str, labeller: str,
-                  grade: rubric.Grade) -> None:
+                  grade: rubric.SampledGrade) -> None:
     """One ``labels`` row for a grade in the run's ledger (the ledger is
-    enabled and pointed at ``repo`` for the write, then restored)."""
+    enabled and pointed at ``repo`` for the write, then restored); the
+    label is the median score, the note every sample's score and
+    reason."""
     prev_repo, prev_enabled = ledger.repository(), config.LEDGER_ENABLED
     ledger.set_repository(repo)
     config.LEDGER_ENABLED = True
     try:
         ledger.record_label(target_id, labeller, str(grade.score),
-                            note=grade.reason)
+                            note=grade.note)
         ledger.flush()
     finally:
         ledger.set_repository(prev_repo)
         config.LEDGER_ENABLED = prev_enabled
 
 
+EMPTY_ANSWER_REASON = 'empty answer'
+
+
+def empty_answer_grade(samples: int = 1) -> rubric.SampledGrade:
+    """The grade of an empty answer: 0 without a judge call, one
+    ``Grade(0, EMPTY_ANSWER_REASON)`` per sample asked for (so the cell
+    reads like a graded case; :func:`is_empty_answer_grade` tells it
+    apart, and the stability share leaves it out — nothing was
+    sampled)."""
+    return rubric.SampledGrade(
+        tuple(rubric.Grade(0, EMPTY_ANSWER_REASON)
+              for _ in range(max(1, samples))))
+
+
+def is_empty_answer_grade(grade: Optional[rubric.SampledGrade]) -> bool:
+    """Whether ``grade`` is the synthetic :func:`empty_answer_grade`
+    (every sample a 0 with ``EMPTY_ANSWER_REASON``), not a judge's."""
+    return grade is not None and all(
+        g.score == 0 and g.reason == EMPTY_ANSWER_REASON
+        for g in grade.samples)
+
+
 def grade_case(case: Case, res: CaseResult, judge: rubric.Judge,
                repo: JsonlLedger, target_id: str,
-               rubric_min: Optional[int] = None) -> None:
+               rubric_min: Optional[int] = None, samples: int = 1) -> None:
     """Grade ``res`` against the case's rubric and record it; never raises.
 
     A case without a rubric is left alone. An empty answer scores 0
-    without asking the judge. The grade goes to ``res.rubric_score`` /
-    ``res.rubric_reason`` and to a ``labels`` row in ``repo`` (target
-    ``target_id``, labeller ``rubric:<model>``); a provider error or an
-    unparsable reply leaves the score None with ``error: ...`` as the
-    reason (logged, no label). The grade does not touch ``res.passed``
-    unless ``rubric_min`` is set: then a score below it — or no grade —
-    appends a failing ``rubric_min`` check and fails the case, and a
-    sufficient one appends a passing check.
+    without asking the judge. The judge is asked ``samples`` times
+    (:func:`rubric.grade_samples`); the recorded score is the median
+    (ties to the lower value), ``res.rubric_samples`` keeps every sample
+    score when there was more than one. The grade goes to
+    ``res.rubric_score`` / ``res.rubric_reason`` and to a ``labels`` row
+    in ``repo`` (target ``target_id``, labeller ``rubric:<model>``, the
+    note listing all samples); a provider error or an unparsable reply on
+    any sample leaves the score None with ``error: ...`` as the reason
+    (logged, no label). The grade does not touch ``res.passed`` unless
+    ``rubric_min`` is set: then a score below it — or no grade — appends
+    a failing ``rubric_min`` check and fails the case, and a sufficient
+    one appends a passing check.
     """
     if not case.expect.rubric:
         return
     answer = str(res.observed.get('answer') or '')
-    grade: Optional[rubric.Grade] = None
+    grade: Optional[rubric.SampledGrade] = None
     try:
         if not answer.strip():
-            grade = rubric.Grade(0, 'empty answer')
+            grade = empty_answer_grade(samples)
         else:
-            grade = rubric.grade(
+            grade = rubric.grade_samples(
                 case.prompt, case.expect.rubric, answer, judge,
-                evidence_text=rubric.evidence(res.observed, res.cost_usd))
+                evidence_text=rubric.evidence(res.observed, res.cost_usd),
+                samples=samples)
     except Exception as e:                           # noqa: BLE001
         res.rubric_reason = f'error: {e}'
         log.warning('evals: rubric grading of %s failed: %s', case.name, e)
     if grade is not None:
-        res.rubric_score, res.rubric_reason = grade.score, grade.reason
+        res.rubric_score, res.rubric_reason = grade.score, grade.note
+        res.rubric_samples = (list(grade.scores) if len(grade.samples) > 1
+                              else [])
         _record_grade(repo, target_id, rubric.labeller(judge), grade)
     if rubric_min is None:
         return
@@ -921,7 +959,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               routing_name: str = '', allow_spend: bool = False,
               decisions: Optional[DecisionsSettings] = None,
               rubric_spec: str = '',
-              rubric_min: Optional[int] = None) -> Run:
+              rubric_min: Optional[int] = None,
+              rubric_samples: int = 1) -> Run:
     """Run every case, save the run file and append the trajectory row.
 
     Synchronous; see :func:`run_case` for the loop and concurrency rules.
@@ -941,9 +980,13 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     cleared afterwards. ``rubric_spec`` (``Adapter|model``, resolved
     through that registry; ``ValueError`` for an unknown adapter) grades
     every rubric case with :func:`grade_case` before ``on_result`` sees
-    it, ``rubric_min`` making a low grade fail the case; the spec lands on
-    ``Run.rubric``.
+    it, ``rubric_min`` making a low grade fail the case, ``rubric_samples``
+    (``ValueError`` below 1) asking the judge that many times per case
+    and recording the median; the spec and the count land on
+    ``Run.rubric`` / ``Run.rubric_samples``.
     """
+    if rubric_samples < 1:
+        raise ValueError('rubric_samples must be at least 1')
     _assert_no_running_loop('run_suite')
     skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
     out_root = Path(out_root)
@@ -980,7 +1023,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
                 if judge is not None:
                     grade_case(case, res, judge,
                                JsonlLedger(out_dir / 'ledger'),
-                               f'{run_id}:{case.name}', rubric_min)
+                               f'{run_id}:{case.name}', rubric_min,
+                               samples=rubric_samples)
                 results.append(res)
                 if on_result is not None:
                     on_result(res)
@@ -991,7 +1035,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               num_ctx=base_state.num_ctx or base_state.num_ctx_override,
               routing=routing_name if routing is not None else '',
               controller=bool(routing is not None and routing.controller),
-              judges=judge_names, rubric=rubric_spec if judge else '')
+              judges=judge_names, rubric=rubric_spec if judge else '',
+              rubric_samples=rubric_samples if judge else 1)
     runs.save(run, out_root)
     runs.append_trajectory(run, Path(trajectory_dir), note=note)
     return run

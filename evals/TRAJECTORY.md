@@ -14,8 +14,8 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-23T20:21:20+00:00 | c7473cbe8524 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers+controller | 8/9 | 38.9 | $1.21 | config 1 rerun: controller knows cwd, complexity guidance |
 | 2026-09-23T20:28:43+00:00 | ad9f5e9caece | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers+controller | 9/9 | 29.1 | $0.77 | config 3: haiku controller, claude tiers |
 | 2026-09-24T07:57:12+00:00 | 807a96827d02 | SBP Litellm\|aws/claude-5-sonnet@125k | 2/3 | 352.8 | $8.20 | config 0 real cases: plain sonnet |
-| 2026-09-24T08:07:59+00:00 | 475fe1576de0 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers-judges+controller | 3/3 | 184.4 | $4.71 | sonnet controller + tiers + judges, real cases |
 | 2026-09-24T08:07:47+00:00 | 65a0ce16e651 | SBP Litellm\|aws/claude-5-5-opus@125k | 3/3 | 196.2 | $12.38 | config 0-opus real cases: plain opus 5.5 |
+| 2026-09-24T08:07:59+00:00 | 475fe1576de0 | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers-judges+controller | 3/3 | 184.4 | $4.71 | sonnet controller + tiers + judges, real cases |
 | 2026-09-24T08:15:16+00:00 | 125934108305 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 166.7 | $2.78 | config 3+judges real cases: haiku controller |
 | 2026-09-24T08:18:00+00:00 | 974716735cf6 | SBP Litellm\|aws/claude-5-5-opus@125k+routed:claude-tiers-judges+controller | 2/3 | 131.5 | $3.77 | opus controller + tiers + judges, real cases |
 | 2026-09-24T08:55:47+00:00 | 660eb67121bb | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/3 | 96.9 | $1.95 | haiku controller v2 (examples+tie-break), repeat 1 |
@@ -23,8 +23,8 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-24T09:07:01+00:00 | 39a114b8a034 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 115.5 | $2.90 | haiku controller v2 (examples+tie-break), repeat 3 |
 | 2026-09-24T17:59:40+00:00 | 69bc45821a7d | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 11/13 | 37.6 | $2.53 | audited tools v1: haiku controller, fast+edit+real cases |
 | 2026-09-24T20:48:23+00:00 | 6f6fb88ab45b | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 2/3 | 42.0 | $0.70 | sandbox S4: three sandbox cases, first run (case expectations wrong) |
-| 2026-09-24T20:53:35+00:00 | 09051dcb6083 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 56.7 | $0.29 | sandbox-unrelated-change with corrected expectations |
 | 2026-09-24T20:51:29+00:00 | f2a4787b9f81 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 12/14 | 33.2 | $2.64 | S3/S4 comparison run: fast+edit+real vs 69bc45821a7d |
+| 2026-09-24T20:53:35+00:00 | 09051dcb6083 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 56.7 | $0.29 | sandbox-unrelated-change with corrected expectations |
 | 2026-09-24T21:01:52+00:00 | d0c352bbb675 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 43.4 | $0.80 | sandbox cases with SANDBOX_RULE in the prompt |
 | 2026-09-25T06:08:07+00:00 | e2cc0483103a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 36.3 | $0.54 | deletions through the gate; unrelated-change re-planted as a bait note |
 | 2026-09-25T07:13:02+00:00 | 16ff3cc08cde | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 16.2 | $0.22 | top-10 gate: fast x3 with caching + rubric (repeat 1/3; rubric errored, max_tokens) |
@@ -43,7 +43,10 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-25T10:50:18+00:00 | 94437405450e | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 15.8 | $0.27 | loop 2: fast x3 (1/3) |
 | 2026-09-25T10:53:26+00:00 | c33bed3bb374 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 14.4 | $0.20 | loop 2: fast x3 (2/3) |
 | 2026-09-25T10:55:55+00:00 | 30e56fd72375 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 7/8 | 18.2 | $0.29 | loop 2: fast x3 (3/3), one whole-file read miss |
+| 2026-09-25T10:56:39+00:00 | 1279f9e29da6 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 18.5 | $0.05 |  |
 | 2026-09-25T10:59:07+00:00 | fe9e21c94f43 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/4 | 145.7 | $1.05 | loop 2: real + dogfood; dogfood applied, fixture check wrong (TMPDIR inside repo) |
+| 2026-09-25T11:00:54+00:00 | b7adcd223af0 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 20.1 | $0.03 |  |
+| 2026-09-25T11:01:30+00:00 | 8274b6029b7b | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers-judges+controller | 0/1 | 15.1 | $0.03 |  |
 | 2026-09-25T11:12:06+00:00 | c47045f45c31 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 51.7 | $0.23 | loop 2: sandbox 3/3 after the runner fix |
 | 2026-09-25T11:15:41+00:00 | 9da2e374999f | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 69.6 | $0.17 | loop 2: panel x3 (1/3), single worker |
 | 2026-09-25T11:17:57+00:00 | 714c3ae9f649 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 75.0 | $0.18 | loop 2: panel x3 (2/3), single worker |

@@ -22,10 +22,12 @@ Working copies (:func:`prepare_copy`) are ``git init``\\ ed and committed so
 :func:`diff` can return the sandbox's changes as a unified diff and
 :func:`show_baseline` the pre-change content of one file; they live
 under ``~/.guru/sandbox/<name>/work/``, a path Colima mounts into its VM.
-The baseline commit's sha is recorded in the copy's ``COPY_MARKER`` and
-both readers compare it with ``git rev-parse HEAD`` first — a copy whose
-baseline moved raises :class:`BaselineChanged` (the second belt behind
-the read-only mount) and is no longer read.
+The baseline commit's sha is recorded in the copy's ``COPY_MARKER``;
+the caller keeps it (``guru.sandbox.verbs`` reads it the moment the copy
+is made) and both readers compare it — or, for a caller without one, the
+marker's — with ``git rev-parse HEAD`` first: a copy whose baseline moved
+raises :class:`BaselineChanged` (the second belt behind the read-only
+mount) and is no longer read.
 When the project is a git repository the copy is the *positive* list
 ``git ls-files --cached --others --exclude-standard`` — tracked and
 untracked-but-not-ignored files only, so a gitignored ``secrets.yaml`` or
@@ -72,6 +74,10 @@ BUILDKIT_NETWORKS = frozenset(('none', 'default', 'host'))
 # Marker file prepare_copy writes; remove_copy refuses a tree without it.
 # Its second line is ``baseline: <sha>`` — the copy's baseline commit.
 COPY_MARKER = '.guru-sandbox-copy'
+# Name prefix of the per-task copies ``guru.sandbox.verbs`` makes under the
+# work root (``task-<task>-<hex>``); ``remove_copy`` accepts such a
+# directory under the work root even when its marker is gone.
+TASK_COPY_PREFIX = 'task-'
 _MARKER_TEXT = 'working copy made by guru; safe to delete\n'
 _BASELINE_PREFIX = 'baseline: '
 # Prefix of the scripts ``sandbox_python`` drops into a copy (removed after
@@ -488,13 +494,17 @@ def baseline_sha(copy: Path) -> str:
     return ''
 
 
-def check_baseline(copy: Path, cwd: Path) -> str:
-    """``git rev-parse HEAD`` of ``copy``, verified against the sha its
-    marker records; returns the sha. Raises :class:`BaselineChanged` when
-    they differ, ``RuntimeError`` when the marker has no sha or git fails
-    (a copy guru did not make this way is not read either)."""
+def check_baseline(copy: Path, cwd: Path, expected: str = '') -> str:
+    """``git rev-parse HEAD`` of ``copy``, verified against ``expected``
+    — the sha the caller kept when it made the copy — or, without one,
+    against the sha the copy's marker records; returns the sha. Raises
+    :class:`BaselineChanged` when they differ, ``RuntimeError`` when
+    there is no sha to compare with (a marker-less copy guru did not make
+    this way is not read) or git fails. A caller that holds the sha does
+    not depend on the marker: code running in the copy can delete or
+    rewrite that file, and the check must not soften when it does."""
     repo = Path(copy)
-    want = baseline_sha(repo)
+    want = expected or baseline_sha(repo)
     if not want:
         raise RuntimeError(f'{repo} records no baseline sha in {COPY_MARKER}')
     res = _git(['rev-parse', 'HEAD'], repo, cwd, out_kb=4)
@@ -508,22 +518,28 @@ def check_baseline(copy: Path, cwd: Path) -> str:
     return have
 
 
-def diff(copy: Path, project: Optional[Path] = None) -> str:
+# ``git diff`` flags: ``--text`` treats every file as text, so a
+# ``.gitattributes`` the sandbox writes (``* -diff`` or ``binary``) cannot
+# turn the diff the gate reads into ``Binary files differ``.
+DIFF_ARGS = ('diff', 'HEAD', '--no-color', '--no-ext-diff', '--text')
+
+
+def diff(copy: Path, project: Optional[Path] = None,
+         expected: str = '') -> str:
     """The unified diff of ``copy``'s working tree against its baseline
-    commit (``git diff HEAD``): edits, deletions and — via ``git add -N``
-    — new files; caches excluded; ``''`` when unchanged. The git CLI
-    runs from ``project`` (default the current directory). The copy's
-    ``HEAD`` is checked against the recorded baseline first
-    (:func:`check_baseline`: ``BaselineChanged``)."""
+    commit (``git diff HEAD --text``): edits, deletions and — via ``git
+    add -N`` — new files; caches excluded; ``''`` when unchanged. The git
+    CLI runs from ``project`` (default the current directory). The copy's
+    ``HEAD`` is checked against the baseline first (:func:`check_baseline`
+    with ``expected``: ``BaselineChanged``)."""
     repo = Path(copy)
     cwd = Path(project) if project is not None else Path.cwd()
-    check_baseline(repo, cwd)
+    check_baseline(repo, cwd, expected)
     add = _git(['add', '-A', '-N'], repo, cwd)
     if add.returncode != 0:
         raise RuntimeError(f'git add -N failed in {repo}: '
                            f'{add.denied or add.stderr.strip()}')
-    res = _git(['diff', 'HEAD', '--no-color', '--no-ext-diff'], repo,
-               cwd, out_kb=DIFF_OUT_KB)
+    res = _git(list(DIFF_ARGS), repo, cwd, out_kb=DIFF_OUT_KB)
     if res.returncode != 0:
         raise RuntimeError(f'git diff failed in {repo}: '
                            f'{res.denied or res.stderr.strip()}')
@@ -531,20 +547,21 @@ def diff(copy: Path, project: Optional[Path] = None) -> str:
 
 
 def show_baseline(copy: Path, path: str,
-                  project: Optional[Path] = None) -> Optional[str]:
+                  project: Optional[Path] = None,
+                  expected: str = '') -> Optional[str]:
     """The baseline (``HEAD``) content of the copy-relative ``path`` in a
     working copy (``git show HEAD:<path>``), or None when the baseline
     has no such file (a file the sandbox created), the path is not a
     plain relative one, the content exceeds ``DIFF_OUT_KB`` or git fails.
     Read-only; the git CLI runs from ``project`` (default the current
     directory). Raises ``BaselineChanged`` when the copy's ``HEAD`` moved
-    from the recorded baseline (:func:`check_baseline`)."""
+    from the baseline (:func:`check_baseline` with ``expected``)."""
     rel = Path(path)
     if not path or rel.is_absolute() or '..' in rel.parts:
         return None
     repo = Path(copy)
     cwd = Path(project) if project is not None else Path.cwd()
-    check_baseline(repo, cwd)
+    check_baseline(repo, cwd, expected)
     res = _git(['show', f'HEAD:{rel.as_posix()}'], repo, cwd,
                out_kb=DIFF_OUT_KB)
     if res.returncode != 0 or res.denied or res.truncated:
@@ -552,15 +569,31 @@ def show_baseline(copy: Path, path: str,
     return res.stdout
 
 
-def remove_copy(copy: Path) -> None:
+def remove_copy(copy: Path, work_root: Optional[Path] = None) -> None:
     """Delete a working copy :func:`prepare_copy` made. Refuses
     (``ValueError``) a directory without the ``COPY_MARKER`` file so a
-    mistaken path can never delete a real tree."""
+    mistaken path can never delete a real tree — unless ``work_root`` is
+    given and the directory sits right under it with a
+    ``TASK_COPY_PREFIX`` name: a task copy whose marker the code running
+    in it deleted is still guru's to remove, or it would leak."""
     target = Path(copy)
-    if not (target / COPY_MARKER).is_file():
+    if not (target / COPY_MARKER).is_file() \
+            and not _is_task_copy(target, work_root):
         raise ValueError(f'{target} is not a guru sandbox copy '
                          f'(no {COPY_MARKER}); refusing to delete')
     shutil.rmtree(target, ignore_errors=True)
+
+
+def _is_task_copy(target: Path, work_root: Optional[Path]) -> bool:
+    """Whether ``target`` is a ``TASK_COPY_PREFIX`` directory directly
+    under ``work_root`` (paths compared resolved, no symlink games)."""
+    if work_root is None or not target.name.startswith(TASK_COPY_PREFIX):
+        return False
+    try:
+        return (target.is_dir() and not target.is_symlink()
+                and target.resolve().parent == Path(work_root).resolve())
+    except OSError:
+        return False
 
 
 def reset_cache() -> None:

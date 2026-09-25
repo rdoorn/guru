@@ -264,3 +264,164 @@ pairs, and the provision `fake_run` fixture answers faked git calls with
 a sha so `prepare_copy` can record a baseline.
 
 `GATE_QUESTIONS` is unchanged; the pinned sha `c8292068e5e9fd25` stands.
+
+## Iteration 3 — controller caching (2026-09-25)
+
+Starting point (triage loop-1, "Caching"): over a suite the Haiku
+controller made 104 calls, 274,915 uncached input tokens, 62,123 cache
+writes and **0 cache reads**, while the Sonnet/Opus workers read 85% of
+their input from cache. The live probe with a static prefix read fine from
+step 3, so guru itself was changing the prefix between controller calls.
+
+### Request dumping
+
+`GURU_DUMP_REQUESTS=<dir>` (`guru.adapters.base.dump_request`, wired into
+`litellm._complete` and `AnthropicAdapter._create`) writes each outgoing
+request's kwargs as `<utc-ts>-<adapter>-<n>.json`. The kwargs are the
+request body; the key lives in the SDK client (pinned by
+`TestRequestDump`: an adapter constructed with `api_key='sk-…'` dumps a
+file that does not contain it). Documented in README "Ledger and
+decisions".
+
+### Diff finding
+
+One `explain-readme` run (Haiku controller, spend allowed, rubric off,
+$0.051) produced six requests; the controller's were #1 (spawn), #2 (join,
+turn ends waiting) and #6 (the mailbox synthesis turn). System block and
+tools list were byte-identical across all three (`sys 5e883899`,
+`tools e8786610`) — the system tail and tool activation were **not** the
+cause. The messages were:
+
+```
+#2  system | user:"Summarise the rollback…" | assistant:null tool_calls=[spawn id=tooluse_xM3…]
+           | tool(tool_call_id=tooluse_xM3…):"Spawned agent1 …"          <- cache_control
+#6  system | user:"Summarise the rollback…" | assistant:"(used tools)"
+           | user:"[tool spawn result]\nSpawned agent1 …"
+           | assistant:"I've delegated this to a sub-agent. Let me wait…"
+           | user:"[tool join result]\nWaiting for agent1 …"
+           | user:"[joined results] …"                                     <- cache_control
+```
+
+Root cause: at the start of every turn the adapters rebuilt their native
+history from the neutral messages with `to_openai_messages` /
+`to_anthropic_messages`, which *flattened* past tool rounds to text
+(`(used tools)` + `[tool X result]` user messages) because the neutral
+messages carried no provider ids. Within a turn the native `tool_calls` /
+`tool` messages were sent; on the next turn (the mailbox synthesis, and
+every later user turn in the TUI) the same history arrived in a different
+shape, so the cache written at the end of the previous turn was never a
+prefix of the next request. In the TUI `conversation.apply_retention` made
+it worse: it dropped every text-less assistant tool-call step after the
+turn, so the tool results lost their calls.
+
+A second, structural finding from the same dumps and the whole-suite
+ledgers: the controller's requests are 2.7k–3.4k tokens, below Haiku 4.5's
+4,096-token minimum cacheable prompt. Nothing is written until the mailbox
+turn (5–7k), which is the controller's *last* call in an eval case — hence
+"62k writes, 0 reads". No prefix fix can make Haiku read on those calls;
+a controller on Sonnet (1,024 minimum) does read (below).
+
+### Fix
+
+- The neutral messages keep the provider's ids: `id` (and, for LiteLLM,
+  the model's `raw_arguments` string) on each `tool_calls` entry,
+  `tool_call_id` on the tool message. `litellm.native_round` /
+  `anthropic.native_round` rebuild a round whose ids match as the native
+  `tool_calls` + `tool` messages / `tool_use` + `tool_result` blocks; a
+  round without ids (Ollama history, older transcripts) or with a missing
+  result still flattens. `message_to_dict` persists `tool_call_id` so a
+  resumed conversation keeps the shape.
+- `apply_retention` keeps text-less assistant steps that carry tool calls
+  (a few tokens each); truly empty steps are still dropped.
+- Pinned by `TestNativeRoundRebuild` (`tests/test_adapters.py`): a whole
+  LiteLLM / Anthropic turn with a tool call, then the next turn's
+  translation equals the last request's messages up to the marker.
+
+### Numbers
+
+Same case, dumping on, after the fix (`b7adcd223af0`, $0.034): the
+mailbox request #6 is now
+`system | user | assistant:null tool_calls=[spawn] | tool(id) | assistant:"…" tool_calls=[join] | tool(id) | user:"[joined results]"`
+and its prefix equals request #2 byte-for-byte (system, tools and messages,
+marker position aside). Haiku controller ledger: 2,721 / 2,909 / 3,430
+uncached, 0 read, 0 write — under the 4,096 minimum as predicted.
+
+Sonnet as controller, same case (`8274b6029b7b`, $0.032; the case failed
+its regex because the trivial-routed Haiku worker's answer missed it, not
+caching-related):
+
+| call | uncached | cache read | cache write |
+|---|---|---|---|
+| #1 spawn | 2 | 0 | 3,240 |
+| #2 join (same turn) | 2 | 3,240 | 302 |
+| #6 mailbox synthesis (next turn) | 2 | 3,542 | 438 |
+
+The mailbox turn reads the whole previous turn (3,240 + 302 = 3,542) and
+writes only the delivery; before the fix the shape change would have
+limited the read to the first breakpoint (system + tools + request). The
+Haiku "0 reads" is now a model-minimum question, not a prefix bug: either
+accept it for the eval controller or run the controller on Sonnet.
+
+### Also in this iteration
+
+- Panel judge: `needs_security` is asked over the parent's request and the
+  spawned task (`orchestrator.panel_text`, request first, blank-line
+  separated; the task alone when the request is empty or identical), so a
+  controller that strips "security" from the task it writes still
+  triggers the security worker. Heuristic stays *no*. `turn.request_in`
+  reads any agent's history. Pinned by `TestPanelText`.
+- Spawn/join race: `Orchestrator.spawn` registers the children in a
+  pending set synchronously (`_register_pending`, child marked busy) and
+  `_start` drains it after appending; `do_join` / `do_check` use
+  `children_of(parent)` = registered + pending, so a `join` in the same
+  tool round as the `spawn` (headless front-ends run it inline on the
+  worker thread) opens the barrier instead of answering "None of those
+  are your sub-agents". `spawn_panel` uses the same set. Pinned by
+  `TestSpawnJoinRace`, including an end-to-end run on an instant fake
+  model that spawns and joins in one round.
+
+- Controller decomposition: in the iteration-2 suite the Haiku controller
+  answered "Review this repository for correctness and security" with a
+  single security-engineer worker in 3/3 repeats (spawned 1 < 2; in
+  iteration 1 2/3 runs spawned two). `CONTROLLER_HINT` now says: when a
+  request names several concerns (correctness AND security, several
+  files or areas), spawn one worker per named concern in parallel and
+  join them; never fold distinct concerns into one worker. Pinned by
+  `TestControllerHint.test_one_worker_per_named_concern`; to be measured
+  in the next suite run.
+
+Review fixes after the iteration-3 diff (same branch):
+
+- Anthropic direct with `thinking` on: the API requires the *last*
+  assistant message to start with a thinking block when it carries
+  `tool_use`, and previous turns' thinking blocks are not kept — so
+  `anthropic.native_round` flattens the rebuilt round when no assistant
+  message follows it (a turn that ended on a `join`, resumed by the
+  mailbox) and rebuilds earlier rounds (`TestThinkingLastRound`). Not
+  probed live (the adapter is disabled in the user's config).
+- Gate: a file reduced to blank/comment lines counts as emptied
+  (`_emptied` uses `substantive`); once a task is over the removed-lines
+  threshold a later submit is flagged only when it removes a substantive
+  line itself; `1 file`/`1 line` pluralisation; `Tally.__bool__` and the
+  dead `verbs.task_tally` removed.
+- Sandbox: the main agent's destructive tally is keyed on the turn
+  (`_tally_key`) so a new user turn starts clean; the baseline sha is kept
+  in memory next to the copy (`verbs.Copy`) and `colima.check_baseline`
+  compares against it — a worker that deletes the marker gets a clean
+  `MARKER_CHANGED` refusal and the copy is still removed (`remove_copy`
+  accepts a marker-less `task-*` directory under the work root);
+  `git diff --text` so a worker-written `.gitattributes` cannot hide the
+  diff as binary.
+- Orchestrator: `_start` drains the pending set in a `finally`, a launch
+  that raises leaves the child idle in `error` (join resolves at once),
+  `_finish_task` prunes the child from `_pending`.
+- `conversation.request_in` (moved from `turn`): skips mailbox deliveries
+  back to the human request and caps it at 1000 chars; the panel judge,
+  the gate reviewer and the turn ledger read it from there.
+- Evals: synthetic empty-answer grades leave the stability denominator;
+  tests no longer touch the developer's log file (`log.setup` is a no-op
+  under pytest).
+
+Not done: `apply_retention`'s summarize/outline compaction still rewrites
+large tool results after a turn by design, which changes the prefix from
+that point on.

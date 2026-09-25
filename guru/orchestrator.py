@@ -33,7 +33,9 @@ once on the best local rung (``retry_of``); the original row is
 Panel judge (item 6 of ``docs/plans/2026-09-25-top10-remaining.md``): when
 the ``panel`` decision point is *active* and a controller spawns a
 ``review``-kind task without a security reviewer, the judge's
-``needs_security`` verdict over the task text adds one ``security-engineer``
+``needs_security`` verdict over the user's request and the task text (the
+request first, so a controller that drops "security" from the task it
+writes still triggers it) adds one ``security-engineer``
 worker on the same task (once per parent turn; the row says
 ``origin = "panel"`` and its ``reason`` starts with ``origin:panel``).
 Shadow mode changes nothing (the turn loop already shadows the panel
@@ -41,6 +43,7 @@ questions).
 """
 import asyncio
 import io
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -85,6 +88,18 @@ _SECURITY_SPAWNED = (
     " judge found it needs a security review; join it as well.")
 
 
+def panel_text(messages: list, task: str) -> str:
+    """What the panel judge reads for a spawned ``task``: the parent's
+    request (:func:`guru.domain.conversation.request_in` over
+    ``messages`` — the human request behind a mailbox delivery, capped)
+    and then the task text, blank-line separated; the task alone when the
+    request is empty or already the task."""
+    request = conversation.request_in(messages)
+    if not request or request == task:
+        return task
+    return request + "\n\n" + task
+
+
 @dataclass
 class _Plan:
     """Everything ``_make_child`` decided before building the agent: the
@@ -120,6 +135,15 @@ class Orchestrator:
         self._security_turns: set = set()
         self.barriers: dict = {}
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        # Children ``spawn``/``spawn_panel`` made but whose registration on
+        # the loop thread (``_start``: append to the agent list, launch) has
+        # not run yet, by parent. Filled synchronously in the spawning
+        # thread, drained by ``_start``, so a ``join``/``check`` in the same
+        # tool round as the ``spawn`` (headless front-ends run it inline on
+        # the worker thread) already sees the child as a running sub-agent
+        # instead of "None of those are your sub-agents".
+        self._pending: dict = {}
+        self._pending_lock = threading.Lock()
 
     # --- routing -------------------------------------------------------------
 
@@ -263,6 +287,34 @@ class Orchestrator:
     def agent_for_state(self, st):
         return next((a for a in self.manager.agents if a.state is st), None)
 
+    def _register_pending(self, parent, children: list) -> None:
+        """Record ``children`` as ``parent``'s sub-agents ahead of their
+        registration on the loop thread; each counts as running (``busy``)
+        from now on — ``launch`` sets the flag again when it runs."""
+        for c in children:
+            c.busy = True
+        with self._pending_lock:
+            self._pending.setdefault(parent, []).extend(children)
+
+    def _drain_pending(self, parent, children: list) -> None:
+        """Forget ``children`` once ``_start`` has appended them."""
+        with self._pending_lock:
+            left = [c for c in self._pending.get(parent, ())
+                    if not any(c is done for done in children)]
+            if left:
+                self._pending[parent] = left
+            else:
+                self._pending.pop(parent, None)
+
+    def children_of(self, parent) -> list:
+        """``parent``'s sub-agents: the registered ones (agent-list order)
+        followed by the pending ones not yet on the list."""
+        out = [a for a in self.manager.agents if a.parent is parent]
+        with self._pending_lock:
+            pending = list(self._pending.get(parent, ()))
+        out.extend(c for c in pending if not any(c is a for a in out))
+        return out
+
     def final_answer(self, agent) -> str:
         for m in reversed(agent.state.messages):
             if conversation.msg_role(m) == 'assistant' \
@@ -335,6 +387,19 @@ class Orchestrator:
         agent.started = time.monotonic()
         assert self.loop is not None
         self.loop.run_in_executor(None, self.work, agent)
+
+    def _launch_all(self, children: list) -> None:
+        """``launch`` each child; one whose launch raises is left on the
+        list idle in ``error`` (logged through ``on_worker_error``) so
+        the parent's ``join`` resolves with its (empty) answer instead of
+        waiting forever on a phantom, and the others still start."""
+        for c in children:
+            try:
+                self.launch(c)
+            except Exception as exc:                     # noqa: BLE001
+                c.busy = False
+                c.status = 'error'
+                self.on_worker_error(c, exc)
 
     def submit(self, agent, text: str) -> None:
         """Queue a user message for ``agent`` and start it if idle."""
@@ -460,6 +525,10 @@ class Orchestrator:
         after a provider error is an ``error``, not ``done`` (or
         ``fell_back`` when the caller respawns it locally).
         """
+        if agent.parent is not None:
+            # Whatever happened to its registration, a finished child is
+            # not pending any more.
+            self._drain_pending(agent.parent, [agent])
         if agent.task_rec is None:
             return
         st = agent.state
@@ -650,14 +719,19 @@ class Orchestrator:
         children = [child] if extra is None else [child, extra]
 
         # Append to the agent list on the loop thread — never mutate it from a
-        # worker thread while the loop may be iterating it.
+        # worker thread while the loop may be iterating it. Until then the
+        # children are pending (a join/check in this tool round sees them).
         def _start() -> None:
-            for c in children:
-                self.manager.agents.append(c)
-                self.launch(c)
-            self.invalidate()
+            try:
+                for c in children:
+                    self.manager.agents.append(c)
+                self._launch_all(children)
+            finally:
+                self._drain_pending(parent, children)
+                self.invalidate()
 
         assert self.loop is not None
+        self._register_pending(parent, children)
         self.loop.call_soon_threadsafe(_start)
         reply = (
             f"Spawned {title} to work on this task in parallel. Its result"
@@ -678,8 +752,9 @@ class Orchestrator:
         Only with the ``panel`` point active, for a ``review``-kind task,
         when neither ``child`` nor any earlier child of ``parent`` in this
         turn is a security reviewer, and when the judge answers yes to
-        ``needs_security`` over the task text (heuristic: no; a timeout or
-        error adds nothing). The worker takes the same task with the
+        ``needs_security`` over the user's request and the task text
+        (:func:`panel_text`; heuristic: no; a timeout or error adds
+        nothing). The worker takes the same task with the
         security focus of the /review panel, kind ``review`` at the
         child's complexity; its row carries ``origin = 'panel'`` and a
         ``reason`` opening with ``PANEL_ORIGIN``. At most one per parent
@@ -697,7 +772,8 @@ class Orchestrator:
                 or self._security_seen(parent)):
             return None
         needed = decisions.decide(
-            'panel', decisions.security_question(child.task),
+            'panel', decisions.security_question(
+                panel_text(parent.state.messages, child.task)),
             heuristic=False)
         if not needed:
             return None
@@ -745,18 +821,21 @@ class Orchestrator:
             return titles
 
         def _start() -> None:
-            for c in children:
-                self.manager.agents.append(c)
-            # Open the barrier BEFORE launching, so a fast child can't report
-            # into a not-yet-existing barrier.
-            self.barriers[parent] = {
-                'remaining': set(titles), 'results': {},
-                'synthesis': synthesis}
-            for c in children:
-                self.launch(c)
-            self.invalidate()
+            try:
+                for c in children:
+                    self.manager.agents.append(c)
+                # Open the barrier BEFORE launching, so a fast child can't
+                # report into a not-yet-existing barrier.
+                self.barriers[parent] = {
+                    'remaining': set(titles), 'results': {},
+                    'synthesis': synthesis}
+                self._launch_all(children)
+            finally:
+                self._drain_pending(parent, children)
+                self.invalidate()
 
         assert self.loop is not None
+        self._register_pending(parent, children)
         self.loop.call_soon_threadsafe(_start)
         return titles
 
@@ -770,7 +849,7 @@ class Orchestrator:
         ``CHECK_POLL_LIMIT``). Any done sub-agent resets the count.
         """
         caller = self.agent_for_state(caller_state)
-        children = [a for a in self.manager.agents if a.parent is caller]
+        children = self.children_of(caller)
         if not children:
             return "You have no sub-agents."
         target = (target or 'all').strip()
@@ -817,8 +896,7 @@ class Orchestrator:
 
     def do_join(self, caller_state, titles: list) -> str:
         caller = self.agent_for_state(caller_state)
-        children = {a.title: a for a in self.manager.agents
-                    if a.parent is caller}
+        children = {a.title: a for a in self.children_of(caller)}
         targets = [children[t] for t in titles if t in children]
         if not targets:
             have = ', '.join(children) or 'none'

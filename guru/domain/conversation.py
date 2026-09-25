@@ -1,10 +1,13 @@
 """Neutral conversation handling: save/resume and compaction (hybrid D).
 
 The neutral message format is the normalized dict
-``{role, content, tool_calls?, tool_name?, tool_args?}`` (``tool_args``,
-the call's arguments, is kept in memory only for the delegation nudge and
-is not persisted). Adapters translate to/from it,
-so these operations are provider-independent.
+``{role, content, tool_calls?, tool_name?, tool_args?, tool_call_id?}``
+(``tool_args``, the call's arguments, is kept in memory only for the
+delegation nudge and is not persisted; ``tool_call_id`` and the ``id`` on a
+``tool_calls`` entry are the provider's ids, kept so the remote adapters
+rebuild a past tool round in its native shape and the prompt cache reads
+the prefix back). Adapters translate to/from it, so these operations are
+provider-independent.
 """
 import ast
 import json
@@ -32,6 +35,8 @@ def message_to_dict(msg: object) -> dict:
     }
     if data.get('tool_name'):
         out['tool_name'] = data['tool_name']
+    if data.get('tool_call_id'):
+        out['tool_call_id'] = data['tool_call_id']
     if data.get('tool_calls'):
         out['tool_calls'] = data['tool_calls']
     return out
@@ -117,6 +122,72 @@ def msg_content(msg: object) -> str:
     if isinstance(msg, dict):
         return msg.get('content') or ''
     return getattr(msg, 'content', '') or ''
+
+
+# --- the turn's request ------------------------------------------------------
+
+# A weak model sometimes ends a turn by announcing an action ("Let me read
+# the files…") without calling a tool; without a nudge that would be taken
+# as the final answer. The turn loop injects these user messages; they are
+# never the user's request.
+NUDGE_TEXT = (
+    "Do not describe what you will do — do it now. Call the tool you need in"
+    " this reply (use search_tools first if it is not active). If you are"
+    " genuinely finished, give the final answer."
+)
+DELEGATION_TEXT = (
+    "You inspected several files yourself. This task spans multiple concerns —"
+    " decompose it now instead of answering directly: spawn parallel"
+    " sub-agents, one per domain, then join and synthesise. For a review,"
+    " spawn(task='review the code for correctness, readability, tests',"
+    " role='developer', skill='code-review') AND spawn(task='review the code"
+    " for injection, authz, secrets, path traversal, vulnerable deps',"
+    " role='security-engineer', skill='code-review'), then join both and give"
+    " one consolidated report. Add architect/SRE sub-agents if design or"
+    " reliability matter."
+)
+# First characters of a mailbox delivery (the orchestrator's joined or
+# single sub-agent result): a turn it starts is a synthesis turn, and its
+# text is the sub-agents' output, not a request from the user.
+MAILBOX_PREFIXES = ('[joined results]', '[result from')
+# Cap on what :func:`request_in` returns: the request is quoted into judge
+# packets (the panel judge, the gate reviewer) and ledger rows.
+REQUEST_CHARS = 1000
+
+
+def is_nudge(text: str) -> bool:
+    """True for a user message the turn loop itself injected (act,
+    delegation or over-read nudge; the over-read one ends with the
+    delegation text)."""
+    return (text in (NUDGE_TEXT, DELEGATION_TEXT)
+            or text.endswith(DELEGATION_TEXT))
+
+
+def is_mailbox(text: str) -> bool:
+    """True for a user message that is a mailbox delivery."""
+    return text.startswith(MAILBOX_PREFIXES)
+
+
+def request_in(messages: list) -> str:
+    """The user's request in ``messages``: the most recent user message
+    that is neither a loop nudge nor a mailbox delivery, capped at
+    ``REQUEST_CHARS``; when only deliveries are there (a history that
+    starts with one), the most recent of those, capped the same way;
+    ``''`` when there is no user message at all. Pure: for any agent's
+    history (the orchestrator reads a parent's for the panel judge, the
+    gate reviewer the worker's), not only the bound session's."""
+    delivery = ''
+    for m in reversed(messages):
+        if msg_role(m) != 'user':
+            continue
+        text = msg_content(m).strip()
+        if not text or is_nudge(text):
+            continue
+        if is_mailbox(text):
+            delivery = delivery or text
+            continue
+        return text[:REQUEST_CHARS]
+    return delivery[:REQUEST_CHARS]
 
 
 def group_messages(msgs: list) -> list:
@@ -424,15 +495,28 @@ def _outline_code(read_output: str) -> str:
     return "\n".join([header, '[truncated]'] + body[:40])
 
 
+def _tool_calls_of(msg: object) -> list:
+    """A message's tool calls (dict key or attribute), ``[]`` when none."""
+    if isinstance(msg, dict):
+        return list(msg.get('tool_calls') or [])
+    return list(getattr(msg, 'tool_calls', None) or [])
+
+
 def apply_retention(messages: list) -> None:
-    """Post-turn retention: drop text-less tool-call steps, then compact each
+    """Post-turn retention: drop empty assistant steps, then compact each
     tool result per its tool's retain policy (keep / summarize / outline),
     only when it exceeds the size threshold. Replaces the blanket prune so
-    follow-up questions keep the useful, relevant context."""
+    follow-up questions keep the useful, relevant context.
+
+    A text-less assistant step that carries tool calls is kept: it is a
+    few tokens, and dropping it changed the shape of every past tool round
+    at the next turn (the results lost their call), which broke the prompt
+    cache prefix on every turn (improve-loop iteration 3)."""
     kept = []
     for i, m in enumerate(messages):
         role = msg_role(m)
-        if role == 'assistant' and not msg_content(m).strip():
+        if role == 'assistant' and not msg_content(m).strip() \
+                and not _tool_calls_of(m):
             continue
         if role == 'tool' and isinstance(m, dict):
             name = m.get('tool_name', '')

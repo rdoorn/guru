@@ -41,3 +41,21 @@ case = "guru-review-adapters"
 run = "*"
 score = 2
 note = "hand grade 2026-09-24, controller runs 6/6 (evals/triage/2026-09-24-real-cases.md): shared _note_error/_record_call pattern vs ollama.py, concrete divergence and risk named"
+
+[[label]]
+case = "explain-readme"
+run = "644b68facb64"
+score = 2
+note = "hand grade 2026-09-25 (fast cases; grade 644b68facb64 --show): both points met — 'redeploy the previous release tag' and 'Do not roll back the database' (expand/contract migrations named); the third bullet is extra material, not a miss"
+
+[[label]]
+case = "logic-bug"
+run = "644b68facb64"
+score = 2
+note = "hand grade 2026-09-25 (fast cases): quotes the inverted 'now < token[expires_at]', states it is True for valid tokens and False for expired ones, and gives the 'now >= expires_at' fix — every rubric point met"
+
+[[label]]
+case = "security-only"
+run = "644b68facb64"
+score = 2
+note = "hand grade 2026-09-25 (fast cases): says yes, names os.path.join(base_dir, user_path) in app/upload.py with no containment check, proposes realpath + commonpath prefix check and rejecting '..' / leading '/' — every rubric point met; the login note is extra"
