@@ -237,6 +237,38 @@ class TestRegrade:
         assert out.agreement == {'A|j': (1, 2)}
 
 
+class TestShowText:
+    def test_label_stub(self) -> None:
+        assert grading.label_stub('c', 'rid000000000') == (
+            '[[label]]\ncase = "c"\nrun = "rid000000000"\n'
+            '# score = 0 | 1 | 2   (uncomment and pick one)\n'
+            'note = "hand grade <date>: <why>"')
+        stub = grading.label_stub('c', 'rid', score=2, note='why')
+        assert stub == '[[label]]\ncase = "c"\nrun = "rid"\nscore = 2\n' \
+            'note = "why"'
+        assert labels.parse_labels(stub) == [labels.HandLabel('c', 'rid', 2,
+                                                              'why')]
+        # The placeholder stub is valid TOML too (the score line is a
+        # comment), so a pasted-but-unfinished entry fails loudly on the
+        # missing score rather than on a syntax error.
+        with pytest.raises(ValueError, match='score must be one of'):
+            labels.parse_labels(grading.label_stub('c', 'rid'))
+
+    def test_show_text_names_hand_grade_scope(self, tmp_path: Path) -> None:
+        run = _run(tmp_path)
+        res = run.cases[0]
+        text = grading.show_text(run, res, 'ans', 'ask',
+                                 hand=labels.HandLabel('graded', run.run_id,
+                                                       1))
+        assert text.startswith(f'=== graded (run {run.run_id}) — hand '
+                               f'grade 1 for run {run.run_id}\n')
+        text = grading.show_text(run, res, 'ans', 'ask')
+        assert text.startswith(f'=== graded (run {run.run_id})\n')
+        assert 'hand grade' not in text.splitlines()[0]
+        assert rubric.evidence(res.observed, res.cost_usd) in text
+        assert 'Rubric:\nr\n' in text and 'Answer:\nans' in text
+
+
 class _Adapter:
     name = 'Fake'
     remote = False
@@ -364,10 +396,55 @@ class TestCli:
         assert cli_main(argv + tail) == 2
         assert message in capsys.readouterr().err
 
-    def test_rubric_flag_is_required(self, tmp_path) -> None:
-        with pytest.raises(SystemExit) as e:
-            cli_main(['grade', 'rid', '--out', str(tmp_path)])
-        assert e.value.code == 2
+    def test_rubric_or_show_is_required(self, tmp_path, capsys) -> None:
+        assert cli_main(['grade', 'rid', '--out', str(tmp_path)]) == 2
+        err = capsys.readouterr().err
+        assert 'needs --rubric SPEC' in err and '--show' in err
+
+    def test_show_prints_the_packet_per_case_without_a_judge(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        run = self._setup(tmp_path, monkeypatch)
+        calls: list = []
+        monkeypatch.setattr(grading, 'regrade',
+                            lambda *a, **k: calls.append(a))
+        code = cli_main(['grade', run.run_id, '--show', '--out',
+                         str(tmp_path), '--labels', str(self.labels_file)])
+        assert code == 0 and calls == []                 # no grading
+        out = capsys.readouterr().out
+        # One block per rubric case, in run order; the plain case is out.
+        heads = [ln for ln in out.splitlines() if ln.startswith('=== ')]
+        assert heads == [
+            f'=== graded (run {run.run_id}) — hand grade 2 (any run)',
+            f'=== empty (run {run.run_id})',
+            f'=== from-transcript (run {run.run_id})']
+        block = out.partition('=== graded')[2].partition('=== empty')[0]
+        assert 'Prompt:\nprompt for graded\n' in block
+        assert 'Rubric:\nr\n' in block
+        assert rubric.EVIDENCE_HEADER in block
+        assert '- files changed: guru/cli.py' in block
+        assert '- cost: $0.250' in block
+        assert 'Answer:\nthe answer\n' in block
+        assert '<<<ANSWER' not in block                  # no fence needed
+        assert 'Scale: 2 = meets the intent' in block
+        assert ('[[label]]\ncase = "graded"\nrun = "%s"\n'
+                '# score = 0 | 1 | 2' % run.run_id) in block
+        assert 'note = "hand grade <date>: <why>"' in block
+        empty = out.partition('=== empty')[2].partition(
+            '=== from-transcript')[0]
+        assert 'Answer:\n(empty answer)' in empty
+        assert 'Prompt:\n(none recorded)' in empty      # no transcript
+        assert 'Answer:\nt-answer' in out                # transcript answer
+
+    def test_show_with_a_judge_prints_packets_then_the_table(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        run = self._setup(tmp_path, monkeypatch)
+        code = cli_main(['grade', run.run_id, '--show', '--rubric',
+                         'A|sonnet', '--out', str(tmp_path), '--labels',
+                         str(self.labels_file)])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert out.index('=== graded') < out.index(f'run {run.run_id} (')
+        assert 'agreement with hand: A|sonnet 1/1 (100%)' in out
 
     def test_run_without_rubric_cases_says_so(self, tmp_path, capsys,
                                               monkeypatch) -> None:

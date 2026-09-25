@@ -73,10 +73,21 @@ Every case may carry an `[expect.rubric]` text; until now it was graded
 by hand (0-2) during triage. `--rubric 'Adapter|model'` has a model grade
 it instead: after the case's deterministic checks the runner sends the
 prompt, the rubric and the answer to `Adapter.complete()` with a fixed
-instruction (score 2 = fully meets the rubric, 1 = partly, 0 = not; strict
-JSON `{"score", "reason"}`), the answer fenced between per-call nonce
-markers and declared untrusted, exactly as the sandbox gate fences the
-diff. The grade lands in the case result (`rubric_score`,
+instruction and gets strict JSON `{"score", "reason"}` back; the answer
+is fenced between per-call nonce markers and declared untrusted, exactly
+as the sandbox gate fences the diff. The scale, as the instructions state
+it: **2** = the answer meets the *intent* of every rubric point — naming
+an equivalent mechanism or an equivalent identifier counts, and a claim
+the evidence block confirms (tests pass, files changed, tools used) is
+met even when the answer does not paste the output; **1** = one
+substantive rubric point is missing or wrong; **0** = the answer is
+wrong, unsupported, or contradicted by the evidence. Brevity, missing
+code listings and the exact spelling of identifiers are never penalised
+(the first instructions said "fully meets the rubric", and both Haiku and
+Sonnet docked hand-2 answers for "never names `_measure_at`" and "only
+asserts tests pass without the run_tests digest" while the evidence
+showed the tests passing and `run_tests` used — measured on run
+`fa5c42d05059`, 2026-09-25). The grade lands in the case result (`rubric_score`,
 `rubric_reason`), in the run file, in the table's detail column
 (`rubric: 2/2`; `rubric: error` when the judge's reply was unusable;
 `rubric: grade by hand` without a judge) and in the summary line
@@ -88,12 +99,16 @@ reason), so the judge can later be scored against hand labels.
 The packet also carries **evidence**: a block guru computes from the
 case's observed data — files changed, the fixture's pytest verdict, tools
 used with counts, gate verdicts, sub-agents spawned with their roles,
-cost and seconds — placed outside the answer fence, and the instructions
-say it is authoritative over the answer's claims. The judge used to see
-the answer text only and marked a correct edit down for "no code shown"
-(triage 2026-09-25); now a change the evidence shows counts even when the
-answer does not paste the diff, and a claim the evidence contradicts is
-false.
+cost and seconds — placed outside the answer fence in a fence of its own
+(`<<<EVIDENCE nonce>>> … <<<END nonce>>>`, the same per-call nonce), and
+the instructions say only the block between those exact markers is
+authoritative over the answer's claims, so an "Evidence" header the
+assistant pastes into its own answer is just answer text. The judge used
+to see the answer text only and marked a correct edit down for "no code
+shown" (triage 2026-09-25); now a change the evidence shows counts even
+when the answer does not paste the diff, and a claim the evidence
+contradicts is false. The run error in that block is one line, clipped
+to 200 characters, with the home directory replaced by `~`.
 
 The default: with `--allow-spend` and `--routing FILE`, the file's
 cheapest rung (the lowest rung of its `default` ladder — Haiku in the
@@ -126,9 +141,8 @@ The hand grades live in `evals/rubric-labels.toml`, one `[[label]]` table
 each — `case`, `run` (a run id, or `"*"` for any run of that case; the
 specific one wins), `score` (0-2) and a `note` saying where the grade
 comes from. The first entries are the three real guru cases graded 2 by
-hand on 2026-09-24. To add one: read the answer in the run's transcript,
-grade it against the case's `[expect.rubric]` text, append a table; grade
-the answer, not the judge. Every grade `grade` produces is a `labels` row
+hand on 2026-09-24; "Grading by hand" below is how the set grows. Every
+grade `grade` produces is a `labels` row
 in the run's ledger directory (`evals/runs/<run_id>/ledger`,
 `target_id = <run_id>:<case>`, labeller `rubric:<model>`), the applicable
 hand grades are recorded there too (labeller `hand`), and the judges'
@@ -136,6 +150,41 @@ own `calls` rows land in the same directory, so the grading cost is
 printed and the ledger report can score the judges later. Use it to
 compare graders (Haiku vs Sonnet on the same run) before trusting
 `--rubric-min` in a gate.
+
+### Grading by hand
+
+The hand-label set is the reference the judges are scored against, so it
+has to grow with every run worth arguing about. Grade the same packet the
+judge gets, without a model call:
+
+```sh
+.venv/bin/python -m guru.evals grade RUN_ID --show [--out DIR]
+```
+
+prints, per rubric case of the run: the prompt, the rubric, the evidence
+block (files changed, fixture tests, tools used, gate verdicts, cost),
+the answer, the scale, and a ready `[[label]]` stub pinned to that run
+id. `--show --rubric SPEC` prints the packets first and then the judge
+table, for grading with the judge's column at hand. To grade:
+
+1. Read the rubric point by point against the answer *and* the evidence.
+   Use the judge's scale: 2 when every point's intent is met (an
+   equivalent mechanism or identifier counts; "tests pass" is met when
+   the evidence says the fixture tests pass and `run_tests` was used,
+   whether or not the answer pastes the digest); 1 when one substantive
+   point is missing or wrong; 0 when the answer is wrong, unsupported or
+   contradicted by the evidence. Do not dock brevity, missing code
+   listings or the spelling of identifiers — grade the answer, not the
+   judge, and not the prose.
+2. Copy the stub into `evals/rubric-labels.toml`, uncomment `score` and
+   pick one, and write the `note` as "hand grade <date>: <why>" naming
+   which rubric points carried the grade (a run-specific `run` beats a
+   `"*"` one for that run; use `"*"` only when every run of that case
+   you have seen earns the same grade).
+3. Re-run `grade RUN_ID --rubric SPEC` — the new `hand` cell appears and
+   the agreement line counts it. A disagreement with the judge is the
+   point: it is what the instructions get tuned on (the reasons are in
+   the run's `labels` ledger rows).
 
 ### Repeats and the x3 gate
 

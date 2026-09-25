@@ -20,10 +20,14 @@ sees a digest (exit code, first lines of output) with ``detail`` for the
 last 4 KB; the full output goes to guru's log.
 
 ``sandbox_submit`` is the only way changes reach the real tree: the
-copy's diff runs through the deterministic rules (``gate.rules``) and the
-code-health rules (``gate.health_flags`` with a baseline reader over
-``git show HEAD:<path>`` in the copy — the copy's commit is the project
-as it was when the task started), then the reviewer
+copy's diff runs through the deterministic rules (``gate.rules`` with
+the task's :class:`gate.Tally` of already-applied submits as ``prior``,
+so the destructive thresholds hold over the whole task, not per submit)
+and — unless the rules already found the change suspicious — the
+code-health rules (``gate.health_flags_from`` over ``gate.health_deltas``
+with a baseline reader over ``git show HEAD:<path>`` in the copy — the
+copy's commit is the project as it was when the task started), then the
+reviewer
 (``decisions.decide_review`` on the configured ``gate`` judge, else
 ``judges.llm.default_reviewer``) with the user's request, the task, the
 agent's intent, the change summary, the code-health rows and the diff,
@@ -34,7 +38,9 @@ asks in every mode with the reviewer's reasons; ``suspicious`` refuses;
 read-only mode reports the diff without consulting the reviewer. The
 copy's lock is held from the diff through the review to the apply, so
 what the reviewer saw is what lands. Each submit is a ``sandbox_events``
-row.
+row. A copy whose baseline commit no longer matches the sha its marker
+records (``colima.BaselineChanged``) is refused and discarded by every
+verb that reads it: its diff can no longer be trusted.
 """
 from __future__ import annotations
 
@@ -57,6 +63,8 @@ from guru.sandbox import colima, provision
 NOT_PROVISIONED = 'Refused: sandbox not provisioned; run /sandbox provision'
 COPY_GONE = ('Refused: sandbox copy no longer exists; run a sandbox verb to '
              'make a fresh one')
+BASELINE_CHANGED = ('Refused: sandbox copy baseline changed; the copy was '
+                    'discarded — run a sandbox verb to make a fresh one')
 DIGEST_LINES = 30           # lines of stdout/stderr in a run digest
 DETAIL_BYTES = 4096         # tail returned by detail
 HEALTH_DIGEST_CHARS = 600   # cap on a code_health digest
@@ -74,6 +82,10 @@ _lock = threading.Lock()
 _copies: dict[tuple[str, str], Path] = {}       # (project, task) -> copy
 _copy_locks: dict[tuple[str, str], threading.RLock] = {}
 _last_run: dict[tuple[str, str], colima.RunResult] = {}
+# (project, task) -> the destructive counts of the submits already applied
+# in that task; survives the copy's removal after an apply, cleared with
+# the task (``cleanup_task``/``cleanup_all``).
+_tally: dict[tuple[str, str], gate.Tally] = {}
 _script_counter = itertools.count(1)
 
 
@@ -161,20 +173,44 @@ def copies() -> dict[tuple[str, str], Path]:
         return dict(_copies)
 
 
+def task_tally(task_id: str, project: Optional[Path] = None) -> gate.Tally:
+    """The destructive counts of the submits ``task_id`` has applied so
+    far in ``project`` (default the current one)."""
+    with _lock:
+        return _tally.get((str(_project(project)), task_id), gate.Tally())
+
+
+def _prior(key: tuple[str, str]) -> gate.Tally:
+    with _lock:
+        return _tally.get(key, gate.Tally())
+
+
+def _record_applied(key: tuple[str, str], diff: str) -> gate.Tally:
+    """Add ``diff``'s counts to the task's tally; returns the new total."""
+    with _lock:
+        total = _tally.get(key, gate.Tally()) + gate.tally(diff)
+        _tally[key] = total
+        return total
+
+
 def cleanup_task(task_id: str) -> int:
-    """Remove every working copy of ``task_id``; returns how many. Waits
-    for a submit in flight on that copy."""
+    """Remove every working copy of ``task_id`` and forget its tally;
+    returns how many copies. Waits for a submit in flight on that copy."""
     with _lock:
         keys = [k for k in _copies if k[1] == task_id]
+        for k in [k for k in _tally if k[1] == task_id]:
+            del _tally[k]
     for key in keys:
         _discard(key)
     return len(keys)
 
 
 def cleanup_all() -> int:
-    """Remove every working copy (exit, tests); returns how many."""
+    """Remove every working copy and every tally (exit, tests); returns
+    how many copies."""
     with _lock:
         keys = list(_copies)
+        _tally.clear()
     for key in keys:
         _discard(key)
     return len(keys)
@@ -308,12 +344,32 @@ def sandbox_diff(project: Optional[Path] = None) -> str:
     spec, refusal = _ready(project)
     if spec is None:
         return refusal
-    copy = _copy(spec)
-    diff = colima.diff(copy, spec.project)
+    diff, refusal = _read_diff(spec, _copy(spec))
+    if refusal:
+        return refusal
     if not diff.strip():
         return 'The sandbox copy is unchanged.'
     return ('Sandbox changes (not yet applied; call sandbox_submit with '
             'your intent to apply them):\n' + gate.stat_text(diff))
+
+
+def _read_diff(spec: sb.SandboxSpec, copy: Path) -> tuple[str, str]:
+    """``(diff, '')`` from ``colima.diff``, or ``('', refusal)``: a copy
+    whose baseline moved is discarded (``BASELINE_CHANGED``); a vanished
+    copy is ``COPY_GONE``; any other git failure is reported."""
+    try:
+        return colima.diff(copy, spec.project), ''
+    except colima.BaselineChanged as e:
+        log.warning('sandbox: %s', e)
+        _discard(_task_key(spec))
+        return '', BASELINE_CHANGED
+    except RuntimeError as e:
+        if not copy.is_dir():
+            with _lock:
+                _copies.pop(_task_key(spec), None)
+                _last_run.pop(_task_key(spec), None)
+            return '', COPY_GONE
+        return '', f'Refused: cannot read the sandbox diff: {e}'
 
 
 def _baseline_reader(copy: Path, project: Path
@@ -349,9 +405,11 @@ def code_health(path: str = '', project: Optional[Path] = None) -> str:
     """The code-health deltas of the task's copy against the project
     (``gate.health_deltas`` over the copy's diff): every changed or new
     function with its verdict and before→after metrics, degraded first.
-    With ``path`` only that file — or, when the copy did not change it,
-    the file's current metrics. Digest capped at ``HEALTH_DIGEST_CHARS``;
-    nothing is applied or run."""
+    With ``path`` only that file — the diff is filtered to it before any
+    baseline is read — or, when the copy did not change it, the file's
+    current metrics (a path that resolves outside the copy, a symlink
+    out of it included, is refused). Digest capped at
+    ``HEALTH_DIGEST_CHARS``; nothing is applied or run."""
     spec, refusal = _ready(project)
     if spec is None:
         return refusal
@@ -361,22 +419,14 @@ def code_health(path: str = '', project: Optional[Path] = None) -> str:
     if want and (Path(want).is_absolute() or '..' in Path(want).parts):
         return f'Refused: {want!r} is not a project-relative path.'
     copy = _copy(spec)
-    try:
-        diff = colima.diff(copy, spec.project)
-    except RuntimeError as e:
-        return f'Refused: cannot read the sandbox diff: {e}'
-    deltas = gate.health_deltas(diff, _baseline_reader(copy, spec.project))
-    if want:
-        deltas = [(rel, d) for rel, d in deltas if rel == want]
-        if not deltas and want not in {rel for rel, *_r in gate.stat(diff)}:
-            target = copy / want
-            if not target.is_file() or not want.endswith('.py'):
-                return f'{want}: not a Python file in the sandbox copy.'
-            try:
-                source = target.read_text(encoding='utf-8')
-            except (OSError, UnicodeDecodeError) as e:
-                return f'{want}: cannot read: {e}'
-            return _clip(_file_health_text(want, source))
+    diff, refusal = _read_diff(spec, copy)
+    if refusal:
+        return refusal
+    deltas = gate.health_deltas(diff, _baseline_reader(copy, spec.project),
+                                paths={want} if want else None)
+    if want and not deltas and want not in {
+            rel for rel, *_r in gate.stat(diff)}:
+        return _unchanged_file_health(copy, want)
     if not deltas:
         what = want or 'the changed Python files'
         return (f'Code health: no function of {what} changed its metrics '
@@ -395,6 +445,25 @@ def code_health(path: str = '', project: Optional[Path] = None) -> str:
                                      for rel, d in ordered]))
 
 
+def _unchanged_file_health(copy: Path, want: str) -> str:
+    """The current metrics of ``want``, a file the copy did not change;
+    refused when it resolves (through a symlink) outside the copy."""
+    target = copy / want
+    try:
+        inside = target.resolve().is_relative_to(copy.resolve())
+    except OSError:
+        inside = False
+    if not inside:
+        return f'Refused: {want!r} resolves outside the sandbox copy.'
+    if not target.is_file() or not want.endswith('.py'):
+        return f'{want}: not a Python file in the sandbox copy.'
+    try:
+        source = target.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError) as e:
+        return f'{want}: cannot read: {e}'
+    return _clip(_file_health_text(want, source))
+
+
 def _reviewer(diff: str) -> Optional[Judge]:
     """The configured ``gate`` judge, else the default LLM reviewer."""
     judge = decisions.judge_for(gate.GATE_POINT)
@@ -410,14 +479,17 @@ def _user_request() -> str:
 
 
 def _verdict(diff: str, intent: str, project: Path,
-             baseline: Optional[gate.BaselineReader] = None) -> gate.Verdict:
-    """Rules first (the deterministic ones, then the code-health ones over
-    ``baseline``); the reviewer only when the rules found nothing that
-    already settles the verdict."""
-    flags = gate.rules(diff, project)
-    deltas = gate.health_deltas(diff, baseline) if baseline else []
-    flags += [gate.Flag(gate.HEALTH_KIND, rel, d.describe())
-              for rel, d in deltas if d.verdict == health.DEGRADED]
+             baseline: Optional[gate.BaselineReader] = None,
+             prior: Optional[gate.Tally] = None) -> gate.Verdict:
+    """Rules first (the deterministic ones with the task's ``prior``
+    tally, then — only when nothing is already suspicious — the code-
+    health ones over ``baseline``); the reviewer only when the rules
+    found nothing that already settles the verdict."""
+    flags = gate.rules(diff, project, prior=prior)
+    deltas: list = []
+    if baseline and not gate.has_suspicious(flags):
+        deltas = gate.health_deltas(diff, baseline)
+        flags += gate.health_flags_from(deltas)
     review = None
     if not gate.has_suspicious(flags):
         packet = gate.packet_text(_user_request(), session.task_text, intent,
@@ -450,12 +522,9 @@ def sandbox_submit(intent: str, project: Optional[Path] = None) -> str:
             return COPY_GONE
         started = time.monotonic()
         copy = _copy(spec)
-        try:
-            diff = colima.diff(copy, spec.project)
-        except RuntimeError as e:
-            if not copy.is_dir():
-                return COPY_GONE
-            return f'Refused: cannot read the sandbox diff: {e}'
+        diff, refusal = _read_diff(spec, copy)
+        if refusal:
+            return refusal
         if not diff.strip():
             return 'Nothing to submit: the sandbox copy is unchanged.'
         stat = gate.stat_text(diff)
@@ -469,7 +538,8 @@ def sandbox_submit(intent: str, project: Optional[Path] = None) -> str:
                     f'the project:\n{stat}\nChange the access mode to '
                     'submit through the gate.')
         verdict = _verdict(diff, what, spec.project,
-                           _baseline_reader(copy, spec.project))
+                           _baseline_reader(copy, spec.project),
+                           prior=_prior(key))
         return _settle(spec, key, what, diff, stat, verdict, started)
 
 
@@ -486,7 +556,7 @@ def _settle(spec: sb.SandboxSpec, key: tuple[str, str], what: str,
         + (f"; deletes: {', '.join(gone)}" if gone else ''))
     header = f'Gate verdict: {verdict.state}\n{reasons}\n{stat}'
     if gone:
-        header += '\nDeleted files: ' + ', '.join(gone)
+        header += '\nDeleted or emptied files: ' + ', '.join(gone)
     if verdict.state == gate.SUSPICIOUS:
         return ('Refused: the quality gate found the change suspicious; '
                 f'nothing was applied.\n{header}\nThe sandbox copy is kept; '
@@ -506,9 +576,12 @@ def _settle(spec: sb.SandboxSpec, key: tuple[str, str], what: str,
                     'sandbox copy is kept.')
     applied = patch.apply_patch(patch.rebase(diff, spec.project))
     ok = applied.startswith('Applied patch')
+    detail = applied[:200]
+    if ok:
+        total = _record_applied(key, diff)
+        detail = f'applied; task so far: {total.describe()}'
     images.record_sandbox_event('apply', ['apply', what[:80]],
-                                time.monotonic() - started, ok,
-                                'applied' if ok else applied[:200])
+                                time.monotonic() - started, ok, detail)
     if not ok:
         return f'{applied}\n{header}\nThe sandbox copy is kept.'
     _discard(key)

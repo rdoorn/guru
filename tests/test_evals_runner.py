@@ -6,6 +6,7 @@ needs Ollama or a network; the fixture pytest runs really do run.
 import gzip
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -571,7 +572,7 @@ class TestRunSuite:
     def test_resolves_base_when_not_given(self, tmp_path: Path, canned,
                                           monkeypatch) -> None:
         a = FakeAdapter()
-        monkeypatch.setattr(bench, '_build_adapters', lambda: [a])
+        monkeypatch.setattr(bench, 'build_adapters', lambda: [a])
         run = runner.run_suite([_case(name='a')], 'Fake|m', tmp_path,
                                trajectory_dir=tmp_path)
         assert run.model == 'Fake|m'
@@ -583,7 +584,7 @@ class TestRunSuite:
                                                     canned,
                                                     monkeypatch) -> None:
         a = FakeAdapter()
-        monkeypatch.setattr(bench, '_build_adapters', lambda: [a])
+        monkeypatch.setattr(bench, 'build_adapters', lambda: [a])
         run = runner.run_suite([_case(name='a')], 'Fake|m', tmp_path,
                                trajectory_dir=tmp_path, num_ctx=8192)
         assert run.num_ctx == 8192
@@ -1706,8 +1707,7 @@ class TestSandboxCase:
         assert [c['detail'] for c in res.checks] == [
             'error: sandbox unavailable'] * 2
         assert calls == [] and 'prompt' not in canned    # model never ran
-        assert not (Path(tempfile.gettempdir())
-                    / runner.SANDBOX_WORKDIR).exists()
+        assert not (runner.sandbox_root() / runner.SANDBOX_WORKDIR).exists()
 
     def test_provisioned_case_records_image_and_verdicts(
             self, tmp_path: Path, monkeypatch) -> None:
@@ -1762,7 +1762,9 @@ class TestSandboxCase:
         # (cwd, on the read list), the index domains allowed, the project
         # dir on the copy, the denying approval asker.
         copy = seen['project']
-        assert copy.parent == Path(tempfile.gettempdir()) / \
+        assert copy.parent == runner.sandbox_root() / runner.SANDBOX_WORKDIR
+        # ...and never the shared temp dir (conftest isolates the root).
+        assert copy.parent != Path(tempfile.gettempdir()) / \
             runner.SANDBOX_WORKDIR
         assert copy.name == 'cli-tool'
         assert Path(seen['cwd']).resolve() == copy.resolve()
@@ -2383,3 +2385,215 @@ class TestCliRubricAndRepeat:
         assert cli_main(['run', '--cases-dir', str(cdir), '--out',
                          str(tmp_path), '--repeat', '0']) == 2
         assert '--repeat must be at least 1' in capsys.readouterr().err
+
+
+# --- the copy must survive the run; a raised turn is a failed case ---------
+
+def _sandbox_ready(monkeypatch) -> list:
+    """Colima present, provisioning canned, no real task copies to clean;
+    returns the list ``verbs.cleanup_all`` calls are recorded in."""
+    monkeypatch.setattr(colima, 'available', lambda *a, **k: True)
+    monkeypatch.setattr(provision, 'provision',
+                        lambda *a, **k: _record())
+    cleaned: list = []
+    monkeypatch.setattr(verbs, 'cleanup_all',
+                        lambda: cleaned.append(True) or 0)
+    return cleaned
+
+
+def _clear_handlers() -> None:
+    tools.set_spawn_handler(None)
+    tools.set_check_handler(None)
+    tools.set_join_handler(None)
+
+
+class SpawningAdapter(FakeAdapter):
+    """Drives the real orchestrator without a model: the main agent spawns
+    one worker and answers once the worker's result arrives; the worker
+    runs ``self.work`` (a callable given the worker's SessionState) and
+    reports. ``on_mailbox`` runs at the start of main's second turn."""
+
+    def __init__(self, work, on_mailbox=None) -> None:
+        super().__init__()
+        self.work = work
+        self.on_mailbox = on_mailbox
+
+    def run_turn(self):
+        st = session.current()
+        if st.agent_id != 'main':
+            self.work(st)
+            st.messages.append({'role': 'assistant',
+                                'content': 'worker: done'})
+            return
+        users = [m for m in st.messages if m.get('role') == 'user']
+        if len(users) == 1:
+            out = tools.execute_tool('spawn', {'task': 'do the work'})
+            st.messages.append({'role': 'tool', 'tool_name': 'spawn',
+                                'content': out})
+            st.messages.append({'role': 'assistant',
+                                'content': 'Let me check the result:'})
+            return
+        if self.on_mailbox is not None:
+            self.on_mailbox()
+        st.messages.append({'role': 'assistant',
+                            'content': 'fixed: the worker applied it'})
+
+
+class TestSandboxCopyIntegrity:
+    """Run 94fdc1bb11a5: another process emptied ``<tmp>/guru-eval-sandbox``
+    while a case ran; the checks then saw ``Errno 2`` (or a fresh, clean
+    copy) and the main agent's mailbox turn died silently on the vanished
+    cwd, so its pre-join stall line was recorded as the answer."""
+
+    def _run(self, tmp_path: Path, case: Case, adapter) -> runs.CaseResult:
+        base = session.SessionState()
+        base.adapter = adapter
+        base.model = 'fake'
+        try:
+            return runner.run_case(case, base, [base.adapter],
+                                   tmp_path / 'out')
+        finally:
+            _clear_handlers()
+
+    def test_fake_sandbox_case_end_to_end_checks_see_the_copy(
+            self, tmp_path: Path, monkeypatch) -> None:
+        cleaned = _sandbox_ready(monkeypatch)
+        seen: dict = {}
+
+        def work(st) -> None:
+            # What an applied sandbox_submit leaves behind: the fix in the
+            # real tree (the copy is the cwd) and the verb on the record.
+            copy = Path.cwd()
+            seen['copy'] = copy.resolve()
+            src = (copy / 'wordcount.py').read_text(encoding='utf-8')
+            (copy / 'wordcount.py').write_text(
+                src.replace("text.split(' ')", 'text.split()'),
+                encoding='utf-8')
+            st.messages.append({'role': 'tool', 'tool_name': 'sandbox_submit',
+                                'content': 'Gate verdict: intended'})
+        case = _sandbox_case(tools_used_all=['sandbox_submit'],
+                             files_changed=['wordcount.py'],
+                             fixture_tests_pass=True,
+                             answer_contains=['fixed'])
+        res = self._run(tmp_path, case, SpawningAdapter(work))
+        obs = res.observed
+        assert obs['error'] == '', obs
+        assert res.passed is True, res.checks
+        assert obs['files_changed'] == ['wordcount.py']
+        assert obs['fixture_tests_pass'] is True
+        assert obs['answer'] == 'fixed: the worker applied it'
+        assert obs['spawned'] == 1 and 'sandbox_submit' in obs['tools_used']
+        # The stable path, under the isolated root, and the verbs' copies
+        # were cleaned before the checks — the copy itself only afterwards.
+        root = runner.sandbox_root() / runner.SANDBOX_WORKDIR
+        assert seen['copy'] == (root / 'cli-tool').resolve()
+        assert cleaned == [True]
+        assert not root.exists()
+
+    def test_replaced_copy_is_a_clear_error_not_a_clean_diff(
+            self, tmp_path: Path, monkeypatch) -> None:
+        """The dependency-request shape: a concurrent ``run_case`` in
+        another process emptied and re-made the stable path mid-run."""
+        _sandbox_ready(monkeypatch)
+
+        async def replace_copy(self, prompt, timeout=None):
+            copy = Path.cwd()
+            (copy / 'wordcount.py').write_text('edited\n', encoding='utf-8')
+            shutil.rmtree(copy)
+            runner.prepare_fixture('cli-tool', copy.parent)
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', replace_copy)
+        case = _sandbox_case(files_changed=['wordcount.py'])
+        res = self._run(tmp_path, case, FakeAdapter())
+        obs = res.observed
+        assert obs['error'].startswith(runner.COPY_LOST)
+        assert runner.SANDBOX_ROOT_ENV in obs['error']
+        assert obs['files_changed'] == [] and res.passed is False
+        assert [c['detail'] for c in res.checks] == [
+            f"error: {obs['error']}"]
+
+    def test_removed_copy_is_the_same_error_not_errno_2(
+            self, tmp_path: Path, monkeypatch) -> None:
+        _sandbox_ready(monkeypatch)
+
+        async def remove_copy(self, prompt, timeout=None):
+            shutil.rmtree(Path.cwd())
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', remove_copy)
+        res = self._run(tmp_path, _sandbox_case(files_changed=[]),
+                        FakeAdapter())
+        assert res.observed['error'].startswith(runner.COPY_LOST)
+        assert 'Errno' not in res.observed['error']
+        assert res.passed is False
+
+    def test_raised_turn_fails_the_case_instead_of_the_stall_line(
+            self, tmp_path: Path, monkeypatch) -> None:
+        """The main agent's mailbox synthesis turn raises (in the run: the
+        cwd was gone). The case must say so; 'Let me check the result:'
+        is not the answer."""
+        def boom() -> None:
+            raise FileNotFoundError(2, 'No such file or directory')
+        case = _case(fixture='docs-only', files_changed=[],
+                     answer_contains=['fixed'])
+        res = self._run(tmp_path, case, SpawningAdapter(
+            lambda st: None, on_mailbox=boom))
+        obs = res.observed
+        assert obs['error'] == ('worker error: main: FileNotFoundError: '
+                                '[Errno 2] No such file or directory')
+        assert obs['answer'] == ''
+        assert res.passed is False
+        assert {c['detail'] for c in res.checks} == {f"error: {obs['error']}"}
+        # The mailbox delivery is on the transcript, unanswered.
+        with gzip.open(res.transcript_path, 'rt', encoding='utf-8') as fh:
+            agents = json.load(fh)
+        last = agents[0]['messages'][-1]
+        assert last['role'] == 'user'
+        assert last['content'].startswith('[result from agent1')
+
+    def test_clean_run_has_no_worker_error(self, tmp_path: Path) -> None:
+        case = _case(fixture='docs-only', files_changed=[],
+                     answer_contains=['fixed'])
+        res = self._run(tmp_path, case, SpawningAdapter(lambda st: None))
+        assert res.observed['error'] == '' and res.passed is True
+
+
+class TestFinalAnswer:
+    def _main(self, messages: list) -> Agent:
+        return _agent('main', [{'role': 'system', 'content': 'sys'},
+                               {'role': 'user', 'content': 'the prompt'},
+                               *messages])
+
+    def test_stall_line_before_an_unanswered_join_is_not_the_answer(
+            self) -> None:
+        agent = self._main([
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [('spawn', {'task': 't'})]},
+            {'role': 'tool', 'tool_name': 'spawn', 'content': 'Spawned'},
+            {'role': 'assistant', 'content': 'Let me check the result:',
+             'tool_calls': [('join', {'targets': 'agent1'})]},
+            {'role': 'tool', 'tool_name': 'join', 'content': 'Waiting'},
+            {'role': 'user', 'content': '[joined results]\n\nagent1: done'},
+        ])
+        assert bench._final_answer(agent) == ''
+
+    def test_synthesis_after_the_mailbox_message_is_the_answer(self) -> None:
+        agent = self._main([
+            {'role': 'assistant', 'content': 'Let me check the result:'},
+            {'role': 'user', 'content': '[joined results]\n\nagent1: done'},
+            {'role': 'assistant', 'content': 'The fix landed.'},
+        ])
+        assert bench._final_answer(agent) == 'The fix landed.'
+
+    def test_answer_after_a_nudge_and_tool_results_still_counts(
+            self) -> None:
+        agent = self._main([
+            {'role': 'assistant', 'content': ''},
+            {'role': 'user', 'content': turn._NUDGE_TEXT},
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [('read_file', {'path': 'x'})]},
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'text'},
+            {'role': 'assistant', 'content': 'Found it.'},
+        ])
+        assert bench._final_answer(agent) == 'Found it.'
+        # And the empty-answer shape of collect_metrics is unchanged.
+        assert bench._final_answer(self._main([])) == ''

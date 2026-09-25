@@ -674,12 +674,13 @@ path.
 
 **The verbs.**
 
-- `sandbox_run(argv)` — a fixed argv (`argv[0]` one of `python`, `pytest`,
-  `uv`, `ruff`, `mypy`, `flake8`, `make`; shells refused) in the task's
+- `sandbox_run(argv)` — a fixed argv as a JSON list (`argv[0]` one of
+  `python`, `pytest`, `uv`, `ruff`, `mypy`, `flake8`, `make`; shells
+  refused; a plain string is split on whitespace only) in the task's
   copy inside the container: `--network none`, unprivileged user, all
-  capabilities dropped, read-only root, tmpfs `/tmp`, cpu/memory/pid limits,
-  wall-clock kill. Digest: exit code and the first lines of output;
-  `detail` returns the last 4 KB.
+  capabilities dropped, read-only root, tmpfs `/tmp` (also `HOME`),
+  `.git` read-only, cpu/memory/pid limits, wall-clock kill. Digest: exit
+  code and the first lines of output; `detail` returns the last 4 KB.
 - `sandbox_python(code)` — runs a Python snippet the same way (arbitrary
   code is fine *inside* the sandbox; that is what it is for).
 - `sandbox_diff()` — per-file `+/-` counts of the copy against the project.
@@ -715,18 +716,28 @@ up as a `delete` flag (`deletes <path> (N lines)`, informational) and in
 the change summary the reviewer sees, and the reviewer answers whether
 every deletion is something the *user's request* asked for
 (`deletions_requested`); a `no` makes the verdict `unclear`, a `yes` with
-an otherwise clean review is applied like any edit. `apply_patch` accepts
-deletions (`+++ /dev/null`) whose body equals the file exactly, inside and
-outside the sandbox — one patch algebra.
+an otherwise clean review is applied like any edit. A file *emptied* in
+the copy (every line removed, the file kept) is treated as a deletion
+throughout: `empties <path> (N lines; file kept)`, an `emptied` marker in
+the change summary, and the destructive counts below. `apply_patch`
+accepts deletions (`+++ /dev/null`) whose body equals the file exactly,
+inside and outside the sandbox — one patch algebra.
 
 *Destructive changes* are never auto-applied: a rename (the patch algebra
-refuses them; the headers are scanned before parsing), more than 3 files
-deleted in one submit, more than 200 lines removed net (removed minus
-added over the whole diff), or the deletion of any test file (under a
-`tests/`/`test/` directory, or named `test_*.py`, `*_test.py`,
-`conftest.py`) raises a `destructive` flag naming the files, and the
-verdict is `unclear` at most — the user is asked, whatever the reviewer
-says.
+refuses them; the headers are scanned only when the diff failed to
+parse), more than 3 files deleted or emptied, more than 200 lines removed
+*gross* — added lines offset nothing, so padding a removal with blank or
+comment lines (or anything else) buys nothing; the flag reports how many
+added lines were content — or the deletion or emptying of any test file
+(under a `tests/`, `test/`, `testing/` or `tests_*/` directory, or named
+`test_*.py`, `*_test.py`, `*_tests.py`, `conftest.py`) raises a
+`destructive` flag naming the files, and the verdict is `unclear` at
+most — the user is asked, whatever the reviewer says. The two thresholds
+hold over the *whole task*, not per submit: guru keeps a per-task tally
+of the files deleted and lines removed by the submits it already
+applied, and a submit that would push the running total over a threshold
+is flagged with both numbers (`deletes 2 files now, 5 in this task (more
+than 3)`). The tally is cleared when the task ends.
 
 *Code health* (`guru/domain/health.py`, pure `ast`): for every Python
 function the diff changes or adds, the gate compares the copy's baseline
@@ -743,7 +754,24 @@ Each degraded function is a `health` flag (`unclear` at most, never
 `suspicious`), and the reviewer's packet carries a "Code health" block
 computed by guru outside the untrusted fences listing the degraded and
 improved functions with before→after metrics. A source that does not
-parse is skipped, never an error.
+parse is skipped, never an error; at most 20 Python files per diff are
+measured, and none when the deterministic rules already found the change
+suspicious (the verdict is settled). `code_health(path)` measures only
+that file (no other baseline is read) and refuses a path that resolves
+outside the copy — a symlink out of it included.
+
+*The baseline is guru's, not the worker's.* The gate compares the copy
+with the commit `prepare_copy` made, so that commit must be out of the
+container's reach: the copy is mounted read-write, but its `.git` is
+mounted read-only on top of it (`-v <copy>/.git:/work/.git:ro`), and the
+baseline commit's sha is recorded in the copy's marker file at creation.
+`sandbox_diff`, `code_health` and `sandbox_submit` all verify
+`git rev-parse HEAD` against the recorded sha before reading anything; a
+copy whose baseline moved is refused (`Refused: sandbox copy baseline
+changed`) and discarded. Inside the container `HOME` and
+`XDG_CACHE_HOME` point at the tmpfs `/tmp` (uid 1000 has no home and the
+root is read-only), so tool caches and tests that write under `HOME`
+work and nothing persists.
 
 In read-only mode a submit reports the diff and stops before the reviewer
 is consulted (nothing could be applied, so the diff never leaves the

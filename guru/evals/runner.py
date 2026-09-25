@@ -40,7 +40,8 @@ cheapest rung for the CLI's default.
 
 Sandbox cases (``sandbox = true``): the copy is made at a stable path
 (``<tmp>/guru-eval-sandbox/<fixture>``, so the image record and tag are
-reused across runs while the lockfile is unchanged) and provisioned with
+reused across runs while the lockfile is unchanged; ``<tmp>`` is
+``$GURU_EVAL_SANDBOX_ROOT`` when set) and provisioned with
 ``provision.provision`` before the prompt runs — ``pypi.org`` and
 ``files.pythonhosted.org`` are allowed for the case (the runner's own
 build, not a model escalation), the build clock lands in
@@ -121,7 +122,12 @@ _WORKER_POLL_S = 0.2
 _PERSISTERS = ('persist_read_dir', 'persist_write_dir', 'persist_domain')
 DEFAULT_TRAJECTORY_DIR = cases.REPO_ROOT / 'evals'   # TRAJECTORY.md
 SANDBOX_UNAVAILABLE = 'sandbox unavailable'
-SANDBOX_WORKDIR = 'guru-eval-sandbox'   # under the temp dir; stable path
+SANDBOX_WORKDIR = 'guru-eval-sandbox'   # under sandbox_root(); stable path
+# Overrides the root of the stable sandbox workdir (default: the temp dir).
+# The test suite sets it per session so a test never touches the path a
+# live eval is using; the runner sets it for a fixture's own pytest.
+SANDBOX_ROOT_ENV = 'GURU_EVAL_SANDBOX_ROOT'
+COPY_LOST = 'fixture copy removed or replaced during the run'
 
 
 def _deny(question: str) -> bool:
@@ -209,18 +215,48 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
+def sandbox_root() -> Path:
+    """Where the stable sandbox workdir lives: ``$GURU_EVAL_SANDBOX_ROOT``
+    when set (the test suite, a fixture's own pytest), else the temp dir."""
+    return Path(os.environ.get(SANDBOX_ROOT_ENV) or tempfile.gettempdir())
+
+
 def _workdir(case: Case) -> Path:
     """A fresh temp dir for the case's copy. A sandbox case uses the
-    stable ``<tmp>/guru-eval-sandbox`` (emptied first): the sandbox keys
-    its image record and tag on the resolved project path, so a stable
-    path means one image per fixture, rebuilt only when the lockfile
-    changes."""
+    stable ``<sandbox_root()>/guru-eval-sandbox`` (emptied first): the
+    sandbox keys its image record and tag on the resolved project path,
+    so a stable path means one image per fixture, rebuilt only when the
+    lockfile changes. The path is shared by every eval process of the
+    user, so nothing else may use it while a case runs (see
+    :func:`_check_copy`)."""
     if not case.sandbox:
         return Path(tempfile.mkdtemp(prefix=f'guru-eval-{case.name}-'))
-    workdir = Path(tempfile.gettempdir()) / SANDBOX_WORKDIR
+    workdir = sandbox_root() / SANDBOX_WORKDIR
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
     return workdir
+
+
+def _inode(path: Path) -> int:
+    return path.stat().st_ino
+
+
+def _check_copy(copy: Path, inode: int) -> None:
+    """``RuntimeError(COPY_LOST)`` unless ``copy`` is still the directory
+    made for this case (same inode). A copy that vanished or was replaced
+    mid-run (run 94fdc1bb11a5: a concurrent guru pytest run recreated the
+    stable sandbox path) would otherwise be diffed as clean or fail the
+    checks with a bare ``Errno 2`` — and the agents' process cwd is gone
+    with it, so their turns fail too."""
+    try:
+        same = copy.is_dir() and _inode(copy) == inode
+    except OSError:
+        same = False
+    if not same:
+        raise RuntimeError(
+            f'{COPY_LOST}: {copy} (another eval, or a guru test run, '
+            f'sharing {copy.parent}? set {SANDBOX_ROOT_ENV} to separate '
+            'them)')
 
 
 def _assert_no_running_loop(what: str) -> None:
@@ -312,14 +348,22 @@ def files_changed(repo: Path) -> list[str]:
 def _fixture_env(repo: Path) -> dict:
     """The environment for the fixture's pytest: ``PYTHONPATH`` starts with
     the copy, so a copied package (a git fixture of a real project, which
-    has no venv of its own) shadows any installed one, and bytecode writing
-    is off so edits between two runs are never masked by a cached .pyc."""
+    has no venv of its own) shadows any installed one, bytecode writing
+    is off so edits between two runs are never masked by a cached .pyc,
+    and ``TMPDIR``/``GURU_EVAL_SANDBOX_ROOT`` point inside the copy."""
     env = dict(os.environ)
     prev = env.get('PYTHONPATH', '')
     env['PYTHONPATH'] = str(repo) + (os.pathsep + prev if prev else '')
     # No bytecode in the copy: a stale .pyc (same size and mtime second as
     # an edited source) would make the fixture's tests report the old code.
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    # A fixture that is guru itself (the dogfood case) runs this runner's
+    # own tests, which empty the stable sandbox workdir: give them their
+    # own temp dir and sandbox root inside the copy (removed with it).
+    scratch = Path(repo) / '.guru-eval-tmp'
+    scratch.mkdir(exist_ok=True)
+    env['TMPDIR'] = str(scratch)
+    env[SANDBOX_ROOT_ENV] = str(scratch)
     return env
 
 
@@ -542,8 +586,9 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
     the model run (not the fixture copy, nor the sandbox provisioning
     that a ``case.sandbox`` case does first — ``sandbox`` is its
     :func:`provision_sandbox` record, None otherwise). ``error`` is set
-    when workers were still running after the bounded drain. ``routing``
-    makes the bench route sub-agents (inert when None).
+    when workers were still running after the bounded drain, or when an
+    agent's turn raised (``BenchRun.worker_errors``). ``routing`` makes
+    the bench route sub-agents (inert when None).
     """
     registry = routing.registry if routing is not None else None
     settings = routing.settings if routing is not None else None
@@ -552,11 +597,9 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         base = _state_for(case.model, base_state, adapters)
         token = session.use(base)
         t0 = time.monotonic()
+        run = bench.BenchRun(base, registry=registry, routing=settings)
         try:
-            agents = asyncio.run(
-                bench.BenchRun(base, registry=registry,
-                               routing=settings).run(case.prompt,
-                                                     timeout=case.timeout_s))
+            agents = asyncio.run(run.run(case.prompt, timeout=case.timeout_s))
         finally:
             seconds = time.monotonic() - t0
             session.reset(token)
@@ -564,6 +607,12 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         if not _drain_workers(agents, WORKER_DRAIN_S):
             box.leaked = True
             error = 'workers still running after timeout'
+        elif run.worker_errors:
+            # A turn that raised (run 94fdc1bb11a5: the mailbox synthesis
+            # turn died on a vanished cwd) is a failed case, not a case
+            # whose answer is whatever the agent said before.
+            error = 'worker error: ' + '; '.join(
+                f'{title}: {text}' for title, text in run.worker_errors)
         return agents, seconds, error, info
 
 
@@ -661,7 +710,10 @@ def run_case(case: Case, base_state: session.SessionState,
     (:func:`provision_sandbox`; ``observed.sandbox``), its gate verdicts
     come from the ``sandbox_events`` rows it appended
     (``observed.gate_verdicts``), and without Colima it is skipped with
-    error ``sandbox unavailable`` (``observed.skipped``) and fails.
+    error ``sandbox unavailable`` (``observed.skipped``) and fails. A copy
+    that is not the same directory after the run (removed or replaced by
+    another process) fails with error ``COPY_LOST`` instead of being
+    diffed; an agent turn that raised fails with ``worker error: ...``.
     """
     _assert_no_running_loop('run_case')
     out_dir = Path(out_dir)
@@ -680,6 +732,7 @@ def run_case(case: Case, base_state: session.SessionState,
     try:
         copy = prepare_fixture(case.fixture_git or case.fixture, workdir,
                                fixtures_dir)
+        inode = _inode(copy)
         try:
             agents, seconds, error, sandbox = _execute(
                 case, copy, base_state, adapters, repo, routing,
@@ -689,6 +742,7 @@ def run_case(case: Case, base_state: session.SessionState,
         finally:
             if case.sandbox:
                 verbs.cleanup_all()      # the verbs' task copies
+        _check_copy(copy, inode)         # the checks must see THIS copy
         changed = files_changed(copy)
         if case.expect.fixture_tests_pass is not None:
             tests_pass = fixture_tests_pass(copy)
@@ -894,7 +948,7 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
     out_root = Path(out_root)
     if adapters is None:
-        adapters = bench._build_adapters()
+        adapters = bench.build_adapters()
     if base_state is None:
         base_state, model_spec = resolve_base(model_spec, adapters, num_ctx)
     elif not model_spec or model_spec == cases.DEFAULT_MODEL:
