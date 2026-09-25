@@ -176,16 +176,24 @@ def looks_like_preamble(content: str) -> bool:
     return bool(_PREAMBLE_RE.search(content))
 
 
-def _turn_request() -> str:
-    """The user's request for this turn: the most recent user message that
-    is not one of the loop's own nudges."""
-    for m in reversed(session.messages):
+def request_in(messages: list) -> str:
+    """The user's request in ``messages``: the most recent user message
+    that is not one of the loop's own nudges; ``''`` when there is none.
+    For any agent's history (the orchestrator reads a parent's), not only
+    the bound session's."""
+    for m in reversed(messages):
         if not isinstance(m, dict) or m.get('role') != 'user':
             continue
         text = (m.get('content') or '').strip()
         if text and not _is_nudge(text):
             return text
     return ''
+
+
+def _turn_request() -> str:
+    """The user's request for this turn (:func:`request_in` over the bound
+    session's messages)."""
+    return request_in(session.messages)
 
 
 # Public name: the sandbox gate hands the turn's request to the reviewer.

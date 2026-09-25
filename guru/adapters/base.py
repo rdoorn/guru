@@ -5,14 +5,65 @@ An adapter knows how to list a provider's models and run one user turn
 state. Tool execution and gating stay in the domain layer — adapters call
 ``guru.domain.tools.execute_tool`` when a model requests a tool.
 """
+import itertools
+import json
+import os
+import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
 # System instruction for :meth:`Adapter.complete`: every single-shot
 # completion guru asks for (the sandbox gate's review) is machine-read, so
 # the model is told once, the same way on every provider, to emit JSON only.
 JSON_ONLY = ('Answer with a single JSON object and nothing else: no prose,'
              ' no markdown fences, no explanation outside the object.')
+
+
+# Request dumping (debugging prompt caching and prefix stability): with
+# ``GURU_DUMP_REQUESTS=<dir>`` every outgoing request's keyword arguments
+# are written to ``<dir>/<ts>-<adapter>-<n>.json``. The kwargs are the
+# request body only (model, messages, tools, system, ...); the API key is
+# held by the SDK client and never appears in them.
+DUMP_ENV = 'GURU_DUMP_REQUESTS'
+_dump_counter = itertools.count(1)
+_SLUG_RE = re.compile(r'[^A-Za-z0-9._-]+')
+
+
+def _jsonable(value):
+    """JSON fallback for SDK objects in a request (content blocks a
+    previous response returned): ``model_dump()`` when available, else
+    ``repr``."""
+    dump = getattr(value, 'model_dump', None)
+    if callable(dump):
+        return dump()
+    return repr(value)
+
+
+def dump_request(adapter: str, kwargs: dict) -> Optional[Path]:
+    """Write ``kwargs`` (one outgoing request) as JSON under the directory
+    named by ``$GURU_DUMP_REQUESTS``; returns the path, or None when the
+    variable is unset. The file is ``<ts>-<adapter>-<n>.json`` with ``ts``
+    in UTC to the millisecond and ``n`` a per-process counter, so a
+    directory listing is the request sequence. Never raises into the turn:
+    a write failure is swallowed (the dump is a debugging aid)."""
+    directory = os.environ.get(DUMP_ENV, '')
+    if not directory:
+        return None
+    try:
+        now = time.time()
+        stamp = (time.strftime('%Y%m%dT%H%M%S', time.gmtime(now))
+                 + f'{int(now * 1000) % 1000:03d}Z')
+        slug = _SLUG_RE.sub('_', adapter).strip('_') or 'adapter'
+        path = Path(directory) / f'{stamp}-{slug}-{next(_dump_counter)}.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(kwargs, indent=1, ensure_ascii=False,
+                                   default=_jsonable), encoding='utf-8')
+        return path
+    except Exception:                                    # noqa: BLE001
+        return None
 
 
 @dataclass

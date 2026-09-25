@@ -1662,3 +1662,208 @@ class TestPanelSecurityWorker:
         self._spawn(o, main, 'review upload.py', kind='review')
         assert [a.state.active_role for a in o.launched] == [
             None, 'security-engineer']
+
+
+class _DeferringLoop:
+    """Collects ``call_soon_threadsafe`` callbacks; ``run()`` runs them —
+    the window in which a worker thread's ``join``/``check`` runs before
+    the loop thread registers the children of a ``spawn``."""
+
+    def __init__(self) -> None:
+        self.callbacks: list = []
+
+    def call_soon_threadsafe(self, fn, *args) -> None:
+        self.callbacks.append((fn, args))
+
+    def run(self) -> None:
+        for fn, args in self.callbacks:
+            fn(*args)
+        self.callbacks.clear()
+
+
+class TestSpawnJoinRace:
+    """A ``join``/``check`` in the same tool round as the ``spawn`` runs
+    before the spawn's ``_start`` callback appends the child (headless
+    front-ends run check/join inline on the worker thread): the child is
+    pending and already counts as the parent's running sub-agent."""
+
+    @pytest.fixture(autouse=True)
+    def _constant_environment(self, monkeypatch) -> None:
+        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+
+    def _orch(self):
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        o.loop = _DeferringLoop()
+        o.launched = []                                     # type: ignore
+        o.launch = o.launched.append                        # type: ignore
+        main = o.manager.active
+        main.busy = True
+        return o, main
+
+    def _spawn(self, o, main, task: str) -> str:
+        token = session.use(main.state)
+        try:
+            return o.spawn(task)
+        finally:
+            session.reset(token)
+
+    def test_join_before_registration_waits_for_the_child(self) -> None:
+        o, main = self._orch()
+        self._spawn(o, main, 'look at x')
+        assert o.manager.agents == [main]                   # not yet appended
+        out = o.do_join(main.state, ['agent1'])
+        assert out.startswith('Waiting for agent1')
+        assert main.state.turn_waiting is True
+        assert o.barriers[main]['remaining'] == {'agent1'}
+        o.loop.run()                                        # _start runs
+        assert [a.title for a in o.manager.agents[1:]] == ['agent1']
+        assert o.launched == o.manager.agents[1:]
+        assert o.children_of(main) == o.manager.agents[1:]  # drained
+        assert o._pending == {}
+
+    def test_join_unknown_title_still_refused(self) -> None:
+        o, main = self._orch()
+        self._spawn(o, main, 'look at x')
+        out = o.do_join(main.state, ['agent9'])
+        assert out.startswith('None of those are your sub-agents')
+        assert 'agent1' in out and main.state.turn_waiting is False
+
+    def test_check_before_registration_sees_it_running(self) -> None:
+        o, main = self._orch()
+        self._spawn(o, main, 'look at x')
+        assert o.do_check(main.state, 'all') == 'Sub-agents:\nagent1: running'
+        assert o.do_check(main.state, 'agent1').startswith(
+            'agent1: running (task: look at x)')
+
+    def test_pending_child_reports_into_the_barrier(self) -> None:
+        o, main = self._orch()
+        self._spawn(o, main, 'look at x')
+        o.do_join(main.state, ['agent1'])
+        o.loop.run()
+        child = o.manager.agents[1]
+        child.busy = False
+        child.state.messages.append({'role': 'assistant', 'content': 'A1'})
+        delivered: list = []
+        o.deliver = (                                       # type: ignore
+            lambda parent, notice, payload: delivered.append(
+                (parent, payload)))
+        o.report(child)
+        assert delivered and delivered[0][0] is main
+        payload = delivered[0][1]
+        assert '[joined results]' in payload and 'A1' in payload
+        assert main not in o.barriers
+
+    def test_spawn_panel_children_are_pending_too(self) -> None:
+        o, main = self._orch()
+        o.spawn_panel(main, [('review a', 'developer', 'code-review'),
+                             ('review b', 'security-engineer', 'code-review')])
+        assert [a.title for a in o.children_of(main)] == ['agent1', 'agent2']
+        assert o.do_check(main.state, 'all').count('running') == 2
+        o.loop.run()
+        assert o._pending == {} and len(o.manager.agents) == 3
+
+    def test_end_to_end_spawn_and_join_in_one_round(self) -> None:
+        """An instant fake model: the main agent spawns and joins in the
+        same round; the child's answer comes back through the barrier."""
+        import asyncio
+        from guru.adapters.base import Adapter
+        from guru.orchestrator import Orchestrator
+
+        replies: list = []
+
+        class Instant(Adapter):
+            name = 'fake'
+            def available(self): return True
+            def list_models(self): return []
+            def activate(self, m): pass
+            def summarise(self, t): return 's'
+
+            def run_turn(self):
+                st = session.current()
+                if st.task_id:                             # the child
+                    st.messages.append(
+                        {'role': 'assistant', 'content': 'child says hi'})
+                    return
+                if not replies:                            # main, turn 1
+                    o.spawn('look at x')
+                    replies.append(o.join('agent1'))
+                    st.messages.append({'role': 'assistant', 'content': ''})
+                    return
+                st.messages.append(                        # mailbox turn
+                    {'role': 'assistant', 'content': 'synth'})
+
+        async def drive():
+            o.loop = asyncio.get_running_loop()
+            main = o.manager.active
+            main.state.adapter = Instant()
+            main.state.model = 'fake'
+            o.attach_console(main)
+            o.submit(main, 'do it')
+            for _ in range(300):
+                await asyncio.sleep(0.02)
+                if len(replies) == 1 and not any(
+                        a.busy or a.queue for a in o.manager.agents):
+                    break
+            return main
+
+        o = Orchestrator()
+        main = asyncio.run(drive())
+        assert replies[0].startswith('Waiting for agent1')
+        assert len(o.manager.agents) == 2
+        joined = [m for m in main.state.messages
+                  if isinstance(m, dict) and m.get('role') == 'user'
+                  and '[joined results]' in (m.get('content') or '')]
+        assert joined and 'child says hi' in joined[0]['content']
+        assert any(conversation.msg_content(m) == 'synth'
+                   for m in main.state.messages)
+
+
+class TestPanelText:
+    """The panel judge reads the parent's request and then the task, so a
+    controller that strips 'security' from the task it writes still
+    triggers the security worker."""
+
+    def test_request_first_then_task(self) -> None:
+        from guru.orchestrator import panel_text
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'review auth for security holes'},
+                {'role': 'assistant', 'content': ''}]
+        assert panel_text(msgs, 'review upload.py') == \
+            'review auth for security holes\n\nreview upload.py'
+
+    def test_task_alone_without_or_equal_to_the_request(self) -> None:
+        from guru.orchestrator import panel_text
+        assert panel_text([], 'review upload.py') == 'review upload.py'
+        msgs = [{'role': 'user', 'content': 'review upload.py'}]
+        assert panel_text(msgs, 'review upload.py') == 'review upload.py'
+
+    def test_judge_sees_request_and_task(self, monkeypatch, fake_repo,
+                                         labels_isolated) -> None:
+        from guru.domain import decisions
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'active')
+        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'panel': True})
+        monkeypatch.setattr(config, 'DECISIONS_THRESHOLDS', {})
+        monkeypatch.setattr(config, 'DECISIONS_TIMEOUT_MS', 1000)
+        decisions.reset_breakers()
+        states: list = []
+
+        class Judge(_SecurityJudge):
+            def ask(self, questions):
+                states.extend(q.state for q in questions)
+                return super().ask(questions)
+        decisions.set_judge('panel', Judge(0.9))
+        o, main = _tiers_orch()
+        o.loop = _FakeLoop()
+        o.launch = lambda a: None                           # type: ignore
+        main.state.messages.append(
+            {'role': 'user', 'content': 'review the login for security'})
+        token = session.use(main.state)
+        try:
+            o.spawn('review upload.py', kind='review')
+        finally:
+            session.reset(token)
+        assert states == [
+            'Task: review the login for security\n\nreview upload.py']
+        assert [a.state.active_role for a in o.manager.agents[1:]] == [
+            None, 'security-engineer']

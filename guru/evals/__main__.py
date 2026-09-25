@@ -13,6 +13,10 @@ re-grades a stored run offline (no case re-runs) with one column per
 judge next to the hand grade from ``evals/rubric-labels.toml``; ``grade
 RUN_ID --show`` prints what the judge sees per case (prompt, rubric,
 evidence, answer) with a ``[[label]]`` stub, for grading by hand.
+``--samples N`` (both commands) asks each judge N times per case; the
+recorded score is the median (ties to the lower value), the cell reads
+``2 (2,2,1)`` and the agreement line gains a stability share (cases whose
+samples all agreed).
 """
 from __future__ import annotations
 
@@ -89,11 +93,21 @@ def _row(res: CaseResult, routed: bool = False) -> list:
             f'{res.seconds:.1f}', _fmt_cost(res.cost_usd), '; '.join(parts)]
 
 
+def _samples_text(sample_scores: list) -> str:
+    """`` (2,2,1)`` after a median when there was more than one sample,
+    else ``''``."""
+    if len(sample_scores) < 2:
+        return ''
+    return ' (' + ','.join(str(s) for s in sample_scores) + ')'
+
+
 def _rubric_detail(res: CaseResult) -> str:
-    """``rubric: 2/2`` when graded, ``rubric: error`` when the judge
-    failed, ``rubric: grade by hand`` when nothing graded it."""
+    """``rubric: 2/2`` when graded (``rubric: 2/2 (2,2,1)`` with the
+    samples behind a median), ``rubric: error`` when the judge failed,
+    ``rubric: grade by hand`` when nothing graded it."""
     if res.rubric_score is not None:
-        return f'rubric: {res.rubric_score}/{runs.RUBRIC_MAX}'
+        return (f'rubric: {res.rubric_score}/{runs.RUBRIC_MAX}'
+                + _samples_text(res.rubric_samples))
     if res.rubric_reason.startswith('error:'):
         return 'rubric: error'
     return 'rubric: grade by hand'
@@ -128,6 +142,8 @@ def _print_run(run: Run, out_root: Path) -> None:
     total = run.rubric_total()
     if total is not None:
         summary += f' · rubric {total[0]}/{total[1]}'
+        if run.rubric_samples > 1:
+            summary += f' (median of {run.rubric_samples} samples)'
     counts = _gate_counts(run)
     if counts:
         summary += ' · gate ' + ' '.join(f'{k}={v}' for k, v in counts)
@@ -217,6 +233,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f'error: --rubric-min must be 0..{runs.RUBRIC_MAX}',
               file=sys.stderr)
         return 2
+    if args.samples < 1:
+        print('error: --samples must be at least 1', file=sys.stderr)
+        return 2
     out_root = Path(args.out)
     routing = None
     routing_name = ''
@@ -240,7 +259,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if res.observed.get('skipped'):
             flags += f', skipped: {res.observed.get("error", "")}'
         if res.rubric_score is not None:
-            flags += f', rubric {res.rubric_score}/{runs.RUBRIC_MAX}'
+            flags += (f', rubric {res.rubric_score}/{runs.RUBRIC_MAX}'
+                      + _samples_text(res.rubric_samples))
         print(f'[evals] {res.case}: {"PASS" if res.passed else "FAIL"}'
               f' ({res.seconds:.1f}s{flags})', flush=True)
 
@@ -259,7 +279,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                                    allow_spend=args.allow_spend,
                                    decisions=decisions,
                                    rubric_spec=rubric_spec,
-                                   rubric_min=args.rubric_min)
+                                   rubric_min=args.rubric_min,
+                                   rubric_samples=args.samples)
         except ValueError as e:
             print(f'error: {e}', file=sys.stderr)
             return 2
@@ -307,10 +328,18 @@ def _judge_headers(specs: list) -> list:
 
 
 def _grade_cell(row: grading.GradeRow, spec: str) -> str:
+    """``2`` (one sample) or ``2 (2,2,1)`` (median, then the samples);
+    ``err`` when the judge failed, ``-`` when it did not grade."""
     grade = row.grades.get(spec)
     if grade is not None:
-        return str(grade.score)
+        return grade.cell()
     return 'err' if spec in row.errors else '-'
+
+
+def _share(hits: int, total: int) -> str:
+    """``2/3 (67%)``; no percentage when nothing was counted."""
+    rate = f' ({hits / total:.0%})' if total else ''
+    return f'{hits}/{total}{rate}'
 
 
 def _print_regrade(result: grading.Regrade) -> None:
@@ -319,10 +348,15 @@ def _print_regrade(result: grading.Regrade) -> None:
              '-' if r.hand is None else str(r.hand.score)]
             for r in result.rows]
     print(_table(headers, rows))
+    if result.samples > 1:
+        print(f'cells: median of {result.samples} samples (ties to the '
+              'lower value), then the samples in call order')
     for spec in result.specs:
-        agreed, compared = result.agreement[spec]
-        rate = f' ({agreed / compared:.0%})' if compared else ''
-        print(f'agreement with hand: {spec} {agreed}/{compared}{rate}')
+        line = (f'agreement with hand: {spec} '
+                f'{_share(*result.agreement[spec])}')
+        if result.samples > 1:
+            line += f' · stability {_share(*result.stability[spec])}'
+        print(line)
     for r in result.rows:
         for spec, err in r.errors.items():
             print(f'error: {r.case} / {spec}: {err}')
@@ -348,6 +382,9 @@ def _cmd_grade(args: argparse.Namespace) -> int:
         print('error: grade needs --rubric SPEC (a judge) and/or --show '
               '(print the packet for grading by hand)', file=sys.stderr)
         return 2
+    if args.samples < 1:
+        print('error: --samples must be at least 1', file=sys.stderr)
+        return 2
     try:
         run = runs.load(runs.find_run(Path(args.out), args.run_id))
         hand = labels.load_labels(Path(args.labels))
@@ -364,7 +401,8 @@ def _cmd_grade(args: argparse.Namespace) -> int:
             return 0
         print()
     result = grading.regrade(run, Path(args.out), judge_list, hand,
-                             cases_dir=Path(args.cases_dir))
+                             cases_dir=Path(args.cases_dir),
+                             samples=args.samples)
     print(f'run {run.run_id} ({run.ts}, {run.model_label()})')
     _print_regrade(result)
     return 0
@@ -426,6 +464,10 @@ def _parser() -> argparse.ArgumentParser:
     run_p.add_argument('--rubric-min', type=int, default=None, metavar='N',
                        help='fail a rubric case graded below N (default: '
                             'a grade is reported only)')
+    run_p.add_argument('--samples', type=int, default=1, metavar='N',
+                       help='ask the rubric judge N times per case and '
+                            'record the median (ties to the lower value); '
+                            'default 1')
     run_p.add_argument('--repeat', type=int, default=1, metavar='N',
                        help='run the selection N times (one run file each) '
                             'and print an aggregate; exit 1 when a case '
@@ -454,6 +496,11 @@ def _parser() -> argparse.ArgumentParser:
                               '(prompt, rubric, evidence, answer) with a '
                               '[[label]] stub, for grading by hand; '
                               'without --rubric nothing is graded')
+    grade_p.add_argument('--samples', type=int, default=1, metavar='N',
+                         help='ask each judge N times per case; the cell '
+                              'is the median (ties to the lower value) '
+                              'then the samples, and the agreement line '
+                              'gains a stability share (default 1)')
     grade_p.add_argument('--out', default=str(DEFAULT_OUT),
                          help=f'run directory (default: {DEFAULT_OUT})')
     grade_p.add_argument('--labels', default=str(labels.DEFAULT_LABELS_FILE),

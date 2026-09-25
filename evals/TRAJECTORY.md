@@ -40,3 +40,6 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-25T10:10:11+00:00 | 61c2e3bb32d3 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 79.5 | $0.32 | loop 1: review-multi-file x3 with panel active (1/3) |
 | 2026-09-25T10:12:03+00:00 | cc4411c400e3 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 78.4 | $0.18 | loop 1: panel (2/3), spawned_min miss |
 | 2026-09-25T10:13:39+00:00 | c1362a8ac39a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 1/1 | 86.2 | $0.32 | loop 1: panel (3/3) |
+| 2026-09-25T10:56:39+00:00 | 1279f9e29da6 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 18.5 | $0.05 |  |
+| 2026-09-25T11:00:54+00:00 | b7adcd223af0 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 20.1 | $0.03 |  |
+| 2026-09-25T11:01:30+00:00 | 8274b6029b7b | SBP Litellm\|aws/claude-5-sonnet@125k+routed:claude-tiers-judges+controller | 0/1 | 15.1 | $0.03 |  |

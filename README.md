@@ -204,6 +204,17 @@ without it they are skipped with a log line and the heuristic runs alone.
 Design and measurements: `docs/plans/2026-09-23-routing-framework-design.md`,
 `bench/primitives/README.md`.
 
+Debugging what a remote adapter sends (prompt-cache misses, prefix
+stability): `GURU_DUMP_REQUESTS=<dir>` makes the LiteLLM and Anthropic
+adapters write every outgoing request's keyword arguments — model,
+messages, tools, system, `cache_control` markers — as JSON to
+`<dir>/<utc-timestamp>-<adapter>-<n>.json` (`n` counts requests in the
+process, so a listing is the request sequence). The files hold the request
+body only; the API key is held by the SDK client and never appears in
+them. Diff two consecutive files of the same agent to see what moved in
+the cached prefix; the `calls` ledger stream has the matching
+`cache_read` / `cache_write` counts.
+
 ## Multi-agent
 
 guru runs a hybrid multi-agent UI: the main agent lives in the normal terminal

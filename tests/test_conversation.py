@@ -618,3 +618,43 @@ class TestOutlineCode:
             self._read_output('/tmp/b.py', src))
         # regex fallback keeps def/import lines even when AST fails
         assert 'import sys' in out or 'def broken' in out
+
+
+class TestRetentionKeepsToolCallSteps:
+    """A text-less assistant step that carries tool calls survives
+    retention (the remote adapters rebuild the round from it, and dropping
+    it changed the request prefix every turn); an empty step without calls
+    is still dropped."""
+
+    def test_tool_call_step_kept_empty_step_dropped(self) -> None:
+        msgs = [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': 'c1', 'function': {'name': 'search_code',
+                                          'arguments': {'q': 'x'}}}]},
+            {'role': 'tool', 'tool_name': 'search_code', 'tool_call_id': 'c1',
+             'content': 'a.py:1: hit'},
+            {'role': 'assistant', 'content': ''},          # empty: dropped
+            {'role': 'assistant', 'content': 'the answer'},
+        ]
+        conversation.apply_retention(msgs)
+        assert [m.get('role') for m in msgs] == [
+            'user', 'assistant', 'tool', 'assistant']
+        assert msgs[1]['tool_calls'][0]['id'] == 'c1'
+
+    def test_object_message_with_tool_calls_kept(self) -> None:
+        class Msg:
+            role = 'assistant'
+            content = ''
+            tool_calls = [{'function': {'name': 'x', 'arguments': {}}}]
+        msgs = [Msg(), {'role': 'assistant', 'content': 'ok'}]
+        conversation.apply_retention(msgs)
+        assert len(msgs) == 2
+
+    def test_message_to_dict_keeps_tool_call_id(self) -> None:
+        msg = {'role': 'tool', 'tool_name': 'read_file', 'tool_call_id': 'c1',
+               'tool_args': {'path': 'x'}, 'content': 'x'}
+        out = conversation.message_to_dict(msg)
+        assert out['tool_call_id'] == 'c1' and 'tool_args' not in out
+        assert 'tool_call_id' not in conversation.message_to_dict(
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'x'})

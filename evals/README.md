@@ -28,7 +28,7 @@ evals/
 .venv/bin/python -m guru.evals run --routing evals/routing/<file>.toml --allow-spend
 .venv/bin/python -m guru.evals run --tags fast --repeat 3                 # the x3 gate (make eval-fast)
 .venv/bin/python -m guru.evals run --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric-min 1
-.venv/bin/python -m guru.evals grade fa5c42d05059 --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric 'SBP Litellm|aws/claude-5-sonnet'
+.venv/bin/python -m guru.evals grade fa5c42d05059 --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric 'SBP Litellm|aws/claude-5-sonnet' --samples 3
 ```
 
 `make check` (lint, typecheck, unit tests, container tests) is the gate
@@ -120,10 +120,36 @@ model call. The grading call's own cost goes to the run's ledger, not to
 the case's cost column. The judge resolves through the same adapter
 registry as the gate reviewer, so its adapter must be one of the suite's.
 
+#### Sampling: `--samples N`
+
+A single grade is noisy: on run `fa5c42d05059` Sonnet flipped two cases
+between 1 and 2 with no relevant wording change (triage
+2026-09-25-loop-1, "Rubric judge"). `--samples N` (default 1; `run` and
+`grade` alike) asks the judge N times per case, each call with its own
+nonce and no shared context, and reduces the samples to one recorded
+score by the **median rule**: sort the sample scores and take the middle
+one; for an even N take the *lower* of the two middle values (`2,1` -> 1,
+`0,0,2,2` -> 0). The median, not the mean, so the recorded score stays on
+the 0-2 scale and one stray sample cannot move it. Every sample must
+succeed: one provider error or unparsable reply fails the whole grade
+(`rubric: error` / `err`) rather than recording a median over fewer
+samples under the same name.
+
+What is recorded and shown: the case result carries the median as
+`rubric_score` and every sample score as `rubric_samples` (empty for one
+sample; older run files load with it empty), the run file carries the N
+as `rubric_samples`, the table detail reads `rubric: 2/2 (2,2,1)` and the
+summary `rubric 5/6 (median of 3 samples)`. The `labels` row's label is
+the median and its `note` lists every sample:
+`samples 2,2,1 -> median 2; 2: <reason>; 2: <reason>; 1: <reason>`.
+`--rubric-min` applies to the median. The grading cost printed (`grading
+cost $0.273` for two judges x three cases x three samples on
+`fa5c42d05059`) is the sum of every sample's call.
+
 ### Re-grading a stored run and hand grades
 
 ```sh
-.venv/bin/python -m guru.evals grade RUN_ID --rubric 'Adapter|model' [--rubric 'Adapter|model2'] [--labels FILE] [--out DIR]
+.venv/bin/python -m guru.evals grade RUN_ID --rubric 'Adapter|model' [--rubric 'Adapter|model2'] [--samples N] [--labels FILE] [--out DIR]
 ```
 
 grades a run that already happened, offline: nothing is re-run. For every
@@ -137,11 +163,32 @@ column, then `agreement with hand: <spec> agreed/compared` per judge over
 the cases that have both grades. `RUN_ID` is the 12-hex id from the run
 line (a path to a run file also works).
 
+With `--samples N` (N > 1) each judge grades every case N times; a cell
+reads `2 (2,2,1)` — the median first (the recorded score, ties to the
+lower value), then the samples in call order — and the agreement line
+compares the *median* with the hand grade and gains a **stability**
+share: `agreement with hand: <spec> 2/3 (67%) · stability 1/3 (33%)`,
+where stability is the share of graded cases whose N samples all agree
+(an empty answer counts as stable: N zeros without a call). Read the two
+together: high stability with low agreement is a judge that is
+consistently wrong about the rubric (the instructions need work); low
+stability is a judge that is guessing (more samples, or a bigger judge).
+Measured 2026-09-25 with N = 3 on `fa5c42d05059` (hand 2/2/2): Haiku
+`2 (2,2,2)`, `1 (1,1,1)`, `1 (1,1,1)` — agreement 1/3, stability 3/3;
+Sonnet `2 (1,2,2)`, `2 (2,1,2)`, `1 (1,1,1)` — agreement 2/3, stability
+1/3; on the three fast cases of `644b68facb64` (`explain-readme`,
+`logic-bug`, `security-only`; hand 2/2/2) both judges `2 (2,2,2)` on
+every case — agreement 3/3, stability 3/3, cost $0.085. Both judges dock
+`guru-review-adapters` for not "confirming" the shared pattern by name,
+which the rubric's intent does not require — the standing disagreement to
+tune the instructions on.
+
 The hand grades live in `evals/rubric-labels.toml`, one `[[label]]` table
 each — `case`, `run` (a run id, or `"*"` for any run of that case; the
 specific one wins), `score` (0-2) and a `note` saying where the grade
 comes from. The first entries are the three real guru cases graded 2 by
-hand on 2026-09-24; "Grading by hand" below is how the set grows. Every
+hand on 2026-09-24 and the three fast rubric cases of run `644b68facb64`
+graded 2 on 2026-09-25; "Grading by hand" below is how the set grows. Every
 grade `grade` produces is a `labels` row
 in the run's ledger directory (`evals/runs/<run_id>/ledger`,
 `target_id = <run_id>:<case>`, labeller `rubric:<model>`), the applicable

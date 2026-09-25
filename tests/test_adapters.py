@@ -1358,3 +1358,359 @@ class TestControllerExecuted:
             ("", [("read_file", {"path": "x"}, "r1")]), ("x" * 601, [])],
             controller=False)
         assert row['controller_executed'] is False
+
+
+class TestRequestDump:
+    """``GURU_DUMP_REQUESTS=<dir>`` writes each outgoing request's kwargs
+    as ``<ts>-<adapter>-<n>.json``; the API key lives in the SDK client and
+    is never part of them."""
+
+    def test_unset_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        from guru.adapters import base
+        monkeypatch.delenv(base.DUMP_ENV, raising=False)
+        assert base.dump_request('X', {'model': 'm'}) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_writes_kwargs_as_json(self, tmp_path, monkeypatch) -> None:
+        import json
+        import re
+        from guru.adapters import base
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path / 'dumps'))
+        kwargs = {'model': 'm', 'messages': [{'role': 'user', 'content': 'q'}],
+                  'tools': None}
+        path = base.dump_request('SBP Litellm', kwargs)
+        assert path is not None and path.parent == tmp_path / 'dumps'
+        assert re.fullmatch(r'\d{8}T\d{9}Z-SBP_Litellm-\d+\.json', path.name)
+        assert json.loads(path.read_text(encoding='utf-8')) == kwargs
+        second = base.dump_request('SBP Litellm', kwargs)
+        assert second is not None and second != path
+        n1 = int(path.stem.rsplit('-', 1)[1])
+        n2 = int(second.stem.rsplit('-', 1)[1])
+        assert n2 == n1 + 1                           # the request sequence
+
+    def test_sdk_objects_are_serialised(self, tmp_path, monkeypatch):
+        import json
+        from guru.adapters import base
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path))
+
+        class Block:
+            def model_dump(self):
+                return {'type': 'text', 'text': 'hi'}
+        path = base.dump_request('Anthropic', {'messages': [
+            {'role': 'assistant', 'content': [Block()]}]})
+        assert path is not None
+        data = json.loads(path.read_text(encoding='utf-8'))
+        assert data['messages'][0]['content'] == [
+            {'type': 'text', 'text': 'hi'}]
+
+    def test_write_failure_is_swallowed(self, tmp_path, monkeypatch) -> None:
+        from guru.adapters import base
+        blocker = tmp_path / 'file'
+        blocker.write_text('x', encoding='utf-8')
+        monkeypatch.setenv(base.DUMP_ENV, str(blocker / 'sub'))
+        assert base.dump_request('X', {'model': 'm'}) is None
+
+    def _quiet(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'session_in', 0)
+        monkeypatch.setattr(session, 'session_out', 0)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'system', 'content': 'SYS'},
+            {'role': 'user', 'content': 'q'}])
+        monkeypatch.setattr('guru.domain.tools.active_specs', lambda: [])
+
+    def test_litellm_turn_dumps_without_the_key(
+            self, tmp_path, monkeypatch) -> None:
+        import json
+        from guru.adapters import base
+        self._quiet(monkeypatch)
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path))
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='ok', tool_calls=None),
+                finish_reason='stop')])
+        a = lite.LiteLLMAdapter(name='SBP Litellm', base_url='http://p',
+                                api_key='sk-very-secret-key')
+        monkeypatch.setattr(a, '_client', lambda: _fake_openai_client(resp))
+        a.run_turn()
+        [path] = list(tmp_path.iterdir())
+        assert '-SBP_Litellm-' in path.name
+        text = path.read_text(encoding='utf-8')
+        assert 'sk-very-secret-key' not in text
+        data = json.loads(text)
+        assert data['model'] == 'm' and data['messages'][-1]['content'] == [
+            {'type': 'text', 'text': 'q',
+             'cache_control': {'type': 'ephemeral'}}]
+
+    def test_anthropic_turn_dumps_without_the_key(
+            self, tmp_path, monkeypatch) -> None:
+        import json
+        from guru.adapters import base
+        self._quiet(monkeypatch)
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path))
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            stop_reason='end_turn',
+            content=[SimpleNamespace(type='text', text='ok')])
+        a = anth.AnthropicAdapter(name='Claude Code', thinking=False,
+                                  api_key='sk-ant-very-secret')
+        client = SimpleNamespace(
+            messages=SimpleNamespace(create=lambda **kw: resp))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        a.run_turn()
+        [path] = list(tmp_path.iterdir())
+        assert '-Claude_Code-' in path.name
+        text = path.read_text(encoding='utf-8')
+        assert 'sk-ant-very-secret' not in text
+        assert json.loads(text)['system'][0]['text'] == 'SYS'
+
+
+class TestNativeRoundRebuild:
+    """A past tool round with provider ids is sent in the native shape the
+    in-flight turn used, so the request prefix is byte-identical across
+    turns (the cache-miss the loop-1 triage saw on every controller
+    mailbox turn: the flattened '(used tools)' / '[tool X result]' text
+    differed from the previous request's tool_calls / tool messages)."""
+
+    ROUND = [
+        {'role': 'system', 'content': 'SYS'},
+        {'role': 'user', 'content': 'q'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'call_1', 'raw_arguments': '{"path":"a.py"}',
+             'function': {'name': 'read_file',
+                          'arguments': {'path': 'a.py'}}},
+            {'id': 'call_2',
+             'function': {'name': 'list_dir', 'arguments': {'path': '.'}}}]},
+        {'role': 'tool', 'tool_name': 'read_file', 'tool_call_id': 'call_1',
+         'tool_args': {'path': 'a.py'}, 'content': 'A'},
+        {'role': 'tool', 'tool_name': 'list_dir', 'tool_call_id': 'call_2',
+         'tool_args': {'path': '.'}, 'content': 'B'},
+        {'role': 'user', 'content': 'next'},
+    ]
+
+    def test_openai_round_rebuilt_natively(self) -> None:
+        out = lite.to_openai_messages(self.ROUND)
+        assert out[2] == {'role': 'assistant', 'content': None, 'tool_calls': [
+            {'id': 'call_1', 'type': 'function',
+             'function': {'name': 'read_file',
+                          'arguments': '{"path":"a.py"}'}},   # raw text kept
+            {'id': 'call_2', 'type': 'function',
+             'function': {'name': 'list_dir',
+                          'arguments': '{"path": "."}'}}]}     # re-serialised
+        assert out[3] == {'role': 'tool', 'tool_call_id': 'call_1',
+                          'content': 'A'}
+        assert out[4] == {'role': 'tool', 'tool_call_id': 'call_2',
+                          'content': 'B'}
+        assert out[5] == {'role': 'user', 'content': 'next'}
+        assert len(out) == 6
+
+    def test_openai_text_with_calls_keeps_the_text(self) -> None:
+        head = dict(self.ROUND[2], content='Let me look.')
+        msgs = [head] + self.ROUND[3:5]
+        out = lite.to_openai_messages(msgs)
+        assert out[0]['content'] == 'Let me look.'
+        assert [t['id'] for t in out[0]['tool_calls']] == ['call_1', 'call_2']
+
+    def test_openai_round_without_matching_results_flattens(self) -> None:
+        # a result missing (or answering another id) — no native round,
+        # the API would reject an unanswered tool call.
+        msgs = self.ROUND[:4] + [self.ROUND[5]]
+        out = lite.to_openai_messages(msgs)
+        assert out[2] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[3]['role'] == 'user' and out[3]['content'].startswith(
+            '[tool read_file result]')
+        swapped = self.ROUND[:3] + [self.ROUND[4], self.ROUND[3]]
+        out = lite.to_openai_messages(swapped)
+        assert out[2]['content'] == '(used tools)'
+
+    def test_openai_round_without_ids_flattens(self) -> None:
+        # an Ollama history / an older transcript: no ids anywhere.
+        msgs = [
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'function': {'name': 'read_file',
+                              'arguments': {'path': 'a.py'}}}]},
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'A'}]
+        out = lite.to_openai_messages(msgs)
+        assert out[0] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[1]['role'] == 'user'
+
+    def test_anthropic_round_rebuilt_natively(self) -> None:
+        system, out = anth.to_anthropic_messages(self.ROUND)
+        assert system == 'SYS'
+        assert out[1] == {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': 'call_1', 'name': 'read_file',
+             'input': {'path': 'a.py'}},
+            {'type': 'tool_use', 'id': 'call_2', 'name': 'list_dir',
+             'input': {'path': '.'}}]}
+        assert out[2] == {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'call_1', 'content': 'A'},
+            {'type': 'tool_result', 'tool_use_id': 'call_2', 'content': 'B'}]}
+        assert out[3] == {'role': 'user', 'content': 'next'}
+        with_text = [dict(self.ROUND[2], content='Looking.')] + self.ROUND[3:5]
+        _, out = anth.to_anthropic_messages(with_text)
+        assert out[0]['content'][0] == {'type': 'text', 'text': 'Looking.'}
+        assert out[0]['content'][1]['type'] == 'tool_use'
+
+    def test_anthropic_round_without_ids_flattens(self) -> None:
+        msgs = [self.ROUND[1], {**self.ROUND[2], 'tool_calls': [
+            {'function': {'name': 'read_file',
+                          'arguments': {'path': 'a.py'}}}]},
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'A'}]
+        _, out = anth.to_anthropic_messages(msgs)
+        assert out[1] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[2]['content'].startswith('[tool read_file result]')
+
+    def test_neutral_assistant_keeps_ids(self) -> None:
+        msg = lite.neutral_assistant('', [
+            ('read_file', {'path': 'a'}, 'call_1', '{"path":"a"}'),
+            ('list_dir', {'path': '.'})])
+        assert msg['tool_calls'][0] == {
+            'id': 'call_1', 'raw_arguments': '{"path":"a"}',
+            'function': {'name': 'read_file', 'arguments': {'path': 'a'}}}
+        assert msg['tool_calls'][1] == {
+            'function': {'name': 'list_dir', 'arguments': {'path': '.'}}}
+        msg = anth.neutral_assistant('', [('read_file', {'path': 'a'}, 'tu1')])
+        assert msg['tool_calls'][0]['id'] == 'tu1'
+
+    # --- a whole turn, then the next turn's translation ----------------------
+
+    def _arm(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        from guru.domain import tools
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'session_in', 0)
+        monkeypatch.setattr(session, 'session_out', 0)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'system', 'content': 'SYS'},
+            {'role': 'user', 'content': 'q'}])
+        monkeypatch.setattr(tools, 'active_specs', lambda: [
+            {'name': 'spawn', 'description': 'd',
+             'parameters': {'task': 't'}}])
+        monkeypatch.setattr(tools, 'execute_tool',
+                            lambda name, args: f'ran {name}')
+
+    @staticmethod
+    def _plain(m: dict) -> dict:
+        """A message with a one-text-part content list read as its text
+        (the cache marker's shape, equivalent for the API)."""
+        c = m.get('content')
+        if isinstance(c, list) and len(c) == 1 and c[0].get('type') == 'text':
+            return {**m, 'content': c[0]['text']}
+        return m
+
+    def test_litellm_next_turn_prefix_matches_the_last_request(
+            self, monkeypatch) -> None:
+        self._arm(monkeypatch)
+        seen: list = []
+        tool_call = SimpleNamespace(
+            id='tooluse_1', function=SimpleNamespace(
+                name='spawn', arguments='{"task":"look at  x"}'))
+        responses = iter([
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content=None,
+                                            tool_calls=[tool_call]),
+                    finish_reason='tool_calls')]),
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content='done', tool_calls=None),
+                    finish_reason='stop')])])
+
+        def _create(**kw):
+            seen.append(kw)
+            return SimpleNamespace(parse=lambda: next(responses), headers={})
+        client = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(with_raw_response=SimpleNamespace(
+                create=_create))))
+        a = lite.LiteLLMAdapter(base_url='http://p')
+        monkeypatch.setattr(a, '_client', lambda: client)
+        a.run_turn()
+        assert len(seen) == 2
+        tool_msg = session.messages[3]
+        assert tool_msg['role'] == 'tool' and tool_msg['tool_call_id'] == \
+            'tooluse_1' and tool_msg['tool_args'] == {'task': 'look at  x'}
+        assert session.messages[2]['tool_calls'][0]['id'] == 'tooluse_1'
+        assert session.messages[2]['tool_calls'][0]['raw_arguments'] == \
+            '{"task":"look at  x"}'
+        # Next turn: the user speaks again; what the adapter would send.
+        session.messages.append({'role': 'user', 'content': 'and then?'})
+        again = lite.cached_messages(
+            lite.to_openai_messages(session.messages), True)
+        last = seen[-1]['messages']
+        assert [self._plain(m) for m in again[:len(last)]] == \
+            [self._plain(m) for m in last]
+        assert again[-1]['content'][0]['cache_control'] == {
+            'type': 'ephemeral'}
+
+    def test_anthropic_next_turn_prefix_matches_the_last_request(
+            self, monkeypatch) -> None:
+        self._arm(monkeypatch)
+        seen: list = []
+        use = SimpleNamespace(type='tool_use', id='tu_1', name='spawn',
+                              input={'task': 'x'})
+        responses = iter([
+            SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                stop_reason='tool_use', content=[use]),
+            SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                stop_reason='end_turn',
+                content=[SimpleNamespace(type='text', text='done')])])
+
+        def _create(**kw):
+            seen.append(kw)
+            return next(responses)
+        a = anth.AnthropicAdapter(thinking=False)
+        monkeypatch.setattr(a, '_client', lambda: SimpleNamespace(
+            messages=SimpleNamespace(create=_create)))
+        a.run_turn()
+        assert session.messages[3]['tool_call_id'] == 'tu_1'
+        assert session.messages[2]['tool_calls'][0]['id'] == 'tu_1'
+        session.messages.append({'role': 'user', 'content': 'and then?'})
+        _, again = anth.to_anthropic_messages(session.messages)
+        # The in-flight native history held the SDK's block objects; the
+        # rebuilt round is the same blocks as dicts.
+        last = seen[-1]['messages']
+        assert again[1]['content'] == [
+            {'type': 'tool_use', 'id': 'tu_1', 'name': 'spawn',
+             'input': {'task': 'x'}}]
+        assert last[1]['content'] == [use]
+        assert [self._plain(m) for m in again[2:3]] == [
+            {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 'tu_1',
+                 'content': 'ran spawn'}]}]
+        assert [self._plain(m) for m in last[2:3]] == [
+            {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 'tu_1',
+                 'content': 'ran spawn',
+                 'cache_control': {'type': 'ephemeral'}}]}]
+        assert again[3] == {'role': 'assistant', 'content': 'done'}
+        assert again[4] == {'role': 'user', 'content': 'and then?'}
+
+
+class TestRequestIn:
+    """``turn.request_in`` finds the turn's request in any agent's
+    history (the orchestrator reads a parent's for the panel judge)."""
+
+    def test_skips_nudges_and_non_user_messages(self) -> None:
+        from guru.adapters import turn
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'review the auth service'},
+                {'role': 'assistant', 'content': 'Let me…'},
+                {'role': 'user', 'content': turn._NUDGE_TEXT},
+                {'role': 'tool', 'tool_name': 'spawn', 'content': 'ok'}]
+        assert turn.request_in(msgs) == 'review the auth service'
+        assert turn.request_in([{'role': 'system', 'content': 's'}]) == ''
+        assert turn.request_in([]) == ''

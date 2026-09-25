@@ -47,6 +47,10 @@ class CaseResult:
     # ``rubric_score`` None and puts ``error: ...`` in ``rubric_reason``.
     rubric_score: Optional[int] = None
     rubric_reason: str = ''
+    # Every sample score behind ``rubric_score`` when the judge was asked
+    # more than once (``--samples N``; the score is their median); empty
+    # for one sample and for run files from before this field.
+    rubric_samples: list[int] = field(default_factory=list)
 
     @property
     def seconds(self) -> float:
@@ -73,8 +77,10 @@ class Run:
     # Judges the experiment file's [decisions] table installed for the run,
     # as ``point=judge name`` (empty: none configured or none available).
     judges: list[str] = field(default_factory=list)
-    # The rubric judge's ``Adapter|model`` ('' = no grading this run).
+    # The rubric judge's ``Adapter|model`` ('' = no grading this run) and
+    # how many samples it gave per case (the median is recorded).
     rubric: str = ''
+    rubric_samples: int = 1
 
     def model_label(self) -> str:
         """``Adapter|model`` plus ``@<ctx>`` when the context is known,

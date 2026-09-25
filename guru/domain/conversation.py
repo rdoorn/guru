@@ -1,10 +1,13 @@
 """Neutral conversation handling: save/resume and compaction (hybrid D).
 
 The neutral message format is the normalized dict
-``{role, content, tool_calls?, tool_name?, tool_args?}`` (``tool_args``,
-the call's arguments, is kept in memory only for the delegation nudge and
-is not persisted). Adapters translate to/from it,
-so these operations are provider-independent.
+``{role, content, tool_calls?, tool_name?, tool_args?, tool_call_id?}``
+(``tool_args``, the call's arguments, is kept in memory only for the
+delegation nudge and is not persisted; ``tool_call_id`` and the ``id`` on a
+``tool_calls`` entry are the provider's ids, kept so the remote adapters
+rebuild a past tool round in its native shape and the prompt cache reads
+the prefix back). Adapters translate to/from it, so these operations are
+provider-independent.
 """
 import ast
 import json
@@ -32,6 +35,8 @@ def message_to_dict(msg: object) -> dict:
     }
     if data.get('tool_name'):
         out['tool_name'] = data['tool_name']
+    if data.get('tool_call_id'):
+        out['tool_call_id'] = data['tool_call_id']
     if data.get('tool_calls'):
         out['tool_calls'] = data['tool_calls']
     return out
@@ -424,15 +429,28 @@ def _outline_code(read_output: str) -> str:
     return "\n".join([header, '[truncated]'] + body[:40])
 
 
+def _tool_calls_of(msg: object) -> list:
+    """A message's tool calls (dict key or attribute), ``[]`` when none."""
+    if isinstance(msg, dict):
+        return list(msg.get('tool_calls') or [])
+    return list(getattr(msg, 'tool_calls', None) or [])
+
+
 def apply_retention(messages: list) -> None:
-    """Post-turn retention: drop text-less tool-call steps, then compact each
+    """Post-turn retention: drop empty assistant steps, then compact each
     tool result per its tool's retain policy (keep / summarize / outline),
     only when it exceeds the size threshold. Replaces the blanket prune so
-    follow-up questions keep the useful, relevant context."""
+    follow-up questions keep the useful, relevant context.
+
+    A text-less assistant step that carries tool calls is kept: it is a
+    few tokens, and dropping it changed the shape of every past tool round
+    at the next turn (the results lost their call), which broke the prompt
+    cache prefix on every turn (improve-loop iteration 3)."""
     kept = []
     for i, m in enumerate(messages):
         role = msg_role(m)
-        if role == 'assistant' and not msg_content(m).strip():
+        if role == 'assistant' and not msg_content(m).strip() \
+                and not _tool_calls_of(m):
             continue
         if role == 'tool' and isinstance(m, dict):
             name = m.get('tool_name', '')

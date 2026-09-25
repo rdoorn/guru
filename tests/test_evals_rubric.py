@@ -279,3 +279,80 @@ class TestJudgeFromSpec:
         assert rubric.judge_from_spec('Other|m') is None
         assert rubric.judge_from_spec('Fake') is None
         assert rubric.judge_from_spec('Fake|') is None
+
+
+class _SeqJudge:
+    model = 'seq'
+
+    def __init__(self, replies) -> None:
+        self.replies, self.prompts = list(replies), []
+
+    def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+class TestSampling:
+    @pytest.mark.parametrize('scores, median', [
+        ([2], 2), ([2, 2, 1], 2), ([1, 2, 2], 2), ([0, 1, 2], 1),
+        ([2, 1], 1), ([1, 2], 1), ([0, 0, 2, 2], 0), ([2, 0, 1, 2], 1),
+        ([1, 1, 1, 1, 1], 1),
+    ])
+    def test_median_ties_go_lower(self, scores, median) -> None:
+        assert rubric.median_score(scores) == median
+
+    def test_median_of_nothing(self) -> None:
+        with pytest.raises(ValueError):
+            rubric.median_score([])
+        with pytest.raises(ValueError):
+            rubric.SampledGrade(())
+
+    def test_sampled_grade_fields(self) -> None:
+        g = rubric.SampledGrade((rubric.Grade(2, 'a'), rubric.Grade(1, 'b'),
+                                 rubric.Grade(2, 'c')))
+        assert g.scores == (2, 1, 2) and g.score == 2
+        assert g.reason == 'a'                 # first sample at the median
+        assert g.stable is False
+        assert g.cell() == '2 (2,1,2)'
+        assert g.note == 'samples 2,1,2 -> median 2; 2: a; 1: b; 2: c'
+        tie = rubric.SampledGrade((rubric.Grade(2, 'hi'),
+                                   rubric.Grade(1, 'lo')))
+        assert tie.score == 1 and tie.reason == 'lo' and tie.cell() == \
+            '1 (2,1)'
+        one = rubric.SampledGrade((rubric.Grade(1, 'only'),))
+        assert one.score == 1 and one.stable and one.cell() == '1'
+        assert one.note == 'only' and one.reason == 'only'
+        blank = rubric.SampledGrade((rubric.Grade(0, ''), rubric.Grade(0, '')))
+        assert blank.note == 'samples 0,0 -> median 0; 0: (no reason); ' \
+            '0: (no reason)'
+
+    def test_grade_samples_calls_n_times_with_fresh_nonces(self) -> None:
+        judge = _SeqJudge(['{"score": 2, "reason": "x"}',
+                           '{"score": 1, "reason": "y"}',
+                           '{"score": 2, "reason": "z"}'])
+        got = rubric.grade_samples('p', 'r', 'a', judge, samples=3)
+        assert got.scores == (2, 1, 2) and got.score == 2
+        assert len(judge.prompts) == 3
+        nonces = {p.split('<<<ANSWER ')[1].split('>>>')[0]
+                  for p in judge.prompts}
+        assert len(nonces) == 3
+
+    def test_grade_samples_default_is_one(self) -> None:
+        judge = _SeqJudge(['{"score": 0, "reason": "no"}'])
+        got = rubric.grade_samples('p', 'r', 'a', judge)
+        assert got.samples == (rubric.Grade(0, 'no'),)
+
+    def test_grade_samples_propagates_a_failing_sample(self) -> None:
+        judge = _SeqJudge(['{"score": 2}', 'not json', '{"score": 2}'])
+        with pytest.raises(rubric.GradeError):
+            rubric.grade_samples('p', 'r', 'a', judge, samples=3)
+        assert len(judge.prompts) == 2
+        with pytest.raises(RuntimeError, match='down'):
+            rubric.grade_samples('p', 'r', 'a',
+                                 _SeqJudge([RuntimeError('down')]),
+                                 samples=2)
+        with pytest.raises(ValueError, match='samples'):
+            rubric.grade_samples('p', 'r', 'a', _SeqJudge([]), samples=0)
