@@ -136,17 +136,33 @@ class Verdict:
     plan: Optional[Plan]
     errors: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    # Concerns the request names that share one task: the plan has fewer
+    # tasks than coordinated concerns (soft, one re-ask, like ``missing``).
+    undersplit: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return self.plan is not None and not self.errors and not self.missing
+        return (self.plan is not None and not self.errors
+                and not self.missing and not self.undersplit)
+
+    @property
+    def soft(self) -> bool:
+        """Only coverage problems (asked once, then accepted)."""
+        return bool(self.missing or self.undersplit)
 
     @property
     def messages(self) -> list[str]:
         """Every problem, hard first, as the re-ask lists them."""
-        return list(self.errors) + [
+        out = list(self.errors) + [
             f"no task goal covers the concern '{c}' the request names"
             f" (say {' or '.join(CONCERNS[c][:3])})" for c in self.missing]
+        if self.undersplit:
+            n = len(self.plan.tasks) if self.plan else 0
+            out.append(
+                f"the request names {len(self.undersplit)} concerns "
+                f"({', '.join(self.undersplit)}) but the plan has {n} "
+                f"task(s): spawn one task per concern, in parallel")
+        return out
 
 
 # --- JSON schema (the forced tool's input) -----------------------------------
@@ -352,6 +368,19 @@ def missing_concerns(request: str, plan: Plan) -> list[str]:
     return [c for c in named if c not in covered]
 
 
+def undersplit_concerns(request: str, plan: Plan) -> list[str]:
+    """The coordinated concerns of ``request`` when a ``delegate`` plan has
+    fewer tasks than concerns (one worker folding "correctness and
+    security" into a single review); empty otherwise. Enforced in code —
+    the prose rule "one worker per named concern" is gone."""
+    if plan.outcome != 'delegate' or not plan.tasks:
+        return []
+    named = coverage_concerns(request)
+    if len(named) >= COVERAGE_MIN_CONCERNS and len(plan.tasks) < len(named):
+        return named
+    return []
+
+
 def validate(request: str, plan: Plan, followup: bool = False
              ) -> list[str]:
     """Every problem with ``plan`` for ``request``: unknown labels, then
@@ -360,8 +389,8 @@ def validate(request: str, plan: Plan, followup: bool = False
     ``answer`` plan is never rejected here."""
     errors = schema_errors(plan)
     if not followup:
-        errors.extend(Verdict(plan, [], missing_concerns(request, plan))
-                      .messages)
+        errors.extend(Verdict(plan, [], missing_concerns(request, plan),
+                              undersplit_concerns(request, plan)).messages)
     return errors
 
 
@@ -373,7 +402,9 @@ def evaluate(request: str, args: object, followup: bool = False) -> Verdict:
         return Verdict(None, errors)
     errors.extend(schema_errors(plan))
     missing = [] if (errors or followup) else missing_concerns(request, plan)
-    return Verdict(plan, errors, missing)
+    under = ([] if (errors or followup)
+             else undersplit_concerns(request, plan))
+    return Verdict(plan, errors, missing, under)
 
 
 # --- the text path (adapters that cannot force a tool call) ------------------

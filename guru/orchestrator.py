@@ -1033,11 +1033,12 @@ class Orchestrator:
         reasks = plan.reasks_in(
             messages[conversation.turn_start(messages):])
         if verdict.errors or verdict.plan is None \
-                or (verdict.missing and reasks == 0):
+                or (verdict.soft and reasks == 0):
             return plan.reask_text(verdict.messages)
-        if verdict.missing:
-            log.info('plan: running with uncovered concern(s) %s after one'
-                     ' re-ask', ', '.join(verdict.missing))
+        if verdict.soft:
+            log.info('plan: running with coverage problem(s) %s after one'
+                     ' re-ask', ', '.join(verdict.missing
+                                          + verdict.undersplit))
         if verdict.plan.outcome == 'answer':
             return plan.ANSWER_ACK
         rounds = plan.delegations_in(

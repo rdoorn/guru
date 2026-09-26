@@ -236,10 +236,13 @@ class TestValidate:
                   complexity='hard')]}
         v = plan.evaluate(request, args)
         assert v.plan is not None and v.errors == []
-        assert v.missing == ['correctness'] and not v.ok
-        [msg] = v.messages
+        assert v.missing == ['correctness'] and not v.ok and v.soft
+        # One task for two coordinated concerns is also undersplit.
+        assert v.undersplit == ['correctness', 'security']
+        msg, split = v.messages
         assert msg.startswith("no task goal covers the concern 'correctness'")
-        assert plan.validate(request, v.plan) == [msg]
+        assert 'one task per concern' in split
+        assert plan.validate(request, v.plan) == [msg, split]
 
     def test_every_named_concern_covered_is_ok(self) -> None:
         request = 'Review this repository for correctness and security.'
@@ -379,3 +382,45 @@ class TestTaskText:
 
     def test_brief_hook_is_identity_for_now(self) -> None:
         assert plan.brief_hook('x') == 'x'
+
+
+class TestUndersplit:
+    """One worker per coordinated concern is enforced in code."""
+
+    REQ = 'Review this repository for correctness and security'
+
+    def _plan(self, goals):
+        return plan.Plan('delegate', tasks=[
+            plan.Task(goal=g, kind='review', complexity='standard')
+            for g in goals])
+
+    def test_one_task_naming_both_concerns_is_undersplit(self) -> None:
+        p = self._plan(['review for correctness and security'])
+        assert plan.missing_concerns(self.REQ, p) == []
+        assert plan.undersplit_concerns(self.REQ, p) == [
+            'correctness', 'security']
+        v = plan.Verdict(p, [], [], plan.undersplit_concerns(self.REQ, p))
+        assert not v.ok and v.soft
+        assert 'spawn one task per concern' in v.messages[0]
+
+    def test_two_tasks_are_fine(self) -> None:
+        p = self._plan(['review correctness', 'review security'])
+        assert plan.undersplit_concerns(self.REQ, p) == []
+        assert plan.evaluate(self.REQ, {
+            'outcome': 'delegate', 'tasks': [
+                {'goal': 'review correctness', 'kind': 'review',
+                 'complexity': 'standard'},
+                {'goal': 'review security', 'kind': 'review',
+                 'complexity': 'standard'}]}).ok
+
+    def test_single_concern_or_answer_never_undersplit(self) -> None:
+        one = self._plan(['fix the failing test'])
+        assert plan.undersplit_concerns('fix the failing test', one) == []
+        assert plan.undersplit_concerns(
+            self.REQ, plan.Plan('answer', answer='hi')) == []
+
+    def test_validate_lists_it_once(self) -> None:
+        p = self._plan(['review for correctness and security'])
+        msgs = plan.validate(self.REQ, p)
+        assert len(msgs) == 1 and 'one task per concern' in msgs[0]
+        assert plan.validate(self.REQ, p, followup=True) == []
