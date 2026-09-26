@@ -1967,3 +1967,36 @@ class TestPanelTextMailbox:
         out = panel_text([{'role': 'user', 'content': request}], 'task')
         assert out == 'r' * conversation.REQUEST_CHARS + '\n\ntask'
         assert conversation.REQUEST_CHARS == 1000
+
+
+class TestConfigureKind:
+    """The task's kind reaches the tool layer through configure()."""
+
+    def test_review_child_has_no_write_tools(self) -> None:
+        from guru.agents import Agent
+        from guru.domain import toolpolicy
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        child = Agent(id='agent1', title='agent1')
+        o.configure(child, main.state, can_spawn=False, kind='review')
+        assert child.state.task_kind == 'review'
+        names = set(child.state.active_tool_names)
+        assert names and not names & set(toolpolicy.WRITE_TOOLS)
+        other = Agent(id='agent2', title='agent2')
+        o.configure(other, main.state, can_spawn=False, kind='build')
+        assert other.state.task_kind == 'build'
+        assert toolpolicy.for_kind('build') == frozenset()
+
+    def test_child_system_context_carries_the_brief(self, monkeypatch) -> None:
+        import guru.orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, '_brief_block',
+                            lambda task: '\n\n[project brief]\nmap: x')
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        child = o._make_child(main, 'review app/', env=_FAKE_ENV)
+        assert child is not None
+        assert child.task == 'review app/'
+        assert child.state.messages[0]['content'].endswith(
+            '[project brief]\nmap: x')

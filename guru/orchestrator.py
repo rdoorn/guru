@@ -51,6 +51,7 @@ import asyncio
 import io
 import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -121,6 +122,20 @@ class _Plan:
     @property
     def refused(self) -> bool:
         return self.route is not None and self.route.refused
+
+
+def _brief_block(task: str) -> str:
+    """The project brief slice for ``task`` as a system-context block
+    (``brief.slice`` over ``brief.current(cwd)``: map, test command, the
+    modules and symbols the task names), so a worker starts informed
+    instead of exploring. Empty on any failure — the brief is a saving,
+    never a dependency."""
+    try:
+        from guru.domain import brief as _brief
+        text = _brief.slice(_brief.current(Path.cwd()), task)
+    except Exception:                                    # noqa: BLE001
+        return ''
+    return f"\n\n[project brief]\n{text}" if text.strip() else ''
 
 
 class Orchestrator:
@@ -329,7 +344,8 @@ class Orchestrator:
         return _NO_ANSWER
 
     def configure(self, agent, base, can_spawn: bool,
-                  role=None, skill=None, controller: bool = False) -> None:
+                  role=None, skill=None, controller: bool = False,
+                  kind: str = '') -> None:
         """Set up ``agent``'s fresh conversation + tools, inheriting the model
         and context from ``base``. Delegation-capable agents get the panel
         hint; a controller (``[routing] controller``; implies ``can_spawn``)
@@ -344,7 +360,8 @@ class Orchestrator:
         elif can_spawn:
             st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
         st.active_tools, st.active_tool_names = tools.initial_tools(
-            can_spawn, controller)
+            can_spawn, controller, kind=kind or None)
+        st.task_kind = kind or ''      # toolpolicy.for_kind at execute time
         st.controller = controller
         st.active_role = role or None
         st.active_skill = skill or None
@@ -677,12 +694,14 @@ class Orchestrator:
             return None
         title = f"agent{len(self.manager.agents) + index}"
         child = Agent(id=title, title=title)
-        # TODO(merge, Package C): pass kind=plan.kind to configure (->
-        # tools.initial_tools(..., kind=)) and set
-        # child.state.task_kind = plan.kind so toolpolicy.for_kind hides the
-        # write tools for a review task.
+        # The task's kind reaches the tool layer: toolpolicy.for_kind hides
+        # the write tools for a review task (configure sets task_kind on
+        # the child's own state and filters its initial tool list).
         self.configure(child, parent.state, can_spawn=False, role=role,
-                       skill=skill)
+                       skill=skill, kind=kind)
+        block = _brief_block(task)
+        if block:
+            child.state.messages[0]['content'] += block
         self._apply_route(child, route, reason)
         child.task = task
         child.parent = parent

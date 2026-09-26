@@ -449,10 +449,11 @@ def final_text(args: object) -> str:
 # --- task text ---------------------------------------------------------------
 
 def brief_hook(task_text: str) -> str:
-    """Where the project brief slice joins the task text
-    (``brief.slice(brief, task_text, max_tokens=1500)``, Package C);
-    a no-op until the brief module lands."""
-    return task_text  # BRIEF-HOOK: return brief.slice(...) here
+    """Identity: the task text stays the plain goal (it is the ledger's
+    ``task`` column and the join titles). The project brief slice reaches
+    the worker through its system context instead — see
+    ``Orchestrator._brief_block``."""
+    return task_text
 
 
 def task_text(task: Task) -> str:
