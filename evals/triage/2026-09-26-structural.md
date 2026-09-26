@@ -50,3 +50,49 @@ case, one selection so one aggregate and one exit code); ≈ $4 with a
 Haiku controller and the rubric judge, needs Colima and
 `EVAL_ARGS='--routing evals/routing/<file>.toml --allow-spend'`.
 `make eval-fast` is unchanged.
+
+## Suite S1 — structural round before the review fixes (merge 89eb935)
+
+Runs d704579d4055 / 0b4ee5f1947b / fb4730bca891 (fast ×3), 7730e6c1c39c
+(real + dogfood), 689aecc6283a (sandbox), 14b0b51fee72 / 6e97e8c2ebfd /
+7970b9516698 (review-multi-file ×3 on `claude-tiers-review.toml`).
+`tok` = all tokens the provider processed (in + out + cache read + cache
+write): the model-agnostic context volume.
+
+| section | passed | tok / case | calls | vs suite 3 (2026-09-25) |
+|---|---|---|---|---|
+| fast ×3 | 24/24 | 19.5k | 110 | 20.9k, 123 calls, 22/24 |
+| real (3 guru cases) | 3/3 | — | — | 3/3 |
+| dogfood | FAIL | 577k | 44 | applied in suite 3 rerun |
+| sandbox (3) | 2/3 | 39.7k | 20 | 3/3 |
+| review-multi-file ×3 | 2/3 | 59k | 25 | 2/3, 65k, 29 calls |
+
+Fast subset: first suite with 24/24, 7% fewer tokens and 11% fewer calls
+per case than suite 3; smells 1 across 24 cases (was a failing check).
+`protocol_violation` = 0 over the whole suite. Cache read share: Haiku
+16%, Sonnet 80%, Opus 84%.
+
+Two failures are new control-plane behaviour, not harness bugs:
+
+1. **Delegate loop (dogfood).** The controller answered every mailbox
+   delivery with another `delegate`: 7 plan rounds, 7 workers, 577k
+   tokens, no `sandbox_submit`. Each worker gets a fresh sandbox task
+   copy, so the follow-up worker found the earlier edits gone and the
+   controller re-delegated. There was no cap on delegate rounds per
+   request. Fix in the review round: `MAX_DELEGATE_ROUNDS`, refusal text
+   at the cap, `answer` fallback.
+2. **Answer instead of delegate (dependency request).** Haiku returned
+   `plan(outcome=answer, answer="I need to search for the sandbox tool…")`
+   and stopped: the controller has only `plan`, and the removed hint had
+   said so. The contract now lives in the plan tool's schema description
+   ("you have no other tools; anything that needs a file, command,
+   package, test or the sandbox must be delegated").
+
+Independent review of the merged diff: FAIL on one Critical (duplicate
+`plan` calls suppressed without running the handler, no round cap →
+unbounded paid rounds; the "second identical plan accepted" path was
+unreachable), plus Important 2–9 (empty `answer` rejected, matrix
+contract column shape, brief `ConfigParser` interpolation, brief store
+growth per fixture copy, controller never got the map, coverage
+vocabulary false positives, range cap dropped 10×, second plan in a
+round). All in the fix round; suite S2 after it.

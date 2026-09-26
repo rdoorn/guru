@@ -2,8 +2,8 @@
 
 One row per recorded run (appended by `python -m guru.evals run`).
 
-| ts | run_id | model | passed/total | mean seconds | cost | note |
-|---|---|---|---|---|---|---|
+| ts | run_id | model | passed/total | mean seconds | cost | note | tok/case | turns/case |
+|---|---|---|---|---|---|---|---|---|
 | 2026-09-23T15:45:06+00:00 | 088625f91b8c | Ollama\|qwen3:14b | 5/6 | 48.8 | $0.00 | baseline subset qwen3:14b |
 | 2026-09-23T16:08:29+00:00 | 1f4f8262a80a | Ollama\|huihui_ai/qwen3-abliterated:8b | 3/8 | 167.7 | $0.00 | iteration 2 on 8B: glob fix; remaining cases |
 | 2026-09-23T17:05:52+00:00 | 384761c577f4 | SBP Litellm\|aws/claude-5-sonnet@125k | 8/9 | 81.3 | $4.12 | A: all remote sonnet-5 |
@@ -61,3 +61,11 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-25T12:37:28+00:00 | b9c241f9deab | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-panel+controller | 0/1 | 71.9 | $0.19 | loop 3: panel x3 (3/3), single worker |
 | 2026-09-25T12:49:12+00:00 | c38e907de6a2 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 0/1 | 211.1 | $0.34 | dogfood rerun with pytest tail: guru tests see the provisioned image |
 | 2026-09-25T13:09:38+00:00 | 04f76149b129 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 1/1 | 137.5 | $0.31 | dogfood rerun with private HOME: PASS, rubric 2/2 |
+| 2026-09-26T19:51:49+00:00 | d704579d4055 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 19.1 | $0.30 | structural S1: fast x3 (1/3) typed plan + contract | 22.8 | 5.1 |
+| 2026-09-26T19:55:04+00:00 | 0b4ee5f1947b | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 15.8 | $0.28 | structural S1: fast x3 (2/3) | 17.8 | 4.4 |
+| 2026-09-26T19:57:44+00:00 | fb4730bca891 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 18.9 | $0.27 | structural S1: fast x3 (3/3) | 17.8 | 4.2 |
+| 2026-09-26T20:00:57+00:00 | 7730e6c1c39c | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/4 | 114.1 | $1.54 | structural S1: real + dogfood; delegate loop (7 rounds, no submit) | 252.3 | 18.0 |
+| 2026-09-26T20:11:43+00:00 | 689aecc6283a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 2/3 | 25.0 | $0.13 | structural S1: sandbox; controller answered instead of delegating once | 39.7 | 6.7 |
+| 2026-09-26T20:13:34+00:00 | 14b0b51fee72 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 54.5 | $0.15 | structural S1: review x3 (1/3) single worker | 40.7 | 6.0 |
+| 2026-09-26T20:14:51+00:00 | 6e97e8c2ebfd | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 57.2 | $0.25 | structural S1: review x3 (2/3) | 61.0 | 9.0 |
+| 2026-09-26T20:16:13+00:00 | 7970b9516698 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 84.2 | $0.31 | structural S1: review x3 (3/3) | 75.8 | 10.0 |
