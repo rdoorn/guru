@@ -92,9 +92,9 @@ new modules.
 5. **Tool contract benchmark.** `bench/tool_contract.py --model
    'Adapter|model'`: one canned mini-task per tool (fixture `cli-tool`),
    forcing a call; records call success, schema errors, retries, tokens,
-   seconds; writes `evals/models/<slug>.json`. Run it on the Haiku, Sonnet
-   and one local Ollama model (qwen3:4b or 8b, small only) and record the
-   numbers in this plan.
+   seconds; writes `evals/models/<slug>.json`. Run it on Haiku and Sonnet
+   and record the numbers in this plan. No local Ollama model is run
+   unless Ronald asks (2026-09-26).
 
 ## Package E — metrics, matrix, gate hygiene
 
