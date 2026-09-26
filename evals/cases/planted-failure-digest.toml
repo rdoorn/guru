@@ -6,7 +6,6 @@ tags = ["fast", "tests"]
 
 [expect.behaviour]
 tools_used_all = ["run_tests"]
-tools_used_none = ["read_file"]
 
 [expect.content]
 answer_regex = ["test_words_across_newlines", "newline"]

@@ -7,9 +7,13 @@ with the case's access mode and auto-deny askers (an unattended run must
 never sit on a prompt), point the ledger at the run's ``ledger/`` dir, run
 the prompt through :class:`guru.bench.BenchRun`, then collect the answer,
 tools, sub-agents, stall nudges, the fixture diff (``git status``), the
-fixture's own pytest verdict and the cost from the ledger rows this case
-appended. Everything touched (cwd, ``config.MODE``, allow-lists, askers,
-persistence of approvals, ledger repository) is restored afterwards.
+fixture's own pytest verdict and — from the ledger rows this case
+appended — the cost, the model-agnostic metrics (``ledger.usage_metrics``:
+tokens, tool bytes shown, turns, calls) and the tool-usage smell counts
+(``ledger_report.tool_smells``: whole-file reads after an outline,
+repeated identical calls, refused calls). Everything touched (cwd,
+``config.MODE``, allow-lists, askers, persistence of approvals, ledger
+repository) is restored afterwards.
 
 Routing: :func:`run_suite` takes a :class:`RoutingSettings` (parsed from a
 ``[routing]`` file by :func:`load_routing_file`) and builds the adapter
@@ -96,8 +100,9 @@ from guru.adapters import turn
 from guru.adapters.base import Adapter
 from guru.domain import conversation
 from guru.domain import decisions as decision_seam
-from guru.domain import files, gate, ledger, policy, spend, tools
+from guru.domain import files, gate, ledger, ledger_report, policy, spend
 from guru.domain import routing as routing_domain
+from guru.domain import tools
 from guru.evals import cases, checks, rubric, runs
 from guru.evals.cases import Case, GitFixture
 from guru.evals.checks import Observed
@@ -705,6 +710,15 @@ def _cost(rows: list[dict]) -> Optional[float]:
     return float(sum(r['cost_usd'] for r in rows))
 
 
+def case_smells(tool_events_rows: list[dict]) -> dict[str, int]:
+    """The three tool-usage smell counts of a case over its tool events
+    (``runs.SMELL_KEYS``: whole-file ``read_file`` after an ``outline`` of
+    the same path, identical repeated calls within a task, refused calls)
+    from :func:`ledger_report.tool_smells`."""
+    smells = ledger_report.tool_smells(tool_events_rows, preactivated=[])
+    return {key: int(smells[key]['count']) for key in runs.SMELL_KEYS}
+
+
 def _routes(rows: list[dict]) -> list[str]:
     """Distinct ``Adapter|model`` of task rows, first-appearance order;
     rows without an adapter/model (refused tasks) are skipped."""
@@ -749,6 +763,9 @@ def run_case(case: Case, base_state: session.SessionState,
     that is not the same directory after the run (removed or replaced by
     another process) fails with error ``COPY_LOST`` instead of being
     diffed; an agent turn that raised fails with ``worker error: ...``.
+    ``metrics`` (``ledger.usage_metrics`` over the case's ``calls`` and
+    ``tool_events`` rows) and ``smells`` (:func:`case_smells`) land on the
+    result next to the cost.
     """
     _assert_no_running_loop('run_case')
     out_dir = Path(out_dir)
@@ -757,6 +774,7 @@ def run_case(case: Case, base_state: session.SessionState,
     rows_before = len(repo.rows('calls'))
     tasks_before = len(repo.rows('tasks'))
     events_before = len(repo.rows('sandbox_events'))
+    tools_before = len(repo.rows('tool_events'))
     workdir = _workdir(case)
     agents: list = []
     error = ''
@@ -797,12 +815,16 @@ def run_case(case: Case, base_state: session.SessionState,
     tpath = out_dir / 'transcripts' / f'{case.name}.json.gz'
     _save_transcript(agents, tpath)
     results = checks.evaluate(case.expect, obs)
+    calls = repo.rows('calls')[rows_before:]
+    tool_events = repo.rows('tool_events')[tools_before:]
     return CaseResult(
         case=case.name, passed=checks.passed(results),
         checks=[asdict(r) for r in results], observed=asdict(obs),
         rubric=case.expect.rubric, transcript_path=str(tpath),
-        cost_usd=_cost(repo.rows('calls')[rows_before:]),
-        routes=_routes(repo.rows('tasks')[tasks_before:]))
+        cost_usd=_cost(calls),
+        routes=_routes(repo.rows('tasks')[tasks_before:]),
+        metrics=ledger.usage_metrics(calls, tool_events),
+        smells=case_smells(tool_events))
 
 
 # --- rubric grading ---------------------------------------------------------

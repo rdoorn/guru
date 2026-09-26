@@ -650,3 +650,70 @@ class TestToolSmells:
         assert '## Tool usage smells' in proc.stdout
         assert '- refused calls: 1' in proc.stdout
         assert '| write_file/policy | 1 |' in proc.stdout
+
+
+class TestPerTask:
+    CALLS = [
+        {'task_id': '', 'turn_id': 't1', 'model': 'haiku', 'tokens_in': 100,
+         'tokens_out': 10, 'cache_read': 0, 'cache_write': 0,
+         'phase': 'step'},
+        {'task_id': 'k1', 'turn_id': 't1', 'model': 'sonnet',
+         'tokens_in': 50, 'tokens_out': 5, 'cache_read': 200,
+         'cache_write': 20, 'phase': 'step'},
+        {'task_id': 'k1', 'turn_id': 't1', 'model': 'sonnet',
+         'tokens_in': 5, 'tokens_out': 1, 'phase': 'complete'},
+        {'task_id': '', 'turn_id': 't1', 'model': 'haiku', 'tokens_in': 30,
+         'tokens_out': 3, 'phase': 'step'},
+    ]
+    EVENTS = [{'task_id': 'k1', 'turn_id': 't1', 'tool': 'read_file',
+               'shown_bytes': 900},
+              {'task_id': '', 'turn_id': 't1', 'tool': 'spawn',
+               'shown_bytes': 10},
+              {'task_id': 'k2', 'turn_id': 't1', 'tool': 'outline',
+               'shown_bytes': 40}]
+    TASKS = [{'task_id': 'k1', 'status': 'running', 'kind': 'review',
+              'role': 'developer', 'model': 'aws/sonnet'},
+             {'task_id': 'k1', 'status': 'done', 'kind': 'review',
+              'role': 'security-engineer', 'model': 'aws/sonnet'}]
+
+    def test_groups_by_task_then_main_turn_in_first_seen_order(self) -> None:
+        out = lr.per_task(self.CALLS, self.EVENTS, self.TASKS)
+        assert list(out) == ['main:t1', 'k1', 'k2']
+        main = out['main:t1']
+        assert main['kind'] == '' and main['role'] == ''
+        assert main['model'] == 'haiku'            # its first call
+        assert main['tokens'] == 143 and main['turns'] == 2
+        assert main['calls'] == 2 and main['tool_bytes'] == 10
+        k1 = out['k1']
+        assert (k1['kind'], k1['role'], k1['model']) == (
+            'review', 'security-engineer', 'aws/sonnet')   # latest row
+        assert k1['tokens'] == 281 and k1['tokens_in'] == 55
+        assert k1['cache_read'] == 200 and k1['tool_bytes'] == 900
+        assert k1['turns'] == 1 and k1['calls'] == 2
+        # tool events without any call still show up (zero calls)
+        assert out['k2']['calls'] == 0 and out['k2']['tool_bytes'] == 40
+
+    def test_without_task_rows(self) -> None:
+        out = lr.per_task(self.CALLS, [], None)
+        assert out['k1']['kind'] == '' and out['k1']['model'] == 'sonnet'
+
+    def test_report_and_markdown_section(self) -> None:
+        rep = lr.build_report(calls=self.CALLS, tasks=self.TASKS, turns=[],
+                              decisions=[], labels=[],
+                              tool_events=self.EVENTS)
+        assert list(rep['per_task']) == ['main:t1', 'k1', 'k2']
+        md = lr.render_markdown(rep)
+        assert '## Per task' in md
+        assert md.index('## Per task') < md.index('## Task latency')
+        assert ('| task | kind | role | model | tokens | tokens in | '
+                'tokens out | cache read | tool bytes | turns | calls |'
+                in md)
+        assert '| k1 | review | security-engineer | aws/sonnet | 281 | 55 ' \
+            '| 6 | 200 | 900 | 1 | 2 |' in md
+        assert '| main:t1 | - | - | haiku | 143 |' in md
+
+    def test_empty_report_renders_no_rows(self) -> None:
+        md = lr.render_markdown(lr.build_report(
+            calls=[], tasks=[], turns=[], decisions=[], labels=[]))
+        section = md.split('## Per task')[1].split('##')[0]
+        assert '(no rows)' in section

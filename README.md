@@ -190,13 +190,16 @@ only when it differs from the controller's and beats the runner-up by
 `labels_margin`; the task row's `reason` then says
 `labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
 lost on margin leaves a row with `fallback_reason = "margin"` (the kind
-label is only observed). The default routing block also runs `panel`
-active: when its `needs_security` answer is yes for a review-kind task and
-no security worker was spawned, the orchestrator adds one
-(`reason` starts with `origin:panel`). `injection` stays shadow-only until
-the review loop promotes it. The promotion rule (100+ labelled rows, judge
-beats the heuristic, acceptable false-positive rate) and the labelling
-procedure are in `docs/review-loop.md`.
+label is only observed). `panel` asks the same judge `needs_security` over
+a review-kind task spawned without a security worker and, when active,
+has the orchestrator add one (`reason` starts with `origin:panel`); the
+default routing block keeps it **shadow** (`panel = false`) until
+labelled rows say otherwise — in three eval suites it answered no on
+every "correctness and security" review request, so its verdicts are
+recorded and measured, nothing acts on them. `injection` stays shadow-only
+until the review loop promotes it. The promotion rule (100+ labelled
+rows, judge beats the heuristic, acceptable false-positive rate) and the
+labelling procedure are in `docs/review-loop.md`.
 
 Judge specs are `ollama` or `ollama:<model>`, `encoder` or
 `encoder:<hf-model>` (default `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`)
@@ -296,14 +299,15 @@ panel = "encoder"           # needs_security: one extra security reviewer
 injection = "injection"     # shadow: fetched pages checked for injection
 [decisions.active]
 labels = true
-panel = true
+panel = false               # shadow until labelled rows say otherwise
 ```
 
 For an `anthropic` adapter the model ids are the first-party ones
 (`claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5-5`). The
 `[decisions]` part is skipped when the file already has one, and without
-the `judge` extra (`uv sync --extra judge`) `labels` and `panel` are
-written `false` with a note: the encoder judges are then only observed.
+the `judge` extra (`uv sync --extra judge`) `labels` is written `false`
+with a note: the encoder judge is then only observed (`panel` is shadow
+either way).
 The measurements behind the block used Haiku 4.5 as the main (controller)
 model — pick it in `/models`; the routing table does not set the main
 model.
@@ -387,13 +391,14 @@ reply is the answer, and a controller's text is parsed for the plan
 object first. The old preamble heuristic and its stall nudge are gone
 (`stall_nudges` stays a column, reading 0).
 
-**Judges on the routing seam.** Two decision points act with the default
-block (`[decisions] mode = "active"`, see **Ledger and decisions**):
+**Judges on the routing seam.** Two decision points can act on the routing
+seam (`[decisions] mode = "active"`, see **Ledger and decisions**); the
+default block activates `labels` and keeps `panel` shadow.
 `labels` is a margin-gated tie-breaker for the controller's complexity
 label — the encoder judge's tier routes the task only when it differs from
 the controller's and beats the runner-up by `labels_margin` (the task
 row's `reason` then says `labels:judge override standard->hard (0.57 vs
-0.33)`); `panel` asks the same judge `needs_security` over every
+0.33)`); `panel`, when active, asks the same judge `needs_security` over every
 `review`-kind task a controller spawns without a security reviewer (role
 `security-engineer` or a skill containing `security`), and on *yes* guru
 spawns one extra `security-engineer` worker on the same task with the

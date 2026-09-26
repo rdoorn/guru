@@ -665,6 +665,41 @@ def record_tool_event(tool: str, args: dict, *, seconds: float, ok: bool,
 
 # --- read-side aggregation ---------------------------------------------------
 
+# Call phases that are not agent-loop round trips: context summaries and
+# one-shot completions (judges, the sandbox gate reviewer, rubric grading).
+# Everything else — ``step`` (and rows without a phase) — is a turn.
+NON_TURN_PHASES = frozenset(('summarise', 'complete'))
+METRIC_KEYS = ('tokens_in', 'tokens_out', 'cache_read', 'cache_write',
+               'tokens', 'tool_bytes', 'turns', 'calls')
+
+
+def usage_metrics(calls_rows: list, tool_events_rows: list) -> dict:
+    """The model-agnostic cost of a piece of work from its ledger rows.
+
+    ``{'tokens_in', 'tokens_out', 'cache_read', 'cache_write', 'tokens',
+    'tool_bytes', 'turns', 'calls'}``: token columns summed over the call
+    rows, ``tokens`` their total (uncached input + cache read + cache
+    write + output — what the model processed, so a local model without a
+    cache and a cached remote one compare), ``tool_bytes`` the summed
+    ``shown_bytes`` of the tool events (what the model was shown),
+    ``turns`` the call rows that are agent-loop round trips (every phase
+    but :data:`NON_TURN_PHASES`) and ``calls`` every call row. Pure; the
+    eval runner stores it per case and the ledger report per task.
+    """
+    out = {k: 0 for k in METRIC_KEYS}
+    for r in calls_rows:
+        out['calls'] += 1
+        if str(r.get('phase') or '') not in NON_TURN_PHASES:
+            out['turns'] += 1
+        for col in ('tokens_in', 'tokens_out', 'cache_read', 'cache_write'):
+            out[col] += int(r.get(col) or 0)
+    out['tokens'] = (out['tokens_in'] + out['tokens_out']
+                     + out['cache_read'] + out['cache_write'])
+    out['tool_bytes'] = sum(int(r.get('shown_bytes') or 0)
+                            for r in tool_events_rows)
+    return out
+
+
 def model_key(row: dict) -> str:
     """``adapter|model`` (the bench's ``models.txt`` form) for a row."""
     return f"{row.get('adapter') or ''}|{row.get('model') or ''}"

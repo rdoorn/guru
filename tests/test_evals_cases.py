@@ -273,10 +273,12 @@ class TestShippedCases:
                 name
         sym = by_name['find-symbol-outline']
         assert sym.expect.tools_used_any == ['find_symbol', 'outline']
-        assert sym.expect.tools_used_none == ['read_file']
+        # read_file is no longer forbidden (a preference, now a smell:
+        # evals/triage/2026-09-26-structural.md "Case changes")
+        assert sym.expect.tools_used_none == []
         assert sym.expect.answer_contains == ['upload.py', 'handlers.py']
         digest = by_name['planted-failure-digest']
-        assert digest.expect.tools_used_none == ['read_file']
+        assert digest.expect.tools_used_none == []
         assert digest.expect.answer_regex == [
             'test_words_across_newlines', 'newline']
 

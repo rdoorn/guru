@@ -397,6 +397,50 @@ def turns_summary(turns_rows: list) -> dict:
                                  for r in turns_rows)}
 
 
+MAIN_TASK = 'main'            # the main agent's calls (no task id) per turn
+
+
+def _work_key(r: dict) -> str:
+    """The unit ``per_task`` groups by: the sub-agent task id, or the main
+    agent's ``main:<turn_id>`` (its calls carry no task id)."""
+    task_id = str(r.get('task_id') or '')
+    if task_id:
+        return task_id
+    return f"{MAIN_TASK}:{r.get('turn_id') or ''}"
+
+
+def per_task(calls_rows: list, tool_events_rows: list,
+             tasks_rows: Optional[list] = None) -> dict:
+    """The model-agnostic metrics per unit of work.
+
+    ``{key: {'kind', 'role', 'model', **ledger.usage_metrics(...)}}`` in
+    first-call order, keyed by :func:`_work_key` (a task id, or
+    ``main:<turn_id>`` for the main agent's own calls); ``kind``, ``role``
+    and ``model`` come from the task's latest ``tasks`` row when
+    ``tasks_rows`` is given (``''`` otherwise or for the main agent, whose
+    ``model`` is that of its first call). Tool events without a matching
+    call row still count (their key appears with zero calls).
+    """
+    latest: dict = {}
+    for r in tasks_rows or []:
+        latest[str(r.get('task_id') or '')] = r
+    groups: dict = {}
+    for stream, rows in (('calls', calls_rows), ('tools', tool_events_rows)):
+        for r in rows:
+            g = groups.setdefault(_work_key(r), {'calls': [], 'tools': []})
+            g[stream].append(r)
+    out: dict = {}
+    for key, g in groups.items():
+        task = latest.get(key, {})
+        model = str(task.get('model') or '')
+        if not model and g['calls']:
+            model = str(g['calls'][0].get('model') or '')
+        out[key] = {'kind': str(task.get('kind') or ''),
+                    'role': str(task.get('role') or ''), 'model': model,
+                    **ledger.usage_metrics(g['calls'], g['tools'])}
+    return out
+
+
 def tools_summary(tool_events_rows: list) -> dict:
     """``{tool: {'calls', 'mean_seconds', 'produced_bytes', 'shown_bytes',
     'denials'}}`` over the ``tool_events`` audit stream, sorted by tool;
@@ -586,14 +630,15 @@ def controller_labelled(tasks_rows: list) -> bool:
 def build_report(*, calls: list, tasks: list, turns: list, decisions: list,
                  labels: list, tool_events: Optional[list] = None,
                  preactivated: Optional[list] = None) -> dict:
-    """Every aggregation in one dict (keys: ``models``, ``latency``,
-    ``fallback``, ``judge_vs_heuristic``, ``judge_vs_labels``,
+    """Every aggregation in one dict (keys: ``models``, ``per_task``,
+    ``latency``, ``fallback``, ``judge_vs_heuristic``, ``judge_vs_labels``,
     ``judge_metrics``, ``turns``, ``tools``, ``tool_smells``,
     ``controller_labelled``, ``counts``). ``tool_events`` may be omitted
     (older ledgers); ``preactivated`` is the pre-activated tool list for
     :func:`tool_smells` (default ``config.PREACTIVATE_TOOLS``)."""
     events = list(tool_events or [])
     return {'models': ledger.per_model_usage(calls),
+            'per_task': per_task(calls, events, tasks),
             'tools': tools_summary(events),
             'tool_smells': tool_smells(events, preactivated),
             'controller_labelled': controller_labelled(tasks),
@@ -697,6 +742,20 @@ def render_markdown(report: dict) -> str:
           _money(m['cost_usd'])]
          for _, m in sorted(report['models'].items(),
                             key=lambda kv: -kv[1]['calls'])])
+    out += ['## Per task', '',
+            'The model-agnostic cost of each unit of work (a sub-agent '
+            'task, or `main:<turn_id>` for the main agent\'s own calls): '
+            'tokens processed (uncached in + cache read + cache write + '
+            'out), bytes the tools showed the model, agent-loop turns '
+            '(`step` calls) and every call.', '']
+    out += _table(['task', 'kind', 'role', 'model', 'tokens', 'tokens in',
+                   'tokens out', 'cache read', 'tool bytes', 'turns',
+                   'calls'],
+                  [[key, v['kind'] or '-', v['role'] or '-',
+                    v['model'] or '-', v['tokens'], v['tokens_in'],
+                    v['tokens_out'], v['cache_read'], v['tool_bytes'],
+                    v['turns'], v['calls']]
+                   for key, v in report.get('per_task', {}).items()])
     out += ['## Task latency (seconds, finished tasks; rows without '
             f'kind/complexity bucket as `{UNLABELLED}`)', '']
     out += _table(['kind', 'complexity', 'n', 'p50', 'p95'],
