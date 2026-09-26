@@ -43,8 +43,8 @@ from typing import Optional, Union
 
 from guru import log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
-                                dump_request)
+from guru.adapters.base import (FORCE_PLAN, JSON_ONLY, Adapter, ModelInfo,
+                                dump_request, parameters_schema)
 from guru.domain import ledger, pricing, tools
 
 # Non-streaming per tool-call round (parity with the Ollama adapter). Kept at
@@ -52,6 +52,15 @@ from guru.domain import ledger, pricing, tools
 _MAX_TOKENS = 16000
 _DEFAULT_CONTEXT = 200000
 CACHE_CONTROL = {'type': 'ephemeral'}
+# Tool forcing (the turn contract, guru.adapters.turn): ``tool_choice any``
+# makes the model answer with a tool call. The Messages API rejects it
+# together with extended thinking, so a forced round is sent without
+# ``thinking``: the controller's ``plan`` round always (a structured
+# decision), a worker round only on an adapter configured with
+# ``thinking = false`` (a thinking worker keeps its reasoning and its text
+# reply is taken as the answer, like Ollama's). A rejected ``tool_choice``
+# turns forcing off for this adapter after one retry without it.
+TOOL_CHOICE_ANY = {'type': 'any'}
 
 
 # --- pure translation helpers (unit-tested) ----------------------------------
@@ -164,25 +173,16 @@ def _assistant_follows(messages: list, start: int) -> bool:
 
 
 def tool_defs(specs: list) -> list:
-    """Translate provider-neutral tool specs to Anthropic tool schema."""
-    defs = []
-    for spec in specs:
-        params = spec.get('parameters', {})
-        properties = {
-            name: {'type': 'string', 'description': desc}
-            for name, desc in params.items()
-        }
-        defs.append({
-            'name': spec['name'],
-            'description': spec['description'],
-            'input_schema': {
-                'type': 'object',
-                'properties': properties,
-                'required': [
-                    k for k in params if k not in spec.get('optional', ())],
-            },
-        })
-    return defs
+    """Translate provider-neutral tool specs to Anthropic tool schema
+    (:func:`guru.adapters.base.parameters_schema` for the input)."""
+    return [{'name': spec['name'], 'description': spec['description'],
+             'input_schema': parameters_schema(spec)} for spec in specs]
+
+
+def is_tool_choice_error(exc: Exception) -> bool:
+    """Whether a provider error is about the ``tool_choice`` we sent (the
+    forced round is then retried without it)."""
+    return 'tool_choice' in str(exc).lower()
 
 
 def system_blocks(system: str,
@@ -290,6 +290,10 @@ class AnthropicAdapter(Adapter):
         self.thinking = thinking
         self.cache = bool(cache)
         self._context_by_model: dict = {}
+        self._force_ok = True         # cleared after a tool_choice error
+
+    def forces(self, tool: str) -> bool:
+        return self._force_ok and (tool == FORCE_PLAN or not self.thinking)
 
     # --- client construction -------------------------------------------------
 
@@ -458,9 +462,7 @@ class AnthropicAdapter(Adapter):
         anth_tools = cached_tools(tool_defs(tools.active_specs()), self.cache)
         system_field = system_blocks(system, self.cache)
 
-        def step():
-            """One Messages API round; returns (text, [(name, input, block)])
-            or None on error (printed) — the shared loop handles cancel."""
+        def request(force: bool) -> dict:
             kwargs: dict = {
                 'model': session.model,
                 'max_tokens': _MAX_TOKENS,
@@ -469,12 +471,31 @@ class AnthropicAdapter(Adapter):
             }
             if system_field is not None:
                 kwargs['system'] = system_field
-            if self.thinking:
+            if force and anth_tools:
+                kwargs['tool_choice'] = dict(TOOL_CHOICE_ANY)
+            elif self.thinking:
                 kwargs['thinking'] = {
                     'type': 'adaptive', 'display': 'summarized'}
+            return kwargs
+
+        def step():
+            """One Messages API round; returns (text, [(name, input, block)])
+            or None on error (printed) — the shared loop handles cancel.
+            A forced round (see ``TOOL_CHOICE_ANY``) that the API rejects
+            for its ``tool_choice`` is retried once unforced."""
+            forced = turn.forced_tool()
+            force = forced is not None and self.forces(forced)
             t0 = time.perf_counter()
             try:
-                resp = self._create(client, **kwargs)
+                try:
+                    resp = self._create(client, **request(force))
+                except Exception as e:
+                    if not (force and is_tool_choice_error(e)):
+                        raise
+                    log.warning('%s rejected tool_choice (%s); forcing off',
+                                self.name, str(e)[:120])
+                    self._force_ok = False
+                    resp = self._create(client, **request(False))
             except Exception as e:
                 _note_error(e)
                 ui.console.print(f"[red]Anthropic error: {e}[/red]")

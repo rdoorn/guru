@@ -66,6 +66,40 @@ def dump_request(adapter: str, kwargs: dict) -> Optional[Path]:
         return None
 
 
+def parameters_schema(spec: dict) -> dict:
+    """The JSON schema of a provider-neutral tool spec's input: the
+    spec's own ``schema`` when it carries one (the ``plan`` tool's nested
+    tasks), else one string property per ``parameters`` entry with the
+    non-``optional`` ones required. Shared by every adapter so all three
+    send the same shape."""
+    schema = spec.get('schema')
+    if isinstance(schema, dict):
+        return schema
+    params = spec.get('parameters', {})
+    return {
+        'type': 'object',
+        'properties': {name: {'type': 'string', 'description': desc}
+                       for name, desc in params.items()},
+        'required': [k for k in params if k not in spec.get('optional', ())],
+    }
+
+
+def openai_tool_defs(specs: list) -> list:
+    """Translate provider-neutral tool specs to OpenAI function-calling
+    (the shape the LiteLLM proxy and the Ollama daemon both take)."""
+    return [{'type': 'function',
+             'function': {'name': spec['name'],
+                          'description': spec['description'],
+                          'parameters': parameters_schema(spec)}}
+            for spec in specs]
+
+
+# Turn-contract forcing (guru.adapters.turn.forced_tool): what the loop
+# asks an adapter to force this round.
+FORCE_PLAN = 'plan'      # a controller round: the ``plan`` tool
+FORCE_ANY = 'any'        # a worker round: any tool (or ``final_answer``)
+
+
 @dataclass
 class ModelInfo:
     """A selectable model, grouped in /models under its adapter."""
@@ -125,6 +159,14 @@ class Adapter(ABC):
     @abstractmethod
     def summarise(self, transcript: str) -> str:
         """Return a concise summary of a conversation transcript."""
+
+    def forces(self, tool: str) -> bool:
+        """Whether this adapter forces a tool call for a round the loop
+        marks ``tool`` (:data:`FORCE_PLAN` or :data:`FORCE_ANY`). A
+        forcing adapter's text-only reply is a protocol violation
+        (``guru.adapters.turn``); a non-forcing one's text is the answer.
+        The default cannot force."""
+        return False
 
     def complete(self, prompt: str, max_tokens: int = 1024,
                  model: str = '') -> str:

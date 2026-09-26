@@ -198,7 +198,7 @@ class TestAccumulators:
         assert set(session.STRUGGLE_KEYS) == {
             'stall_nudges', 'delegation_nudges', 'over_read', 'compactions',
             'tool_errors', 'sha_mismatches', 'provider_errors', 'refusals',
-            'redactions'}
+            'redactions', 'protocol_violation'}
 
     def test_record_call_counts_and_adds_known_cost(self) -> None:
         ledger.record_call(adapter='Anthropic', model='claude-sonnet-5',

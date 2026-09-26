@@ -4,7 +4,8 @@ Runs labelled Choice / Score / Noul cases against several Ollama models using
 single-token log-probabilities (no text generation), under a few steering
 variants, and reports accuracy, latency, and how much probability mass lands
 on the allowed answers. Compares against guru's current heuristics where one
-exists (``looks_like_preamble`` and ``_match_tools``).
+exists (``_match_tools``; the retired ``looks_like_preamble`` act-nudge
+heuristic lives here now as the stall baseline).
 
 Usage::
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import statistics
 import string
 import time
@@ -25,7 +27,6 @@ from typing import Any, Optional
 import ollama
 
 from bench.primitives.cases import TASKS
-from guru.adapters.turn import looks_like_preamble
 from guru.domain.tools import _match_tools
 
 MODELS = ['qwen3:0.6b', 'gemma3:1b', 'qwen3:1.7b',
@@ -33,6 +34,25 @@ MODELS = ['qwen3:0.6b', 'gemma3:1b', 'qwen3:1.7b',
 VARIANTS = ['plain', 'plain-rev', 'chat', 'json']
 LETTERS = string.ascii_uppercase
 KEEP_ALIVE = '10m'
+
+
+# The former act-nudge heuristic of the turn loop (retired by the turn
+# contract, guru.adapters.turn): kept here as the baseline the stall judge
+# is measured against.
+_PREAMBLE_RE = re.compile(
+    r"\b(let me|i'?ll|i will|let'?s|i'?m going to|i am going to|going to|"
+    r"start by|next[,]? i|first[,]? i)\b", re.IGNORECASE)
+
+
+def looks_like_preamble(content: str) -> bool:
+    """True if text announces an action instead of answering — a short
+    'Let me… / I'll…' preamble, or one trailing off into a promised list.
+    Long substantive answers (the real result) do not match."""
+    if len(content) > 600:
+        return False
+    if content.rstrip().endswith((':', '…', '...')):
+        return True
+    return bool(_PREAMBLE_RE.search(content))
 
 
 @dataclass

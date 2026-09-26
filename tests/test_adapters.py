@@ -64,48 +64,6 @@ class TestResolveContextWindow:
         assert ceiling == 0
 
 
-class TestActNudge:
-    """Nudge weak models that announce an action but call no tool."""
-
-    def test_looks_like_preamble(self) -> None:
-        from guru.adapters.ollama import _looks_like_preamble as p
-        assert p("Let me read the files.") is True
-        assert p("I'll inspect the code next.") is True
-        assert p("Here is my plan:") is True
-        assert p("The code is clean and well tested.") is False
-        assert p("Let me " + "x" * 700) is False   # too long -> real answer
-
-    def test_run_turn_nudges_then_answers(self, monkeypatch) -> None:
-        import ollama
-        from guru.adapters.ollama import OllamaAdapter
-        a = OllamaAdapter()
-        msgs = [{'role': 'system', 'content': 's'},
-                {'role': 'user', 'content': 'inspect the code'}]
-        monkeypatch.setattr(session, 'messages', msgs)
-        monkeypatch.setattr(session, 'cancel_requested', False)
-        monkeypatch.setattr(a, '_fit_after_load', lambda: None)
-        monkeypatch.setattr(ui, 'status_draw', lambda: None)
-        seq = [
-            ollama.Message(role='assistant',
-                           content='Let me read the files.', tool_calls=None),
-            ollama.Message(role='assistant',
-                           content='The code is well structured overall.',
-                           tool_calls=None),
-        ]
-        calls = {'n': 0}
-
-        def fake_collect():
-            m = seq[calls['n']]
-            calls['n'] += 1
-            return m
-        monkeypatch.setattr(a, '_collect_response', fake_collect)
-        a.run_turn()
-        assert calls['n'] == 2      # looped again after the nudge
-        assert any(m.get('role') == 'user'
-                   and 'do it now' in (m.get('content') or '').lower()
-                   for m in session.messages)
-
-
 class TestStreamingCancel:
     """The streamed turn accumulates chunks and aborts on cancel_requested."""
 
@@ -158,8 +116,10 @@ class TestStreamingCancel:
 class TestTurnLoop:
     """The shared, provider-agnostic tool-calling loop (guru.adapters.turn).
 
-    Every adapter drives its turn through run_loop, so these lock the nudge,
-    duplicate-suppression, and cancel behaviour that all providers now share.
+    Every adapter drives its turn through run_loop, so these lock the
+    delegation nudge, duplicate-suppression, and cancel behaviour that all
+    providers share (the turn contract has its own tests in
+    tests/test_turn_contract.py).
     """
 
     def _quiet(self, monkeypatch) -> None:
@@ -170,16 +130,20 @@ class TestTurnLoop:
         monkeypatch.setattr(session, 'messages', [])
         monkeypatch.setattr(session, 'cancel_requested', False)
 
-    def test_nudges_stalled_then_answers(self, monkeypatch) -> None:
+    def test_text_reply_is_the_answer_without_forcing(self, monkeypatch):
+        """No adapter that forces tool calls is bound: a text reply is the
+        answer at once (no act nudge, no re-prompt)."""
         from guru.adapters import turn
         self._quiet(monkeypatch)
-        seq = iter([("Let me look into it.", []),
-                    ("It is well tested.", [])])
+        monkeypatch.setattr(session, 'adapter', None)
+        seq = iter([("Let me look into it.", [])])
         nudges: list = []
         turn.run_loop(step=lambda: next(seq),
                       run_tools=lambda p: None,
                       add_user=lambda t: nudges.append(t))
-        assert len(nudges) == 1 and 'do it now' in nudges[0].lower()
+        assert nudges == []
+        assert session.messages[-1] == {
+            'role': 'assistant', 'content': 'Let me look into it.'}
 
     def test_runs_tools_then_answers(self, monkeypatch) -> None:
         from guru.adapters import turn
@@ -356,146 +320,6 @@ class TestTurnLoop:
         turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
                       add_user=lambda t: nudges.append(t))
         assert nudges == []
-
-
-class TestOverReadGuard:
-    """turn._drive: a delegation-capable non-controller that reads
-    ``config.OVER_READ_LIMIT`` distinct paths in one turn without spawning
-    is nudged to delegate at once (once per turn), and the struggle
-    counter ``over_read`` records it."""
-
-    def _quiet(self, monkeypatch, messages=None, *, can_spawn=True,
-               controller=False, limit=8) -> None:
-        from guru.adapters import turn
-        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
-        monkeypatch.setattr(ui, 'status_draw', lambda: None)
-        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
-        monkeypatch.setattr(ui.console, 'print', lambda *a, **k: None)
-        monkeypatch.setattr(session, 'messages', messages if messages
-                            is not None else [
-                                {'role': 'user',
-                                 'content': 'review the whole service'}])
-        monkeypatch.setattr(session, 'cancel_requested', False)
-        monkeypatch.setattr(session, 'can_spawn', can_spawn)
-        monkeypatch.setattr(session, 'controller', controller)
-        monkeypatch.setattr(session, 'struggle', {'over_read': 0})
-        monkeypatch.setattr(config, 'OVER_READ_LIMIT', limit)
-        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 0)
-
-    def _run(self, rounds: list) -> list:
-        """Drive scripted ``rounds`` (each a list of read paths, or a
-        ``'spawn'`` marker); every tool round threads tool messages into
-        ``session.messages`` as an adapter would. Returns the nudges."""
-        from guru.adapters import turn
-        seq = iter(rounds + [("Done.", [])])
-
-        def step():
-            item = next(seq)
-            if isinstance(item, tuple):
-                return item
-            calls = []
-            for i, path in enumerate(item):
-                if path == 'spawn':
-                    calls.append(('spawn', {'task': 't'}, f'r{i}'))
-                else:
-                    calls.append(('read_file', {'path': path}, f'r{i}'))
-            return ("", calls)
-
-        def run_tools(pending):
-            for name, args, _ref, _dup in pending:
-                session.messages.append(
-                    {'role': 'tool', 'tool_name': name, 'content': 'x',
-                     'tool_args': dict(args)})
-        nudges: list = []
-        turn.run_loop(step=step, run_tools=run_tools,
-                      add_user=lambda t: nudges.append(t))
-        return nudges
-
-    def _paths(self, n, start=0):
-        return [f'app/m{i}.py' for i in range(start, start + n)]
-
-    def test_nudges_at_the_limit_and_continues(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        nudges = self._run([self._paths(5), self._paths(3, 5),
-                            self._paths(2, 8)])
-        assert len(nudges) == 1
-        assert nudges[0].startswith(
-            'You have read 8 files without delegating. ')
-        assert 'decompose' in nudges[0].lower()
-        assert session.struggle['over_read'] == 1
-
-    def test_under_the_limit_is_silent(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        assert self._run([self._paths(7)]) == []
-        assert session.struggle['over_read'] == 0
-
-    def test_only_once_per_turn(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        nudges = self._run([self._paths(8), self._paths(8, 8),
-                            self._paths(8, 16)])
-        assert len(nudges) == 1
-
-    def test_same_path_counts_once(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        assert self._run([['a.py'] * 5, ['a.py', 'b.py'] * 4]) == []
-
-    def test_controller_and_subagent_are_never_nudged(self, monkeypatch):
-        self._quiet(monkeypatch, controller=True)
-        assert self._run([self._paths(9)]) == []
-        self._quiet(monkeypatch, can_spawn=False)
-        assert self._run([self._paths(9)]) == []
-
-    def test_spawn_in_the_turn_disarms_it(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        assert self._run([['spawn'], self._paths(9)]) == []
-
-    def test_reads_from_earlier_turns_do_not_count(self, monkeypatch):
-        earlier = [{'role': 'user', 'content': 'first question'}] + [
-            {'role': 'tool', 'tool_name': 'read_file', 'content': 'x',
-             'tool_args': {'path': p}} for p in self._paths(6, 100)] + [
-            {'role': 'assistant', 'content': 'answered'},
-            {'role': 'user', 'content': 'review the whole service'}]
-        self._quiet(monkeypatch, messages=list(earlier))
-        assert self._run([self._paths(5)]) == []         # 11 overall
-        # a new turn: the 5 (and the 6) above are history
-        session.messages += [
-            {'role': 'assistant', 'content': 'answered again'},
-            {'role': 'user', 'content': 'and the tests?'}]
-        assert self._run([self._paths(3, 5)]) == []      # 14 overall, 3 now
-        session.messages += [
-            {'role': 'assistant', 'content': 'answered once more'},
-            {'role': 'user', 'content': 'review it all'}]
-        assert len(self._run([self._paths(8, 200)])) == 1
-
-    def test_zero_limit_disables(self, monkeypatch) -> None:
-        self._quiet(monkeypatch, limit=0)
-        assert self._run([self._paths(12)]) == []
-
-    def test_nudge_is_not_mistaken_for_the_request(self, monkeypatch):
-        from guru.adapters import turn
-        self._quiet(monkeypatch)
-        seen: list = []
-        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
-        orig_add = seen.append
-
-        def add_user(t):
-            session.messages.append({'role': 'user', 'content': t})
-            orig_add(t)
-        seq = iter([("", [('read_file', {'path': p}, p)
-                          for p in self._paths(8)]), ("Done.", [])])
-
-        def run_tools(pending):
-            for name, args, _ref, _dup in pending:
-                session.messages.append(
-                    {'role': 'tool', 'tool_name': name, 'content': 'x',
-                     'tool_args': dict(args)})
-        turn.run_loop(step=lambda: next(seq), run_tools=run_tools,
-                      add_user=add_user)
-        assert len(seen) == 1
-        assert turn._turn_request() == 'review the whole service'
-
-    def test_over_read_is_a_struggle_key(self) -> None:
-        assert 'over_read' in session.STRUGGLE_KEYS
 
 
 class TestAdapterConfigRoundTrip:
@@ -1311,13 +1135,50 @@ class TestControllerExecuted:
         row = self._run(monkeypatch, fake_repo, [("x" * 601, [])])
         assert row['controller_executed'] is True
 
-    def test_long_answer_after_spawn_is_fine(self, monkeypatch, fake_repo):
+    def test_spawn_is_a_foreign_tool_for_a_controller(
+            self, monkeypatch, fake_repo):
+        """A controller has ``plan`` only; calling spawn/join is doing the
+        coordination by hand and flips the flag."""
         row = self._run(monkeypatch, fake_repo, [
             ("", [("spawn", {"task": "t"}, "r1")]),
             ("", [("join", {"targets": "agent1"}, "r2")]),
-            ("x" * 601, [])])
+            ("short.", [])])
+        assert row['controller_executed'] is True
+
+    def test_delegating_plan_counts_tasks_and_is_fine(self, monkeypatch,
+                                                      fake_repo):
+        from guru.adapters import turn
+        from guru.domain import plan
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'review auth for security'}])
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'task_id', '')
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', True)
+        args = {'outcome': 'delegate', 'tasks': [
+            {'goal': 'review auth', 'kind': 'review',
+             'complexity': 'standard'},
+            {'goal': 'review tests', 'kind': 'review',
+             'complexity': 'trivial'}]}
+        it = iter([("", [("plan", args, "r1")])])
+
+        def run_tools(pending):
+            session.messages.append({
+                'role': 'tool', 'tool_name': 'plan',
+                'content': plan.delegated_text(
+                    ['agent1', 'agent2'], plan.parse(args)[0].tasks)})
+            session.turn_waiting = True
+        turn.run_loop(step=lambda: next(it), run_tools=run_tools,
+                      add_user=lambda t: None)
+        from guru.domain import ledger
+        ledger.flush()
+        [row] = fake_repo.stream('turns')
         assert row['controller_executed'] is False
-        assert row['tasks_spawned'] == 1
+        assert row['tasks_spawned'] == 2
+        assert row['tools_used'] == ['plan']
 
     def test_short_conversational_answer_is_fine(self, monkeypatch,
                                                  fake_repo):

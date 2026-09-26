@@ -968,8 +968,7 @@ class TestControllerConfigure:
         assert st.controller is True and st.can_spawn is True
         assert config.CONTROLLER_HINT in st.messages[0]['content']
         assert config.DELEGATION_HINT not in st.messages[0]['content']
-        assert st.active_tools == [tools.spawn, tools.check, tools.join,
-                                   tools.use_skill]
+        assert st.active_tools == [tools.plan]
         assert st.active_tool_names == set()
 
     def test_non_controller_unchanged(self) -> None:

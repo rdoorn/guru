@@ -5,6 +5,7 @@ model requests a tool; this module handles the domain allow-list gate,
 ``search_tools`` activation, and running the tool, returning a result string.
 """
 import time
+from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,10 +14,13 @@ from ddgs import DDGS
 from guru import config, log, session, skills, ui
 from guru.domain import (code, decisions, files, gitread, ledger, patch,
                          policy, procs, quality, routing, toolpolicy)
+from guru.domain import plan as _plan
 
 # The tools a controller (``[routing] controller = true``) keeps: it
-# coordinates and never executes (design doc §2).
-CONTROLLER_TOOLS = frozenset(('spawn', 'check', 'join', 'use_skill'))
+# coordinates and never executes (design doc §2). Its one tool is the
+# forced ``plan`` call (guru.domain.plan); spawn/check/join stay for
+# hands-on delegation.
+CONTROLLER_TOOLS = frozenset(('plan',))
 # The project tool policy seam lives in guru.domain.toolpolicy (so the
 # audited verbs can read it without importing this module); re-exported
 # here so tools.set_policy / is_enabled / active_policy keep working.
@@ -206,6 +210,72 @@ _JOIN_SPEC = {
     'parameters': {
         'targets': 'Sub-agent names, space- or comma-separated',
     },
+}
+
+
+# Pluggable controller plan handler — installed by the orchestrator.
+# Signature: (args: dict) -> str; it validates the plan
+# (guru.domain.plan.evaluate) and, for ``delegate``, spawns the tasks.
+_plan_handler = None
+
+
+def set_plan_handler(fn) -> None:
+    """Install the controller plan handler (guru.orchestrator)."""
+    global _plan_handler
+    _plan_handler = fn
+
+
+def plan_call(args: dict) -> str:
+    """Run the ``plan`` tool on its raw arguments (the loop and
+    ``execute_tool`` pass the dict through untouched)."""
+    if _plan_handler is None:
+        return ("Planning is not available in this mode; answer the user"
+                " directly.")
+    return _plan_handler(dict(args or {}))
+
+
+def plan(outcome: str, answer: str = '', tasks: Optional[list] = None) -> str:
+    """
+    Your one reply per turn: answer the user, or delegate tasks to routed
+    workers that run in parallel and report back to you.
+
+    Args:
+        outcome: "answer" (reply with answer, no worker runs) or "delegate"
+            (guru runs every task in tasks and resumes you with results).
+        answer: The reply to the user (outcome answer).
+        tasks: For outcome delegate, at least one object {goal, kind,
+            complexity, files?, role?, skill?}.
+    """
+    return plan_call({'outcome': outcome, 'answer': answer,
+                      'tasks': tasks or []})
+
+
+_PLAN_SPEC = {
+    'name': 'plan',
+    'description': config.PLAN_TOOL_DESCRIPTION,
+    'parameters': {
+        'outcome': '"answer" or "delegate"',
+        'answer': 'The reply to the user (outcome answer)',
+        'tasks': 'The tasks to run in parallel (outcome delegate)',
+    },
+    'optional': ['answer', 'tasks'],
+    # The full JSON schema (nested tasks); adapters send it verbatim.
+    'schema': _plan.SCHEMA,
+}
+
+
+def final_answer(text: str) -> str:
+    """
+    Deliver your complete final answer to the user and end the turn. Call
+    it once, when the task is done; until then call the tools you need.
+    """
+    return _plan.ANSWER_ACK
+
+
+_FINAL_ANSWER_SPEC = {
+    'name': 'final_answer',
+    'description': config.FINAL_ANSWER_DESCRIPTION,
+    'parameters': {'text': 'Your complete answer to the user'},
 }
 
 
@@ -1022,13 +1092,14 @@ def specs_for(active_tool_names, can_spawn: bool,
 
     Lets callers (e.g. the context breakdown) price a specific agent's tool
     schemas without binding that agent's session context. A controller gets
-    only spawn/check/join/use_skill, whatever ``active_tool_names`` holds.
+    only ``plan``, whatever ``active_tool_names`` holds; every other
+    agent has ``final_answer`` (the turn contract, guru.adapters.turn).
     A tool the project policy disables is left out even if it is in
     ``active_tool_names`` (e.g. activated before the policy changed).
     """
     if controller:
-        return [_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC, _USE_SKILL_SPEC]
-    specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC]
+        return [_PLAN_SPEC]
+    specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC, _FINAL_ANSWER_SPEC]
     if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
     for name in _advertised():
@@ -1063,12 +1134,12 @@ def _core_tool_fns() -> list:
 
 def initial_tools(can_spawn: bool, controller: bool = False) -> tuple:
     """The active tool list + activated-name set an agent starts a turn with:
-    the always-on tools (search_tools, use_skill, and spawn/check/join when
-    delegation-capable) plus the pre-activated core toolset. A controller
-    gets exactly spawn/check/join/use_skill and no core tools."""
+    the always-on tools (search_tools, use_skill, final_answer, and
+    spawn/check/join when delegation-capable) plus the pre-activated core
+    toolset. A controller gets exactly ``plan`` and no core tools."""
     if controller:
-        return [spawn, check, join, use_skill], set()
-    base = [search_tools, use_skill]
+        return [plan], set()
+    base = [search_tools, use_skill, final_answer]
     if can_spawn:
         base.extend([spawn, check, join])
     names = set()
@@ -1184,13 +1255,17 @@ def execute_tool(name: str, arguments: dict) -> str:
         code = str(arguments.get('code', ''))
         ui.note_tool(name, f'{len(code)} chars, {len(code.splitlines())} '
                            'lines')
+    elif name == 'plan':
+        ui.note_tool(name, str(arguments.get('outcome', '')))
+    elif name == 'final_answer':
+        ui.note_tool(name, f'{len(_plan.final_text(arguments))} chars')
     elif name != 'delete_file':
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
     denied = ''
     started = time.monotonic()
     if session.controller and name not in CONTROLLER_TOOLS:
-        # A controller coordinates only; CONTROLLER_HINT promises it has no
-        # other tools, so keep that true (the attempt is still measured by
+        # A controller coordinates only; its tool set is ``plan`` alone,
+        # so keep that true (the attempt is still measured by
         # turn.controller_executed).
         result = f"Unknown tool: {name}"
         denied = 'controller'
@@ -1212,6 +1287,10 @@ def execute_tool(name: str, arguments: dict) -> str:
         result = check(**arguments)
     elif name == "join":
         result = join(**arguments)
+    elif name == "plan":
+        result = plan_call(arguments)
+    elif name == "final_answer":
+        result = final_answer(_plan.final_text(arguments))
     elif name in TOOL_REGISTRY:
         try:
             result = TOOL_REGISTRY[name]["fn"](**arguments)

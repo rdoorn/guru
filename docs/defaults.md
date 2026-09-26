@@ -109,8 +109,9 @@ adapter template, not a knob guru reads by name.
 
 Read only from `guru/config.py`; listed so their defaults are on record:
 `MODE = ask-for-changes`, `AUTO_GRANT = True` (the eval runner turns it off
-so auto cases still hit its denying asker), `OVER_READ_LIMIT = 8` and
-`DELEGATION_NUDGE_MIN_READS = 3` (`0` disables either), `COMPACT_AT = 0.85`,
+so auto cases still hit its denying asker), `DELEGATION_NUDGE_MIN_READS = 3`
+(`0` disables it; the former `OVER_READ_LIMIT` over-read guard is gone —
+`read_file` is structural), `COMPACT_AT = 0.85`,
 `KEEP_RECENT_GROUPS = 4`, `DEFAULT_NUM_CTX = 4096`, `GPU_FIT_SAFETY = 0.95`,
 `SECRET_SCAN` (mirrors `[routing] secret_scan` while a table is present).
 Every constant in `config.py` is read by at least one module; none was

@@ -27,7 +27,11 @@ if TYPE_CHECKING:                     # avoid an import cycle at runtime
 STRUGGLE_KEYS: tuple[str, ...] = (
     'stall_nudges', 'delegation_nudges', 'over_read', 'compactions',
     'tool_errors', 'sha_mismatches', 'provider_errors', 'refusals',
-    'redactions')
+    'redactions', 'protocol_violation')
+# ``stall_nudges`` is kept so old rows keep their column; the turn loop no
+# longer nudges (the turn contract in guru.adapters.turn) and it reads 0.
+# ``protocol_violation`` counts a text-only reply where a tool call was
+# forced, and a controller plan that was malformed twice.
 
 
 class SessionState:
@@ -66,8 +70,8 @@ class SessionState:
         # agents may; tool-spawned sub-agents may not, to avoid recursion).
         self.can_spawn: bool = False
         # Controller mode (guru.domain.routing / [routing] controller): the
-        # agent converses, decomposes with spawn and synthesises, and gets
-        # only spawn/check/join/use_skill as tools.
+        # agent answers every turn with one forced ``plan`` tool call
+        # (guru.domain.plan) and has no other tool.
         self.controller: bool = False
         # Ledger join keys (guru.domain.ledger): which agent this state
         # belongs to, the sub-agent task it is executing (empty for the main

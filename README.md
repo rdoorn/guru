@@ -144,10 +144,11 @@ lists recent unlabelled tasks with route, status, cost and transcript path
 for triage.
 
 The same ledger holds a `decisions` stream: guru's small closed-form
-decisions — is this reply a stall, does this task need a security /
-architecture / reliability reviewer, is a fetched page a prompt-injection
-attempt — can be handed to a fast local judge alongside the built-in
-heuristic. In `shadow` mode judges only *observe*: the heuristic still
+decisions — does this task need a security / architecture / reliability
+reviewer, is a fetched page a prompt-injection attempt — can be handed to a
+fast local judge alongside the built-in heuristic (the `stall` point is
+retired: the turn contract forces a tool call instead of judging a reply;
+its config keys are accepted and ignored). In `shadow` mode judges only *observe*: the heuristic still
 decides, and both answers are logged so the first few hundred can be
 reviewed before any judge is trusted. In `active` mode the points listed
 under `[decisions.active]` take the judge's answer: the judge runs
@@ -181,8 +182,8 @@ labels = true
 stall = 0.6
 ```
 
-Two points can act on a judge's verdict: `stall` (whether a turn is
-nudged) and `labels`, a margin-gated *tie-breaker* for the complexity label
+One point acts on a judge's verdict: `labels`, a margin-gated
+*tie-breaker* for the complexity label
 a controller puts on a spawned task — the judge's tier routes the task
 only when it differs from the controller's and beats the runner-up by
 `labels_margin`; the task row's `reason` then says
@@ -349,20 +350,41 @@ the local-only option: point the rungs at an Ollama adapter for a
 `local-only` setup, and at the sidecar for the `ollama` judge.
 
 **Controller mode.** `controller = true` turns the main agent into a
-coordinator: it converses, clarifies, decomposes with
-`spawn(task, kind, complexity, role, skill)`, polls with `check`, waits with
-`join` and synthesises — and never executes a task itself. Its tool set is
-exactly `spawn`, `check`, `join`, `use_skill` (no file or web tools). The
-key defaults to on as soon as any ladder rung is configured (a ladder
-without a controller is the configuration that over-read in the
-2026-09-24 real cases); set `controller = false` next to a ladder to keep
-the main agent hands-on, and it is off without a ladder. A controller
+coordinator that never executes a task itself. Its only tool is `plan`,
+and every reply is one forced `plan` call (`guru/domain/plan.py`):
+`{outcome: "answer" | "delegate", answer?, tasks?: [{goal, kind,
+complexity, files?, role?, skill?}]}`. `answer` is the reply (greetings,
+clarifications, follow-ups on delivered results — no worker runs; a
+simple question has no task). `delegate` hands the tasks to guru, which
+validates the plan in code — known `kind`/`complexity`, at least one task,
+and when the request names several concerns (correctness, security,
+performance, reliability, design, tests, docs) every named concern must
+appear in some task goal — spawns every task on its routed rung (a
+`review` task takes the review ladder), joins them and ends the turn; the
+joined results resume the controller, which answers with `plan` again. A
+rejected plan gets one re-ask naming the problem; a second malformed plan
+ends the turn on a plain-text fallback with `protocol_violation = 1` in
+the row's `struggle` counters. `answer` is never rejected. The key
+defaults to on as soon as any ladder rung is configured; set
+`controller = false` next to a ladder to keep the main agent hands-on
+(`spawn`/`check`/`join`), and it is off without a ladder. A controller
 that does the work anyway is measured, not punished: the turn row carries
 `controller_executed = true` when it attempted any other tool or answered
-with more than 600 characters without spawning. A hands-on main agent has
-an over-read guard instead: after `OVER_READ_LIMIT` (8) distinct files
-read in one turn without a spawn it is told, once, to delegate
-(struggle counter `over_read`).
+with more than 600 characters without delegating.
+
+**Turn contract.** Every other agent (workers, a hands-on main agent) ends
+its turn with a tool call: the tools it needs, then `final_answer(text)`.
+Adapters that can force a tool call do — Anthropic `tool_choice: any`
+(the Messages API rejects it together with extended thinking, so the
+controller's `plan` round is sent without thinking and a worker round is
+forced only on an adapter with `thinking = false`), LiteLLM `tool_choice:
+required` (a proxy that rejects it gets one retry without and forcing is
+turned off for that adapter). On a forcing adapter a text-only reply is a
+protocol violation: one deterministic re-prompt, then the text is the
+answer and `protocol_violation` is bumped. Ollama cannot force: a text
+reply is the answer, and a controller's text is parsed for the plan
+object first. The old preamble heuristic and its stall nudge are gone
+(`stall_nudges` stays a column, reading 0).
 
 **Judges on the routing seam.** Two decision points act with the default
 block (`[decisions] mode = "active"`, see **Ledger and decisions**):
@@ -583,8 +605,9 @@ Registry tools:
   `code_health`, `sandbox_submit`, `request_dependency`; advertised only
   in a project with a provisioned sandbox image (see Sandbox below).
 
-`search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
-`check`, `join` are always available and not part of the registry.
+`search_tools`, `use_skill`, `final_answer` and (for delegation-capable
+agents) `spawn`, `check`, `join` are always available and not part of the
+registry; a controller has `plan` alone (see **Controller mode**).
 
 ### Audited tools
 
@@ -647,8 +670,8 @@ timeout_s = 60             # per-project subprocess ceilings (see [tools.limits]
 
 No file means everything is enabled. `disabled` wins over `enabled`; a
 non-empty `enabled` list is an allowlist for registry tools. The always-on
-tools (`search_tools`, `use_skill`, `spawn`, `check`, `join`) are never
-subject to it. A disabled tool is not advertised at all — it is not
+tools (`search_tools`, `use_skill`, `final_answer`, `spawn`, `check`,
+`join`, and a controller's `plan`) are never subject to it. A disabled tool is not advertised at all — it is not
 pre-activated, `search_tools` does not return it and it is absent from the
 tool schemas the model sees — and if the model names it anyway the call
 answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
@@ -657,8 +680,8 @@ answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
 **Fail closed.** If the policy file is present but invalid (unknown key,
 unknown runner, bad limit, broken TOML) or unreadable, guru reports the
 problem at startup (naming the file) and disables *every* registry tool
-until it is fixed or removed — only `search_tools`, `use_skill`, `spawn`,
-`check`, `join` remain. A policy meant to restrict tools can never widen
+until it is fixed or removed — only `search_tools`, `use_skill`,
+`final_answer`, `spawn`, `check`, `join` (or a controller's `plan`) remain. A policy meant to restrict tools can never widen
 them by mistake.
 
 **Audit.** Every tool call — allowed, refused or unknown — writes one row to

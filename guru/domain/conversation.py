@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from guru import config, log, session, skills, ui
-from guru.domain import ledger, tools
+from guru.domain import ledger, plan, tools
 
 
 def message_to_dict(msg: object) -> dict:
@@ -126,10 +126,10 @@ def msg_content(msg: object) -> str:
 
 # --- the turn's request ------------------------------------------------------
 
-# A weak model sometimes ends a turn by announcing an action ("Let me read
-# the files…") without calling a tool; without a nudge that would be taken
-# as the final answer. The turn loop injects these user messages; they are
-# never the user's request.
+# User messages the turn loop itself injects; they are never the user's
+# request. NUDGE_TEXT is historical (the act nudge was replaced by the
+# turn contract, guru.adapters.turn / guru.domain.plan) and is kept so
+# saved histories that carry it are still read correctly.
 NUDGE_TEXT = (
     "Do not describe what you will do — do it now. Call the tool you need in"
     " this reply (use search_tools first if it is not active). If you are"
@@ -156,16 +156,40 @@ REQUEST_CHARS = 1000
 
 
 def is_nudge(text: str) -> bool:
-    """True for a user message the turn loop itself injected (act,
-    delegation or over-read nudge; the over-read one ends with the
-    delegation text)."""
+    """True for a user message the turn loop itself injected: the
+    delegation nudge (old histories also carry the retired over-read
+    nudge, which ends with the delegation text), a turn-contract re-prompt
+    or a plan re-ask (:mod:`guru.domain.plan`), or the historical act
+    nudge."""
     return (text in (NUDGE_TEXT, DELEGATION_TEXT)
-            or text.endswith(DELEGATION_TEXT))
+            or text.endswith(DELEGATION_TEXT) or plan.is_reprompt(text))
 
 
 def is_mailbox(text: str) -> bool:
     """True for a user message that is a mailbox delivery."""
     return text.startswith(MAILBOX_PREFIXES)
+
+
+def turn_start(messages: list) -> int:
+    """Index in ``messages`` of the current turn's opening message: the
+    last user message that is not a loop nudge; 0 when there is none."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if msg_role(m) != 'user':
+            continue
+        text = msg_content(m).strip()
+        if text and not is_nudge(text):
+            return i
+    return 0
+
+
+def mailbox_turn(messages: list) -> bool:
+    """True when the current turn was opened by a mailbox delivery (a
+    joined or single sub-agent result): its text is the sub-agents'
+    output, not a request from the user."""
+    if not messages:
+        return False
+    return is_mailbox(msg_content(messages[turn_start(messages)]).strip())
 
 
 def request_in(messages: list) -> str:

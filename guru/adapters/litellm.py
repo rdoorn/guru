@@ -45,11 +45,17 @@ from guru import log, session, ui
 from guru.adapters import turn
 from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
                                 dump_request)
+from guru.adapters.base import openai_tool_defs as _openai_tool_defs
 from guru.domain import ledger, pricing, tools
 
 _MAX_TOKENS = 16384   # proxies may enforce a thinking budget above 8k
 _DEFAULT_CONTEXT = 128000
 CACHE_CONTROL = {'type': 'ephemeral'}
+# Tool forcing (the turn contract, guru.adapters.turn): ``tool_choice
+# required`` makes the model answer with a tool call; every round is
+# forced. A proxy that rejects it (a model with server-side thinking on)
+# gets one retry without it and forcing is turned off for this adapter.
+TOOL_CHOICE_REQUIRED = 'required'
 # LiteLLM `mode` values that are not chat models — hidden from /models.
 _NON_CHAT_MODES = {
     'audio_transcription', 'audio_speech', 'embedding',
@@ -165,30 +171,14 @@ def _arguments_text(call: dict) -> str:
     return json.dumps(args or {}, ensure_ascii=False)
 
 
-def openai_tool_defs(specs: list) -> list:
-    """Translate provider-neutral tool specs to OpenAI function-calling."""
-    defs = []
-    for spec in specs:
-        params = spec.get('parameters', {})
-        properties = {
-            name: {'type': 'string', 'description': desc}
-            for name, desc in params.items()
-        }
-        defs.append({
-            'type': 'function',
-            'function': {
-                'name': spec['name'],
-                'description': spec['description'],
-                'parameters': {
-                    'type': 'object',
-                    'properties': properties,
-                    'required': [
-                        k for k in params
-                        if k not in spec.get('optional', ())],
-                },
-            },
-        })
-    return defs
+# Translate provider-neutral tool specs to OpenAI function-calling
+# (shared with the Ollama adapter; see guru.adapters.base).
+openai_tool_defs = _openai_tool_defs
+
+
+def is_tool_choice_error(exc: Exception) -> bool:
+    """Whether a provider error is about the ``tool_choice`` we sent."""
+    return 'tool_choice' in str(exc).lower()
 
 
 # Roles whose message may carry the conversation breakpoint: the user's
@@ -316,6 +306,10 @@ class LiteLLMAdapter(Adapter):
         self.static_models = models or []
         self.cache = bool(cache)
         self._context_by_model: dict = {}
+        self._force_ok = True         # cleared after a tool_choice error
+
+    def forces(self, tool: str) -> bool:
+        return self._force_ok
 
     def _key(self) -> str:
         """Resolve the key: env var → inline api_key → OPENAI_API_KEY."""
@@ -408,18 +402,37 @@ class LiteLLMAdapter(Adapter):
         oa_tools = cached_tools(openai_tool_defs(tools.active_specs()),
                                 self.cache)
 
+        def request(force: bool) -> dict:
+            kwargs: dict = {
+                'model': session.model,
+                'messages': cached_messages(native, self.cache),
+                'tools': oa_tools or None,
+                'max_tokens': _MAX_TOKENS,
+            }
+            if force and oa_tools:
+                kwargs['tool_choice'] = TOOL_CHOICE_REQUIRED
+            return kwargs
+
         def step():
             """One chat-completions round; returns (text, [(name, args, id)])
-            or None on error (printed) — the shared loop handles cancel."""
+            or None on error (printed) — the shared loop handles cancel.
+            A forced round (``TOOL_CHOICE_REQUIRED``) the proxy rejects for
+            its ``tool_choice`` is retried once unforced."""
+            forced = turn.forced_tool()
+            force = forced is not None and self.forces(forced)
             t0 = time.perf_counter()
             try:
-                resp, cost = _complete(
-                    client, dump_as=self.name,
-                    model=session.model,
-                    messages=cached_messages(native, self.cache),
-                    tools=oa_tools or None,
-                    max_tokens=_MAX_TOKENS,
-                )
+                try:
+                    resp, cost = _complete(client, dump_as=self.name,
+                                           **request(force))
+                except Exception as e:
+                    if not (force and is_tool_choice_error(e)):
+                        raise
+                    log.warning('%s rejected tool_choice (%s); forcing off',
+                                self.name, str(e)[:120])
+                    self._force_ok = False
+                    resp, cost = _complete(client, dump_as=self.name,
+                                           **request(False))
             except Exception as e:
                 _note_error(e)
                 ui.console.print(f"[red]LiteLLM error: {e}[/red]")

@@ -25,7 +25,13 @@ Routing (design doc §2, §4, §5): ``spawn`` carries ``kind``/``complexity``
 labels; ``_make_child`` scans the task text, resolves a ``Route`` over the
 configured ladders, asks the once-per-run spend question when a remote pick
 needs it, and configures the child with the route's adapter/model from the
-registry. Without a registry routing is inert (the child keeps the parent's
+registry. A controller never calls ``spawn``: its every reply is one
+``plan`` tool call (``guru.domain.plan``) and ``do_plan`` — installed as the
+plan handler — validates it and, for ``delegate``, spawns the plan's tasks
+itself through ``spawn_panel`` (kind/complexity per task, so a ``review``
+task takes the review ladder), opens the join barrier and ends the turn;
+the joined results resume the controller, which answers with ``plan``
+again. Without a registry routing is inert (the child keeps the parent's
 adapter and model). A remote child that fails without an answer is respawned
 once on the best local rung (``retry_of``); the original row is
 ``fell_back``.
@@ -52,8 +58,8 @@ from rich.console import Console
 
 from guru import config, log, session, ui
 from guru.agents import Agent, AgentManager
-from guru.domain import (conversation, decisions, ledger, policy, routing,
-                         spend, tools)
+from guru.domain import (conversation, decisions, ledger, plan, policy,
+                         routing, spend, tools)
 from guru.repositories import settings as routing_settings
 from guru.repositories.settings import RoutingSettings
 
@@ -327,8 +333,8 @@ class Orchestrator:
         """Set up ``agent``'s fresh conversation + tools, inheriting the model
         and context from ``base``. Delegation-capable agents get the panel
         hint; a controller (``[routing] controller``; implies ``can_spawn``)
-        gets the controller hint and only spawn/check/join/use_skill;
-        sub-agents get a role/skill overlay."""
+        gets the controller hint and the ``plan`` tool alone; sub-agents
+        get a role/skill overlay."""
         st = agent.state
         controller = bool(controller and can_spawn)
         st.messages = [
@@ -671,6 +677,10 @@ class Orchestrator:
             return None
         title = f"agent{len(self.manager.agents) + index}"
         child = Agent(id=title, title=title)
+        # TODO(merge, Package C): pass kind=plan.kind to configure (->
+        # tools.initial_tools(..., kind=)) and set
+        # child.state.task_kind = plan.kind so toolpolicy.for_kind hides the
+        # write tools for a review task.
         self.configure(child, parent.state, can_spawn=False, role=role,
                        skill=skill)
         self._apply_route(child, route, reason)
@@ -801,19 +811,33 @@ class Orchestrator:
                 return True
         return False
 
-    def spawn_panel(self, parent, tasks, synthesis: str = '') -> list:
-        """Deterministically spawn a fixed panel of sub-agents parented to
-        ``parent`` and open a join barrier, so guru itself runs the multi-agent
-        path even for a model that would never delegate. ``tasks`` is a list of
-        ``(task, role, skill)``; when all finish, their combined findings (with
-        an optional ``synthesis`` lead-in) are delivered back to ``parent``.
-        Returns the child titles."""
+    def spawn_panel(self, parent, tasks, synthesis: str = '',
+                    refusal: Optional[list] = None) -> list:
+        """Deterministically spawn a group of sub-agents parented to
+        ``parent`` and open a join barrier, so guru itself runs the
+        multi-agent path: the ``/review`` panel, and every ``delegate``
+        plan of a controller. ``tasks`` items are ``(task, role, skill)``
+        triples (kind ``review``, default complexity) or
+        :class:`guru.domain.plan.Task` objects (their own kind/complexity,
+        the text from :func:`plan.task_text`). When all finish, their
+        combined findings (with an optional ``synthesis`` lead-in) are
+        delivered back to ``parent``. A task routing refuses is skipped,
+        its reasons appended to ``refusal`` when given. Returns the child
+        titles."""
         env = ledger.environment()      # one snapshot for the whole panel
         children: list = []
-        for task, role, skill in tasks:
-            child = self._make_child(parent, task, role=role, skill=skill,
-                                     index=len(children), env=env,
-                                     kind='review')
+        for item in tasks:
+            if isinstance(item, plan.Task):
+                child = self._make_child(
+                    parent, plan.task_text(item), role=item.role,
+                    skill=item.skill, index=len(children), env=env,
+                    kind=item.kind, complexity=item.complexity,
+                    refusal=refusal)
+            else:
+                task, role, skill = item
+                child = self._make_child(parent, task, role=role, skill=skill,
+                                         index=len(children), env=env,
+                                         kind='review', refusal=refusal)
             if child is not None:
                 children.append(child)
         titles = [c.title for c in children]
@@ -921,6 +945,48 @@ class Orchestrator:
                      self._format_join(results))
         return "Those sub-agents already finished; resuming with results now."
 
+    def do_plan(self, caller_state, args: dict) -> str:
+        """The controller's ``plan`` tool (``guru.domain.plan``).
+
+        Validates ``args`` against the turn's request (``evaluate``; on a
+        mailbox turn the request was planned already, so concern coverage
+        is not re-checked). A malformed plan, or one that leaves a named
+        concern uncovered on its first try, gets the re-ask text back (the
+        turn loop allows one; coverage gaps are accepted on the second
+        plan, malformed plans are not). ``answer`` acknowledges: the loop
+        takes the text. ``delegate`` spawns every task through
+        :meth:`spawn_panel` (its kind/complexity route it), opens the
+        join barrier and ends the caller's turn (``turn_waiting``, join
+        semantics); when routing refuses them all the refusal is returned
+        and the turn goes on. A second ``plan`` in one round is ignored.
+        """
+        if caller_state.turn_waiting:
+            return 'Already delegated this turn; the extra plan is ignored.'
+        messages = caller_state.messages
+        followup = conversation.mailbox_turn(messages)
+        request = conversation.request_in(messages)
+        verdict = plan.evaluate(request, args, followup=followup)
+        reasks = plan.reasks_in(
+            messages[conversation.turn_start(messages):])
+        if verdict.errors or verdict.plan is None \
+                or (verdict.missing and reasks == 0):
+            return plan.reask_text(verdict.messages)
+        if verdict.missing:
+            log.info('plan: running with uncovered concern(s) %s after one'
+                     ' re-ask', ', '.join(verdict.missing))
+        if verdict.plan.outcome == 'answer':
+            return plan.ANSWER_ACK
+        caller = self.agent_for_state(caller_state)
+        refusal: list = []
+        titles = self.spawn_panel(caller, verdict.plan.tasks, refusal=refusal)
+        if not titles:
+            return plan.refused_text(refusal)
+        caller_state.turn_waiting = True
+        return plan.delegated_text(titles, verdict.plan.tasks)
+
+    def plan(self, args: dict) -> str:
+        return self.do_plan(session.current(), args)
+
     def check(self, target: str) -> str:
         st = session.current()
         return self.run_on_loop(lambda: self.do_check(st, target))
@@ -931,12 +997,15 @@ class Orchestrator:
         return self.run_on_loop(lambda: self.do_join(st, titles))
 
     def install_handlers(self) -> None:
-        """Wire spawn/check/join so the tool layer routes to this instance."""
+        """Wire spawn/check/join/plan so the tool layer routes to this
+        instance."""
         tools.set_spawn_handler(self.spawn)
         tools.set_check_handler(self.check)
         tools.set_join_handler(self.join)
+        tools.set_plan_handler(self.plan)
 
     def clear_handlers(self) -> None:
         tools.set_spawn_handler(None)
         tools.set_check_handler(None)
         tools.set_join_handler(None)
+        tools.set_plan_handler(None)

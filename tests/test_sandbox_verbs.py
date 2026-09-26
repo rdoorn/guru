@@ -1029,8 +1029,7 @@ class TestToolWiring:
         from guru import ui
         monkeypatch.setattr(verbs, 'available', lambda project=None: True)
         base, names = tools.initial_tools(can_spawn=True, controller=True)
-        assert base == [tools.spawn, tools.check, tools.join,
-                        tools.use_skill] and names == set()
+        assert base == [tools.plan] and names == set()
         assert not {s['name'] for s in tools.specs_for(
             set(tools.SANDBOX_TOOLS), True, controller=True)} & set(
                 tools.SANDBOX_TOOLS)

@@ -77,28 +77,52 @@ class TestControllerHint:
         assert '[project]' in hint
         assert 'refer to it' in hint
 
-    def test_one_worker_per_named_concern(self) -> None:
-        """Iteration-2 suite: the controller folded 'correctness and
-        security' into one security worker in 3/3 repeats."""
+    def test_enforced_rules_are_not_prose(self) -> None:
+        """What guru.domain.plan checks in code is no longer requested in
+        the hint: decomposition, one worker per concern, join/check
+        polling, whole-file reading."""
         hint = config.CONTROLLER_HINT
-        assert 'one worker per named concern' in hint
-        assert 'correctness AND security' in hint
-        assert 'never fold distinct concerns into one worker' in hint
+        for phrase in ('DECOMPOSE', 'one worker per named concern',
+                       'never fold distinct concerns', 'check to poll',
+                       'join to be resumed', 'prefer outline',
+                       'Spawn independent tasks', 'spawn(task'):
+            assert phrase not in hint, phrase
+        assert 'check to poll' not in config.DELEGATION_HINT
+        assert 'outline' not in config.DELEGATION_HINT
+        assert 'Prefer outline' not in config.SYSTEM_PROMPT
+
+    def test_hint_names_the_plan_tool_and_both_outcomes(self) -> None:
+        hint = config.CONTROLLER_HINT
+        assert 'plan tool' in hint
+        assert 'outcome answer' in hint and 'outcome delegate' in hint
+        assert 'never execute a task yourself' in hint
+
+    def test_plan_tool_description_names_the_concern_vocabulary(self):
+        from guru.domain import plan
+        for concern in plan.CONCERNS:
+            assert concern in config.PLAN_TOOL_DESCRIPTION, concern
+        assert 'final_answer' not in config.PLAN_TOOL_DESCRIPTION
+        assert 'end the turn' in config.FINAL_ANSWER_DESCRIPTION
 
     def test_task_names_the_project_path(self) -> None:
         assert 'project path' in config.CONTROLLER_HINT
 
     def test_complexity_examples(self) -> None:
-        hint = config.CONTROLLER_HINT
+        """The tier rubric moved from the hint into the plan schema, on
+        the field the controller fills in."""
+        from guru.domain import plan
+        text = plan.TASK_SCHEMA['properties']['complexity']['description']
         for word in ('trivial', 'standard', 'hard', 'greetings',
                      'one-file edit', 'multi-file refactor', 'concurrency',
                      'whole codebase'):
-            assert word in hint, word
+            assert word in text, word
+        assert 'trivial' not in config.CONTROLLER_HINT
 
     def test_concrete_tier_examples_from_the_real_cases(self) -> None:
         """Each tier carries examples drawn from the 2026-09-24 real
         cases (triage: labels were the weak spot)."""
-        hint = config.CONTROLLER_HINT
+        from guru.domain import plan
+        hint = plan.TASK_SCHEMA['properties']['complexity']['description']
         for phrase in (
                 # trivial
                 'summarise one README section',
@@ -265,7 +289,7 @@ class TestDecisionsAndLedgerSettings:
         assert config.DECISIONS_MODE == 'off'
         assert config.DECISIONS_POINTS == {}
         assert config.DECISIONS_LABELS_MARGIN == 0.15
-        assert config.OVER_READ_LIMIT == 8
+        assert not hasattr(config, 'OVER_READ_LIMIT')
         assert config.LEDGER_ENABLED is True
         assert config.LEDGER_TURN_LINE is True
         assert config.LEDGER_DIR == config.GURU_HOME / 'ledger'
