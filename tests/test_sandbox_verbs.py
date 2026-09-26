@@ -1058,8 +1058,15 @@ class TestToolWiring:
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
         monkeypatch.setattr(session, 'controller', False)
-        out = tools.execute_tool('sandbox_run', {'argv': 'pytest -q'})
+        out = tools.execute_tool('sandbox_run', {'argv': ['pytest', '-q']})
         assert out.startswith('exit 0')
+        # A JSON list in a string is what a provider sends; a plain command
+        # string is a schema error (structural round C2), nothing runs.
+        out = tools.execute_tool('sandbox_run', {'argv': '["pytest", "-q"]'})
+        assert out.startswith('exit 0')
+        out = tools.execute_tool('sandbox_run', {'argv': 'pytest -q'})
+        assert out.startswith(tools.INVALID_ARGS_PREFIX)
+        assert 'list of strings' in out and 'e.g. sandbox_run(' in out
         out = tools.execute_tool('request_dependency',
                                  {'name': 'six', 'constraint': '>=1'})
         assert out.startswith('Recorded dependency request six>=1')

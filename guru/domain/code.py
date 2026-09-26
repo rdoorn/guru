@@ -53,6 +53,40 @@ def _entries(body: list, depth: int) -> Iterator[str]:
             yield from _entries(node.body, depth + 1)
 
 
+def outline_rows(text: str, limit: Optional[int] = None) -> Optional[list]:
+    """The outline rows of Python source ``text`` (``L<start>-<end>
+    <signature>``, nested defs indented), cut to ``limit`` rows with a
+    trailing ``… N more entries`` row; ``None`` when the source does not
+    parse. Shared by ``outline``, ``files.read_file``'s structural view of
+    a long file and the project brief."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    return tree_rows(tree, limit)
+
+
+def tree_rows(tree: ast.Module, limit: Optional[int] = None) -> list:
+    """``outline_rows`` for an already parsed module (``limit`` defaults
+    to ``_MAX_ENTRIES``)."""
+    limit = _MAX_ENTRIES if limit is None else limit
+    rows = list(_entries(tree.body, 0))
+    if len(rows) > limit:
+        rows = rows[:limit] + [f"… {len(rows) - limit} more entries"]
+    return rows
+
+
+def definitions(tree: ast.Module) -> Iterator[tuple[str, int, int]]:
+    """``(name, line, depth)`` for every def/class in ``tree`` (depth 0 =
+    module level) in source order; the project brief's symbol index."""
+    def walk(body: list, depth: int) -> Iterator[tuple[str, int, int]]:
+        for node in body:
+            if isinstance(node, _DEF_NODES):
+                yield (node.name, node.lineno, depth)
+                yield from walk(node.body, depth + 1)
+    return walk(tree.body, 0)
+
+
 def _clip(text: str, limit: int = _DIGEST_BYTES) -> str:
     """Hard cap on a digest (the row caps keep it far smaller normally)."""
     if len(text) <= limit:
@@ -112,13 +146,10 @@ def outline(path: str) -> str:
     doc = ast.get_docstring(tree)
     if doc:
         out.append(f'"""{doc.splitlines()[0]}"""')
-    rows = list(_entries(tree.body, 0))
+    rows = tree_rows(tree)
     if not rows:
         out.append("(no def/class at any level)")
-    out.extend(rows[:_MAX_ENTRIES])
-    if len(rows) > _MAX_ENTRIES:
-        out.append(f"… {len(rows) - _MAX_ENTRIES} more entries; outline a"
-                   " narrower file or read_file a range.")
+    out.extend(rows)
     return _clip("\n".join(out))
 
 

@@ -29,8 +29,15 @@ _NOISE_DIRS = {
 }
 _MAX_ENTRIES = 400          # cap on entries emitted by list_tree
 _DEFAULT_TREE_DEPTH = 3     # levels list_tree recurses when depth is unset
-_MAX_READ_LINES = 400       # cap when read_file is given no range
-_MAX_RANGE_SPAN = 2000      # cap on an explicit read_file range
+# Structural read (structural round, Package C item 1): a read_file without
+# ``lines`` on a file longer than READ_OUTLINE_LINES returns the outline and
+# the first READ_HEAD_LINES lines instead of the text, and no single call
+# returns more than READ_RANGE_SPAN lines -- so a whole-file read of a long
+# file is impossible rather than discouraged. Files up to READ_OUTLINE_LINES
+# lines still read whole in one call.
+READ_OUTLINE_LINES = 200
+READ_HEAD_LINES = 20
+READ_RANGE_SPAN = 200
 _MAX_MATCHES = 100          # global cap on rows returned by search_code
 _MAX_PER_FILE = 20          # per-file cap so one big file can't eat the budget
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than this in search_code
@@ -311,10 +318,11 @@ def list_tree(path: str = '.', depth: str = '') -> str:
 
 
 def _parse_range(spec: str, total: int) -> tuple:
-    """Return (start, end) 1-based inclusive, capped; (None, None) if bad."""
+    """Return (start, end) 1-based inclusive, capped at ``READ_RANGE_SPAN``
+    lines; (None, None) if bad. An empty spec is the head of the file."""
     spec = (spec or '').strip()
     if not spec:
-        return (1, min(total, _MAX_READ_LINES))
+        return (1, min(total, READ_OUTLINE_LINES))
     a, _, b = spec.partition('-') if '-' in spec else (spec, '', spec)
     try:
         start, end = int(a), int(b)
@@ -323,14 +331,48 @@ def _parse_range(spec: str, total: int) -> tuple:
     start = max(1, start)
     if end < start:
         return (None, None)
-    end = min(end, total, start + _MAX_RANGE_SPAN - 1)
+    end = min(end, total, start + READ_RANGE_SPAN - 1)
     return (start, end)
+
+
+def _numbered(text_lines: list, start: int) -> str:
+    return "\n".join(
+        f"{i:>6}\t{ln}" for i, ln in enumerate(text_lines, start))
+
+
+def _structural_view(target: Path, full: str, text_lines: list,
+                     sha: str) -> str:
+    """What ``read_file`` returns for a long file when no range was asked:
+    the def/class outline (Python), the first ``READ_HEAD_LINES`` lines and
+    how to fetch a span. The text itself is not returned."""
+    from guru.domain import code           # code imports files; lazy here
+    total = len(text_lines)
+    out = [f"{target} ({total} lines, sha:{sha}) is over "
+           f"{READ_OUTLINE_LINES} lines: structural view, not the text."]
+    rows = code.outline_rows(full) if target.suffix == '.py' else None
+    if rows:
+        out.append("Outline (def/class, line ranges):")
+        out.extend(rows)
+    elif target.suffix == '.py':
+        out.append("(no outline: the file does not parse as Python, or"
+                   " has no def/class)")
+    out.append(f"First {min(READ_HEAD_LINES, total)} lines:")
+    out.append(_numbered(text_lines[:READ_HEAD_LINES], 1))
+    nxt_end = min(total, READ_HEAD_LINES + READ_RANGE_SPAN)
+    out.append(
+        f"Fetch a span with lines='{READ_HEAD_LINES + 1}-{nxt_end}' (at most"
+        f" {READ_RANGE_SPAN} lines per call); pick the range from the"
+        " outline, or locate it with find_symbol / search_code first.")
+    return "\n".join(out)
 
 
 def read_file(path: str, lines: str = '') -> str:
     """
-    Read the text content of a file. For large files, pass ``lines`` as a
-    1-based inclusive range like '10-20' to read just that span. Output is
+    Read the text content of a file. A file up to ``READ_OUTLINE_LINES``
+    lines is returned whole; a longer one without ``lines`` returns its
+    structural view (outline, first lines, how to fetch a span) instead of
+    the text, and ``lines`` -- a 1-based inclusive range like '10-20',
+    at most ``READ_RANGE_SPAN`` lines -- returns just that span. Output is
     line-numbered and includes the file's sha — pass that sha to edit_file so
     the edit is confirmed to apply to the file as it actually is.
     """
@@ -355,21 +397,29 @@ def read_file(path: str, lines: str = '') -> str:
     total = len(text_lines)
     if total == 0:
         return f"{target} is empty. (sha:{sha})"
-    start, end = _parse_range(lines, total)
+    if not str(lines or '').strip() and total > READ_OUTLINE_LINES:
+        return _structural_view(target, full, text_lines, sha)
+    start, end = _parse_range(str(lines or ''), total)
     if start is None:
         return (f"Invalid line range '{lines}'. Use 'start-end', e.g."
                 f" '10-20'. {target} has {total} lines.")
-    selected = text_lines[start - 1:end]
-    body = "\n".join(
-        f"{i:>6}\t{ln}" for i, ln in enumerate(selected, start))
+    body = _numbered(text_lines[start - 1:end], start)
     header = f"{target} (lines {start}-{end} of {total}, sha:{sha}):"
     note = ''
-    if not lines.strip() and total > _MAX_READ_LINES:
-        nxt = min(total, _MAX_READ_LINES * 2)
-        note = (f"\n… showing first {_MAX_READ_LINES} of {total} lines;"
-                f" request a range like '{_MAX_READ_LINES + 1}-{nxt}'"
-                f" for more.")
+    if end < total and _asked_past(lines, end):
+        note = (f"\n… clipped at {READ_RANGE_SPAN} lines; continue with"
+                f" lines='{end + 1}-{min(total, end + READ_RANGE_SPAN)}'.")
     return f"{header}\n{body}{note}"
+
+
+def _asked_past(spec: str, end: int) -> bool:
+    """Whether the range ``spec`` asked for lines beyond ``end`` (so the
+    caller should be told the reply was clipped)."""
+    a, sep, b = str(spec).strip().partition('-')
+    try:
+        return int(b if sep else a) > end
+    except ValueError:
+        return False
 
 
 def _walk_files(root: Path):

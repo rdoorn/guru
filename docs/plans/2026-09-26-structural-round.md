@@ -96,6 +96,29 @@ new modules.
    and record the numbers in this plan. No local Ollama model is run
    unless Ronald asks (2026-09-26).
 
+### Package C — delivered 2026-09-26 (branch feat/structural-C)
+
+Tool contract (`bench/tool_contract.py`, 20 tools: the always-on five plus
+every registry tool except the web three (`--web`) and the sandbox six
+(no image on the fixture); forcing on through the LiteLLM proxy):
+
+| model | ok | called | schema errors | retries | tokens in+out | seconds | USD |
+|---|---|---|---|---|---|---|---|
+| SBP Litellm\|aws/claude-4-5-haiku | 20/20 | 20 | 0 | 0 | 15195+3126 | 31.5 | 0.0339 |
+| SBP Litellm\|aws/claude-5-sonnet | 20/20 | 20 | 0 | 0 | 15684+1160 | 40.0 | 0.0473 |
+| local model | not run (Ronald's request) | | | | | | |
+
+Results: `evals/models/sbp-litellm-aws-claude-4-5-haiku.json`,
+`evals/models/sbp-litellm-aws-claude-5-sonnet.json`. Both Claude tiers
+meet the contract on every tool at the first attempt; the validator saw no
+schema error, so the corrective line was never needed. Haiku spends ~2.7x
+Sonnet's output tokens (it narrates before calling).
+
+Project brief on guru itself (222 files, 134 Python, 123 modules outlined,
+3418 symbols): build 0.20-0.56 s (cold 0.56 s), `git rev-parse` 0.46 s
+through `procs.run`, stored JSON ~390 KB; the 3 s outlining budget is
+never reached. A slice for a two-file review task is ~1240 tokens.
+
 ## Package E — metrics, matrix, gate hygiene
 
 Files: guru/evals/*, guru/domain/ledger.py (metrics only),
