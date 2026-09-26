@@ -96,3 +96,42 @@ contract column shape, brief `ConfigParser` interpolation, brief store
 growth per fixture copy, controller never got the map, coverage
 vocabulary false positives, range cap dropped 10×, second plan in a
 round). All in the fix round; suite S2 after it.
+
+## Suite S2 — after the review fixes (merge 84632da)
+
+Runs 98e82daaac3d / 01b9b1acdf34 / b73678df582f (fast ×3), e855e6c39eba
+(real + dogfood), b522cb0cff20 (sandbox), 3be4e7e72c6a / 9f179b1764e0 /
+d140b0541df1 (review-multi-file ×3). Gate before the run: 2465 unit tests,
+6 Colima tests, lint and mypy clean.
+
+| section | S1 passed → S2 | S1 tok/case → S2 | S1 calls → S2 | suite 3 (25th) |
+|---|---|---|---|---|
+| fast ×3 | 24/24 → 24/24 | 19.5k → 17.9k | 110 → 104 | 22/24, 20.9k, 123 |
+| real (3 guru cases) | 3/3 → 3/3 | — | — | 3/3 |
+| dogfood | FAIL → PASS | 577k (no submit) → 791k (2 intended submits) | 44 → 59 | pass after rerun |
+| sandbox (3) | 2/3 → 3/3 | 39.7k → 46.9k | 20 → 26 | 3/3 |
+| review-multi-file ×3 | 2/3 → 0/3 | 59k → 42k (one worker) | 25 → 18 | 2/3 |
+
+- `protocol_violation` = 0 across S2. Haiku rubric judge: 2/2 on all three
+  real cases (was 1/2 each in the 25th's suites) and on the dogfood case.
+- Dogfood: the delegate cap held (3 delegate rounds, the 4th refused, then
+  `answer`); two submits, both `intended`, applied; fixture tests pass.
+  Still 791k tokens because each follow-up worker starts on a fresh
+  sandbox copy — the copy handover (`continue: <agent>`) is the open item
+  that would cut this to one worker.
+- Dependency request: passed; the plan schema now states the controller
+  has no other tools.
+- review-multi-file 0/3: the controller sent ONE task whose goal named
+  both "correctness and security". That satisfied the coverage rule as
+  written (every concern appears in some goal) but not its intent. Fixed
+  after S2 (commit 5da3718): a delegate plan with fewer tasks than
+  coordinated concerns is re-asked once. Rerun below.
+- Cache read share: Haiku 10%, Sonnet 90%, Opus 81%.
+
+### review-multi-file after the undersplit rule (runs 93e122e2f82c, 447a79aa6909, e2337608fbc5)
+
+3/3 for the first time in any suite (previous best 2/3): the controller
+now spawns a correctness worker and a security worker for "correctness and
+security" in every repeat, because a plan with fewer tasks than
+coordinated concerns is re-asked once. 69k tokens per case (two workers),
+62 s, $0.26, rubric 1.7/2.

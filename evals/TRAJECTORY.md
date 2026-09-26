@@ -69,11 +69,14 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-26T20:13:34+00:00 | 14b0b51fee72 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 54.5 | $0.15 | structural S1: review x3 (1/3) single worker | 40.7 | 6.0 |
 | 2026-09-26T20:14:51+00:00 | 6e97e8c2ebfd | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 57.2 | $0.25 | structural S1: review x3 (2/3) | 61.0 | 9.0 |
 | 2026-09-26T20:16:13+00:00 | 7970b9516698 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 84.2 | $0.31 | structural S1: review x3 (3/3) | 75.8 | 10.0 |
-| 2026-09-26T20:41:10+00:00 | 98e82daaac3d | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 15.0 | $0.26 | repeat 1/3 | 15.8 | 4.0 |
-| 2026-09-26T20:43:57+00:00 | 01b9b1acdf34 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 15.7 | $0.27 | repeat 2/3 | 18.0 | 4.4 |
-| 2026-09-26T20:46:40+00:00 | b73678df582f | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 20.6 | $0.29 | repeat 3/3 | 19.8 | 4.6 |
-| 2026-09-26T20:50:10+00:00 | e855e6c39eba | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 4/4 | 129.2 | $1.53 |  | 279.9 | 21.5 |
-| 2026-09-26T21:02:23+00:00 | b522cb0cff20 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 33.1 | $0.15 |  | 46.9 | 8.0 |
-| 2026-09-26T21:04:50+00:00 | 3be4e7e72c6a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 66.0 | $0.16 | repeat 1/3 | 40.6 | 6.0 |
-| 2026-09-26T21:06:42+00:00 | 9f179b1764e0 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 73.9 | $0.17 | repeat 2/3 | 42.7 | 6.0 |
-| 2026-09-26T21:08:23+00:00 | d140b0541df1 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 71.0 | $0.18 | repeat 3/3 | 43.6 | 6.0 |
+| 2026-09-26T20:41:10+00:00 | 98e82daaac3d | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 15.0 | $0.26 | structural S2: fast x3 (1/3) after review fixes | 15.8 | 4.0 |
+| 2026-09-26T20:43:57+00:00 | 01b9b1acdf34 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 15.7 | $0.27 | structural S2: fast x3 (2/3) | 18.0 | 4.4 |
+| 2026-09-26T20:46:40+00:00 | b73678df582f | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 8/8 | 20.6 | $0.29 | structural S2: fast x3 (3/3) | 19.8 | 4.6 |
+| 2026-09-26T20:50:10+00:00 | e855e6c39eba | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 4/4 | 129.2 | $1.53 | structural S2: real + dogfood 4/4; delegate cap held, two intended submits | 279.9 | 21.5 |
+| 2026-09-26T21:02:23+00:00 | b522cb0cff20 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-judges+controller | 3/3 | 33.1 | $0.15 | structural S2: sandbox 3/3 | 46.9 | 8.0 |
+| 2026-09-26T21:04:50+00:00 | 3be4e7e72c6a | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 66.0 | $0.16 | structural S2: review (1/3) one worker for two concerns | 40.6 | 6.0 |
+| 2026-09-26T21:06:42+00:00 | 9f179b1764e0 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 73.9 | $0.17 | structural S2: review (2/3) one worker | 42.7 | 6.0 |
+| 2026-09-26T21:08:23+00:00 | d140b0541df1 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 0/1 | 71.0 | $0.18 | structural S2: review (3/3) one worker | 43.6 | 6.0 |
+| 2026-09-26T21:19:07+00:00 | 93e122e2f82c | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 62.0 | $0.27 | undersplit rule: review 3/3 (1/3), two workers | 73.7 | 11.0 |
+| 2026-09-26T21:20:36+00:00 | 447a79aa6909 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 55.3 | $0.23 | undersplit rule: review (2/3) | 67.4 | 10.0 |
+| 2026-09-26T21:21:56+00:00 | e2337608fbc5 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 68.8 | $0.26 | undersplit rule: review (3/3) | 66.1 | 10.0 |
