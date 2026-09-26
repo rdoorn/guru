@@ -44,7 +44,7 @@ import requests
 from guru import log, session, ui
 from guru.adapters import turn
 from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
-                                dump_request)
+                                dump_request, is_tool_choice_error)
 from guru.adapters.base import openai_tool_defs as _openai_tool_defs
 from guru.domain import ledger, pricing, tools
 
@@ -174,11 +174,6 @@ def _arguments_text(call: dict) -> str:
 # Translate provider-neutral tool specs to OpenAI function-calling
 # (shared with the Ollama adapter; see guru.adapters.base).
 openai_tool_defs = _openai_tool_defs
-
-
-def is_tool_choice_error(exc: Exception) -> bool:
-    """Whether a provider error is about the ``tool_choice`` we sent."""
-    return 'tool_choice' in str(exc).lower()
 
 
 # Roles whose message may carry the conversation breakpoint: the user's
@@ -489,8 +484,7 @@ class LiteLLMAdapter(Adapter):
                 if duplicate:
                     ui.console.print(
                         f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = (f"Already called {name} with these arguments."
-                               " Use the previous result.")
+                    content = turn.DUPLICATE_RESULT.format(name=name)
                 else:
                     content = tools.execute_tool(name, args)
                 native.append({

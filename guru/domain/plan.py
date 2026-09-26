@@ -15,12 +15,17 @@ the controller with their results. ``answer`` is always a valid outcome: a
 simple question has no task.
 
 Validation is code, not prose. :func:`parse` turns the tool arguments into
-a :class:`Plan` or a list of *hard* errors (neither outcome, missing or
-mistyped fields, ``delegate`` without a task); :func:`validate` checks the
-labels against the routing vocabularies (hard) and, for a request that
-names several concerns from :data:`CONCERNS`, that every named concern is
+a :class:`Plan` or a list of *hard* errors (neither outcome, mistyped
+fields, ``delegate`` without a task); an ``answer`` is never an error, not
+even without text (the loop then takes the round's own text, and only
+when both are empty falls to its empty-reply re-prompt). :func:`validate`
+checks the labels against the routing vocabularies (hard) and, for a
+request that names several concerns from :data:`CONCERNS` joined by a
+coordinator (:func:`coverage_concerns`), that every named concern is
 covered by some task goal (soft: one re-ask naming the missing concern,
-then the plan runs as given). :func:`evaluate` does both and returns a
+then the plan runs as given). The handler passes the *full* request text
+(not the ledger's capped ``request`` column), so a long request's later
+concerns count. :func:`evaluate` does both and returns a
 :class:`Verdict`. Re-asks and re-prompts are counted in the conversation
 itself (:func:`reasks_in`), so the loop and the handler agree without
 shared state.
@@ -41,33 +46,47 @@ OUTCOMES = ('answer', 'delegate')
 
 # The concern vocabulary and, per concern, the words (or phrases) that
 # count as naming it — in the user's request and in a task goal alike.
+# Noun forms and unambiguous review words only: everyday task verbs and
+# nouns that name an artefact rather than a concern (``fix``, ``fast``,
+# ``test``, ``comments``, ``structure``, ``failure``, ``auth``, ``secret``,
+# ``retry``, ``timeout``) were false positives ("run the fast tests and fix
+# the failure" is one task, not a three-concern review) and are out.
 CONCERNS: dict[str, tuple[str, ...]] = {
     'correctness': ('correctness', 'correct', 'bug', 'bugs', 'logic',
-                    'behaviour', 'behavior', 'fix', 'fixes', 'wrong',
-                    'broken', 'failing', 'regression'),
+                    'behaviour', 'behavior', 'wrong', 'broken',
+                    'regression', 'regressions'),
     'security': ('security', 'secure', 'vulnerability', 'vulnerabilities',
-                 'vulnerable', 'injection', 'authz', 'authn', 'auth',
-                 'secrets', 'secret', 'traversal', 'xss', 'csrf',
-                 'exploit', 'exploits'),
-    'performance': ('performance', 'perf', 'slow', 'fast', 'latency',
+                 'vulnerable', 'injection', 'authz', 'authn', 'secrets',
+                 'traversal', 'xss', 'csrf', 'exploit', 'exploits'),
+    'performance': ('performance', 'perf', 'slow', 'latency',
                     'throughput', 'speed', 'efficiency', 'efficient',
                     'memory usage', 'hot path'),
     'reliability': ('reliability', 'reliable', 'resilience', 'resilient',
-                    'robust', 'robustness', 'retries', 'retry', 'timeout',
-                    'timeouts', 'failure', 'failures', 'crash', 'crashes',
+                    'robust', 'robustness', 'crash', 'crashes',
                     'error handling', 'sre'),
-    'design': ('design', 'architecture', 'architectural', 'structure',
-               'modularity', 'coupling', 'abstraction', 'maintainability',
+    'design': ('design', 'architecture', 'architectural', 'modularity',
+               'coupling', 'abstraction', 'maintainability',
                'readability'),
-    'tests': ('tests', 'test', 'testing', 'coverage', 'pytest',
+    'tests': ('tests', 'testing', 'test suite', 'coverage', 'pytest',
               'unittest'),
-    'docs': ('docs', 'documentation', 'readme', 'docstring', 'docstrings',
-             'comments'),
+    'docs': ('docs', 'documentation', 'readme', 'docstring', 'docstrings'),
 }
 
+# Delegate rounds per user request: after this many ``delegate`` plans
+# for one request (each resumed by a joined delivery) a further
+# ``delegate`` is refused and the controller must answer from the results
+# it has. Dogfood run 7730e6c1c39c: seven delegate rounds, seven workers,
+# 577k tokens and no submit — every follow-up worker got a fresh sandbox
+# copy, found the previous edits gone and the controller re-delegated.
+MAX_DELEGATE_ROUNDS = 3
+
 # Coverage is checked only when the request names at least this many
-# concerns ("several"): a single-concern request never re-asks.
+# distinct concerns ("several") AND joins two of them with a coordinator
+# — "and", a comma, "&" — or names them in separate sentences
+# (:func:`coverage_concerns`): a single-concern request never re-asks,
+# nor does one that merely happens to contain two vocabulary words.
 COVERAGE_MIN_CONCERNS = 2
+_COORDINATOR_RE = re.compile(r'(?:\band\b|[,&;.?!\n])', re.IGNORECASE)
 
 # --- the texts the loop and the handler exchange with the model ------------
 
@@ -172,7 +191,11 @@ SCHEMA: dict = {
             'description': ('answer: your text is the reply and no worker'
                             ' runs. delegate: guru runs every task on a'
                             ' routed worker in parallel and resumes you'
-                            ' with their results.')},
+                            ' with their results. You have no other'
+                            ' tools: anything that needs a file, a'
+                            ' command, a package, a test or the sandbox'
+                            ' must be delegated; answer is for replies'
+                            ' that need no work.')},
         'answer': {
             'type': 'string',
             'description': 'The reply to the user (outcome answer)'},
@@ -245,10 +268,8 @@ def parse(args: object) -> tuple[Optional[Plan], list[str]]:
         return None, ["outcome must be 'answer' or 'delegate'"]
     errors: list[str] = []
     if outcome == 'answer':
-        answer = _text(args.get('answer'))
-        if not answer:
-            errors.append('outcome answer needs the reply text in answer')
-        return Plan('answer', answer=answer), errors
+        # Never rejected: without text the loop uses the round's own text.
+        return Plan('answer', answer=_text(args.get('answer'))), errors
     raw_tasks = _listish(args.get('tasks'))
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return Plan('delegate'), ['outcome delegate needs at least one task']
@@ -274,6 +295,35 @@ def concerns_in(text: str) -> list[str]:
             if any(r.search(text) for r in res)]
 
 
+def _mentions(text: str) -> list[tuple[int, int, str]]:
+    """Every concern mention in ``text`` as ``(start, end, concern)``,
+    in text order."""
+    out: list[tuple[int, int, str]] = []
+    for concern, res in _CONCERN_RES.items():
+        for r in res:
+            out.extend((m.start(), m.end(), concern)
+                       for m in r.finditer(text))
+    return sorted(out)
+
+
+def coverage_concerns(request: str) -> list[str]:
+    """The concerns ``request`` names *for coverage*: at least
+    :data:`COVERAGE_MIN_CONCERNS` distinct ones, two of which are joined
+    by a coordinator ("and", ",", "&") or sit in separate sentences —
+    "review this for correctness and security" names two; "add docstrings
+    to the security module" names two words but one concern list is not
+    a panel, so it is empty. Returns them in vocabulary order, or ``[]``
+    when the request does not qualify."""
+    mentions = _mentions(request)
+    named = {c for _, _, c in mentions}
+    if len(named) < COVERAGE_MIN_CONCERNS:
+        return []
+    for (_, end, a), (start, _, b) in zip(mentions, mentions[1:]):
+        if a != b and _COORDINATOR_RE.search(request[end:start]):
+            return [c for c in CONCERNS if c in named]
+    return []
+
+
 def schema_errors(plan: Plan) -> list[str]:
     """Hard errors :func:`parse` cannot see: unknown labels."""
     errors: list[str] = []
@@ -288,13 +338,13 @@ def schema_errors(plan: Plan) -> list[str]:
 
 
 def missing_concerns(request: str, plan: Plan) -> list[str]:
-    """The concerns ``request`` names (when it names at least
-    :data:`COVERAGE_MIN_CONCERNS`) that no task goal of a ``delegate``
-    plan covers. Empty for ``answer`` and for a single-concern request."""
+    """The concerns ``request`` names for coverage
+    (:func:`coverage_concerns`) that no task goal of a ``delegate`` plan
+    covers. Empty for ``answer`` and for a request that does not qualify."""
     if plan.outcome != 'delegate' or not plan.tasks:
         return []
-    named = concerns_in(request)
-    if len(named) < COVERAGE_MIN_CONCERNS:
+    named = coverage_concerns(request)
+    if not named:
         return []
     covered: set[str] = set()
     for t in plan.tasks:
@@ -332,24 +382,46 @@ _FENCE_RE = re.compile(r'```(?:json)?\s*(.*?)```', re.DOTALL | re.IGNORECASE)
 _MAX_SCAN = 64
 
 
+def _find_plan(text: str) -> Optional[tuple[dict, int, int]]:
+    """The first JSON object in ``text`` with an ``outcome`` key and the
+    span of ``text`` it occupies (the whole fence when it was fenced)."""
+    if not text or '{' not in text:
+        return None
+    # (body to scan, span of the whole candidate in text, fenced?)
+    candidates = [(m.group(1), m.start(), m.end(), True)
+                  for m in _FENCE_RE.finditer(text)]
+    candidates.append((text, 0, len(text), False))
+    decoder = json.JSONDecoder()
+    for body, lo, hi, fenced in candidates:
+        starts = [i for i, ch in enumerate(body) if ch == '{'][:_MAX_SCAN]
+        for i in starts:
+            try:
+                obj, end = decoder.raw_decode(body[i:])
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and 'outcome' in obj:
+                return (obj, lo, hi) if fenced else (obj, i, i + end)
+    return None
+
+
 def from_text(text: str) -> Optional[dict]:
     """The plan object a model wrote as text: the first JSON object in
     ``text`` (fenced or bare) that has an ``outcome`` key; None when there
     is none. Used where a tool call cannot be forced (Ollama)."""
-    if not text or '{' not in text:
-        return None
-    candidates = [m.group(1) for m in _FENCE_RE.finditer(text)] + [text]
-    decoder = json.JSONDecoder()
-    for body in candidates:
-        starts = [i for i, ch in enumerate(body) if ch == '{'][:_MAX_SCAN]
-        for i in starts:
-            try:
-                obj, _ = decoder.raw_decode(body[i:])
-            except ValueError:
-                continue
-            if isinstance(obj, dict) and 'outcome' in obj:
-                return obj
-    return None
+    found = _find_plan(text)
+    return found[0] if found is not None else None
+
+
+def prose_around(text: str) -> str:
+    """``text`` without the plan object :func:`from_text` finds in it (the
+    prose a model wrote around its JSON), stripped; ``text`` itself when
+    there is no plan object. The answer of an ``answer`` plan whose
+    ``answer`` field is empty on the text path."""
+    found = _find_plan(text)
+    if found is None:
+        return text.strip()
+    _, lo, hi = found
+    return (text[:lo] + ' ' + text[hi:]).strip()
 
 
 # --- texts -------------------------------------------------------------------
@@ -401,6 +473,36 @@ def delegated_text(titles: list[str], tasks: list[Task]) -> str:
     return (DELEGATED_PREFIX + ', '.join(parts) + '. This turn ends here;'
             ' you will be resumed with a [joined results] message and'
             ' answer it with plan (outcome answer, synthesising them).')
+
+
+def delegations_in(messages: list) -> int:
+    """How many ``delegate`` plans ran for the request ``messages`` (the
+    slice from :func:`conversation.request_start`) carries: the ``plan``
+    tool results that start with :data:`DELEGATED_PREFIX` (the tool
+    path) or the mailbox deliveries that resumed the controller (the text
+    path leaves no tool result) — whichever is more, they count the same
+    rounds."""
+    from guru.domain import conversation
+    delegated = deliveries = 0
+    for m in messages:
+        role = conversation.msg_role(m)
+        text = conversation.msg_content(m) or ''
+        if role == 'tool':
+            if isinstance(m, dict) and m.get('tool_name') == 'plan' \
+                    and text.startswith(DELEGATED_PREFIX):
+                delegated += 1
+        elif role == 'user' and conversation.is_mailbox(text.strip()):
+            deliveries += 1
+    return max(delegated, deliveries)
+
+
+def delegate_cap_text(rounds: int) -> str:
+    """Tool result of a ``delegate`` refused by :data:`MAX_DELEGATE_ROUNDS`:
+    a refusal (the loop keeps the turn going) that says what to do."""
+    return (REFUSED_PREFIX + f'this request has already been delegated'
+            f' {rounds} times (the cap). Answer the user from the results'
+            ' you have: call plan with outcome answer, saying what was done'
+            ' and what remains.')
 
 
 def refused_text(reasons: list[str]) -> str:

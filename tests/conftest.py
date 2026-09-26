@@ -25,6 +25,21 @@ def _isolated_eval_sandbox_root(tmp_path_factory):
         mp.undo()
 
 
+@pytest.fixture(scope='session', autouse=True)
+def _isolated_brief_store(tmp_path_factory):
+    """Point the brief store (``guru.repositories.briefs.root()``) at a
+    per-session directory: the runner's own tests run ``run_case`` for
+    real and would otherwise leave one ``~/.guru/briefs/<fixture>-<hash>``
+    directory per case (18 stray ones were found on 2026-09-26)."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv('GURU_BRIEFS_DIR',
+              str(tmp_path_factory.mktemp('brief-store')))
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
 @pytest.fixture(autouse=True)
 def _no_log_file(monkeypatch):
     """``guru.log.setup`` is a no-op under the tests: the eval CLI (and

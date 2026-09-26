@@ -624,8 +624,7 @@ class OllamaAdapter(Adapter):
                 ui.console.print(
                     f"[yellow]\\[SKIP][/yellow] duplicate:"
                     f" {name}({arguments})")
-                content = (f"Already called {name} with these arguments."
-                           " Use the previous result.")
+                content = turn.DUPLICATE_RESULT.format(name=name)
             else:
                 content = tools.execute_tool(name, arguments)
             # tool_args is guru-only (the delegation nudge counts distinct

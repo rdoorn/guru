@@ -108,6 +108,7 @@ from guru.evals.cases import Case, GitFixture
 from guru.evals.checks import Observed
 from guru.evals.runs import CaseResult, Run
 from guru.repositories import settings as routing_settings
+from guru.repositories import briefs
 from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
 from guru.repositories.settings import DecisionsSettings, RoutingSettings
@@ -514,15 +515,24 @@ class _Sandbox:
     leaked: bool = False
 
 
+# The per-case brief store, next to the fixture copy in the case workdir.
+BRIEFS_DIRNAME = '.guru-briefs'
+
+
 @contextlib.contextmanager
 def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
              allow_spend: bool = False) -> Iterator[_Sandbox]:
-    """cwd, project dir, access mode, allow-lists, askers, persistence and
-    ledger for one case; all restored afterwards (askers excepted when
-    workers leaked). The spend asker denies unless ``allow_spend``; the
-    sandbox approval asker denies unless ``allow_spend``, and then grants
-    ``intended`` submits only (:func:`_grant_intended`)."""
+    """cwd, project dir, access mode, allow-lists, askers, persistence,
+    brief store and ledger for one case; all restored afterwards (askers
+    excepted when workers leaked). The spend asker denies unless
+    ``allow_spend``; the sandbox approval asker denies unless
+    ``allow_spend``, and then grants ``intended`` submits only
+    (:func:`_grant_intended`). The brief store (``GURU_BRIEFS_DIR``) is a
+    directory next to the copy, removed with the case's workdir: a fixture
+    copy is a new absolute path every case, so its briefs must not land
+    under the developer's ``~/.guru/briefs``."""
     prev_cwd = os.getcwd()
+    prev_briefs = os.environ.get(briefs.BRIEFS_DIR_ENV)
     prev_mode = config.MODE
     prev_grant = config.AUTO_GRANT
     prev_ledger = config.LEDGER_ENABLED
@@ -539,6 +549,8 @@ def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
     state = _Sandbox()
     try:                       # every mutation below is undone by finally
         os.chdir(copy)
+        os.environ[briefs.BRIEFS_DIR_ENV] = str(
+            Path(copy).resolve().parent / BRIEFS_DIRNAME)
         # "The project" is the copy: the sandbox verbs resolve it from here.
         config.PROJECT_GURU_DIR = copy.resolve() / '.guru'
         config.SANDBOX_POLICY_PATH = config.PROJECT_GURU_DIR / 'sandbox.toml'
@@ -581,6 +593,10 @@ def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
         config.LEDGER_ENABLED = prev_ledger
         config.AUTO_GRANT = prev_grant
         config.MODE = prev_mode
+        if prev_briefs is None:
+            os.environ.pop(briefs.BRIEFS_DIR_ENV, None)
+        else:
+            os.environ[briefs.BRIEFS_DIR_ENV] = prev_briefs
         os.chdir(prev_cwd)
 
 

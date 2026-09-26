@@ -8,14 +8,18 @@ how to run the tests (Makefile target, pytest or unittest) and the
 conventions declared in ``pyproject.toml`` ``[tool.*]`` sections.
 ``slice(brief, task_text)`` cuts one down to what a task mentions -- the map,
 the test command and the modules whose names or symbols appear in the task
-text -- under a token budget, so a worker's task text carries it and the
-controller's plan sees the map. ``current(root)`` builds or loads the brief
-for the checked-out HEAD through a store (``guru.repositories.briefs``);
-``brief_command`` is the ``/brief`` endpoint body.
+text -- under a token budget, so a worker's system context carries it and
+the controller's sees the map (``render_map``). ``current(root, store)``
+builds or loads the brief for the checked-out HEAD through the store the
+caller passes (a :class:`BriefStore`; ``guru.repositories.briefs`` is the
+one the endpoints use -- this module imports no repository). The ``/brief``
+endpoint body lives in ``guru.briefcmd``.
 
 Pure: the only I/O is reading the project tree (through
 ``files.walk_files``) and one fixed-argv ``git rev-parse`` through
-``procs.run``. Stdlib only.
+``procs.run``. Stdlib only. Outline signatures carry no default values
+(``code.tree_rows(defaults=False)``): the brief lands in a system prompt,
+so no project string literal travels there verbatim.
 """
 from __future__ import annotations
 
@@ -147,13 +151,16 @@ def _conventions(root: Path) -> dict:
         path = root / ini
         if not path.is_file() or 'flake8' in out:
             continue
-        parser = configparser.ConfigParser()
+        # No interpolation: flake8's own ``format = %(path)s:%(row)d``
+        # would raise; ``items`` is inside the try because it, not
+        # ``read``, is where a malformed value surfaces.
+        parser = configparser.ConfigParser(interpolation=None)
         try:
             parser.read(path, encoding='utf-8')
-        except (OSError, configparser.Error):
+            if parser.has_section('flake8'):
+                out['flake8'] = dict(parser.items('flake8'))
+        except (OSError, configparser.Error, ValueError):
             continue
-        if parser.has_section('flake8'):
-            out['flake8'] = dict(parser.items('flake8'))
     return out
 
 
@@ -225,7 +232,7 @@ def _outline_module(rel: str, text: str, outlines: dict,
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         return False
-    rows = code.tree_rows(tree, OUTLINE_ROWS_PER_MODULE)
+    rows = code.tree_rows(tree, OUTLINE_ROWS_PER_MODULE, defaults=False)
     if rows:
         outlines[rel] = rows
     for name, line, depth in code.definitions(tree):
@@ -401,22 +408,17 @@ def slice(brief: Brief, task_text: str,             # noqa: A001
     return "\n".join(lines)
 
 
-# --- current / endpoint ------------------------------------------------------
+# --- current ---------------------------------------------------------------
 
-def _default_store() -> BriefStore:
-    from guru.repositories import briefs       # endpoint wiring, lazy
-    return briefs
-
-
-def current(root: Path, refresh: bool = False,
-            store: Optional[BriefStore] = None) -> Brief:
-    """The brief for ``root`` at its checked-out HEAD: loaded from the
-    store when one was built for that HEAD (and ``refresh`` is off), else
-    built now and saved. A project without a HEAD is built every time and
-    never stored."""
+def current(root: Path, store: BriefStore, refresh: bool = False,
+            head: Optional[str] = None) -> Brief:
+    """The brief for ``root`` at its checked-out HEAD: loaded from
+    ``store`` when one was built for that HEAD (and ``refresh`` is off),
+    else built now and saved. ``head`` skips the ``git rev-parse`` when
+    the caller already knows it. A project without a HEAD is built every
+    time and never stored."""
     root = Path(root).resolve()
-    store = store if store is not None else _default_store()
-    head = head_sha(root)
+    head = head if head is not None else head_sha(root)
     if head != NO_HEAD and not refresh:
         found = store.load(root, head)
         if found is not None:
@@ -425,35 +427,3 @@ def current(root: Path, refresh: bool = False,
     if head != NO_HEAD:
         store.save(built)
     return built
-
-
-BRIEF_USAGE = ('/brief            show the project brief (build or load)\n'
-               '/brief refresh    rebuild it for the current HEAD\n'
-               '/brief slice <task text>   preview the slice a worker gets')
-
-
-def brief_command(args: str, root: Optional[Path] = None,
-                  store: Optional[BriefStore] = None) -> str:
-    """The ``/brief`` command body: ``''`` shows the map (building or
-    loading), ``refresh`` rebuilds, ``slice <text>`` previews a worker's
-    slice; anything else is the usage text. Returns the text to print."""
-    root = Path(root or Path.cwd()).resolve()
-    words = (args or '').strip().split(None, 1)
-    verb = words[0].lower() if words else ''
-    if verb not in ('', 'refresh', 'slice'):
-        return BRIEF_USAGE
-    try:
-        brief = current(root, refresh=(verb == 'refresh'), store=store)
-    except OSError as e:
-        return f"brief: cannot build for {root}: {e}"
-    if verb == 'slice':
-        text = words[1] if len(words) > 1 else ''
-        return slice(brief, text)
-    tail = (f"built in {brief.build_seconds}s at {brief.built_at};"
-            f" {len(brief.outlines)} modules outlined,"
-            f" {len(brief.symbols)} symbols"
-            + (" (outlining truncated at the budget)" if brief.truncated
-               else ''))
-    if brief.head_sha == NO_HEAD:
-        tail += "; not a git checkout, so not stored"
-    return f"{render_map(brief)}\n{tail}"

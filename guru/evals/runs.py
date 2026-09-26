@@ -269,10 +269,12 @@ def find_run(directory: Path, run_id: str) -> Path:
 
 def model_slug(spec: str) -> str:
     """``'SBP Litellm|aws/claude-4-5-haiku'`` ->
-    ``'sbp-litellm-aws-claude-4-5-haiku'``: the spec lowercased with every
-    non-alphanumeric character replaced by ``-`` (the file stem
-    ``bench/tool_contract.py`` writes under ``evals/models/``)."""
-    return re.sub(r'[^a-z0-9]', '-', spec.lower())
+    ``'sbp-litellm-aws-claude-4-5-haiku'``: the spec lowercased, every run
+    of non-alphanumeric characters one ``-``, no leading or trailing
+    ``-``. The one slug implementation: the file stem
+    ``bench/tool_contract.py`` writes under ``evals/models/`` (it imports
+    this) and the stem the matrix reads back."""
+    return re.sub(r'[^a-z0-9]+', '-', spec.lower()).strip('-')
 
 
 def load_contract(models_dir: Path, spec: str) -> Optional[dict[str, Any]]:

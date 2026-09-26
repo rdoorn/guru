@@ -121,7 +121,8 @@ SBP Litellm|aws/claude-4-5-haiku   8/8     61.4   18.2     131.0    $0.25   11/1
 Ollama|qwen3:8b                    6/8     88.9   25.7     412.5    $0.00   -
 ```
 
-`contract` is `ok/calls` from `evals/models/<slug>.json` when
+`contract` is `ok/tools` (`summary.ok` over `summary.tools`, the tools
+that ran) from `evals/models/<slug>.json` when
 `bench/tool_contract.py --model 'Adapter|model'` has written one (the
 slug is the spec lowercased with every non-alphanumeric character
 replaced by `-`); `-` otherwise. `matrix` compares, it never gates: the

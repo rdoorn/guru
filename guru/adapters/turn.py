@@ -17,11 +17,17 @@ module owns the shared skeleton so all adapters get the same behaviour:
   controller's text is parsed for the plan object first.
 * the controller plan: a rejected plan (the handler's re-ask) gets one more
   round, a second rejection ends the turn on a plain-text fallback with
-  ``protocol_violation``; an ``answer`` plan is the reply; a ``delegate``
-  plan ends the turn like a ``join`` (the mailbox resumes the agent),
+  ``protocol_violation``; an ``answer`` plan is the reply (its text, else
+  the round's own text; never rejected); a ``delegate`` plan ends the
+  turn like a ``join`` (the mailbox resumes the agent); a second ``plan``
+  in one round is refused unrun,
+* the round cap (``_MAX_ROUNDS`` plan rounds for a controller,
+  ``_MAX_TOOL_ROUNDS`` for everyone else): the turn ends on the last text
+  with ``protocol_violation`` instead of paying for rounds without end,
 * the delegation nudge (end of turn after a broad read-heavy answer) for a
   hands-on delegation-capable agent,
-* duplicate-call suppression, and
+* duplicate-call suppression (same name and arguments as an earlier call
+  in the turn; never for ``plan``/``final_answer``), and
 * final-answer rendering: the answer lands in ``session.messages`` as the
   assistant's text (a lone ``final_answer``/``plan`` round is collapsed
   into it, so the next turn's history carries the text once).
@@ -68,6 +74,33 @@ _CONTROLLER_ANSWER_CHARS = 600
 # rejected plan. Then the text is the answer.
 _REPROMPT_CAP = 1
 _REASK_CAP = 1
+
+# Per-turn round caps: every provider round is a paid call and the loop
+# below has no other exit while the model keeps calling tools. A
+# controller's round is one ``plan`` call, so a controller that has not
+# produced an accepted plan in _MAX_ROUNDS rounds is stuck (a refusal or
+# an unavailable handler answered every time); a worker legitimately
+# chains many tool rounds (read, edit, test, ...) so its cap is wider.
+# At the cap the turn ends with ``protocol_violation`` on the last text the
+# model wrote — for a controller ``plan.fallback_text`` over its last plan,
+# so the user sees what was attempted.
+_MAX_ROUNDS = 12
+_MAX_TOOL_ROUNDS = 40
+_CAPPED_TEXT = '(guru ended the turn after {n} rounds without a final answer.)'
+
+# The tool result an adapter returns for a call the loop marked duplicate
+# (``run_tools`` gets ``duplicate=True``); the call itself does not run.
+DUPLICATE_RESULT = ('Already called {name} with these arguments. Use the'
+                    ' previous result.')
+
+# Calls that are never suppressed as duplicates: ``plan`` is the turn's
+# protocol (the same plan again after a coverage re-ask is the accepted
+# second try, and a re-issued plan must reach the handler to be judged)
+# and ``final_answer`` ends the turn. Every other call with the same name
+# and arguments as an earlier one in the turn is answered from the
+# earlier result without running. A second ``plan`` in one round is
+# refused the same way (unrun) so the round has one plan verdict.
+_NEVER_DUPLICATE = frozenset(('plan', 'final_answer'))
 
 _DELEGATION_TEXT = conversation.DELEGATION_TEXT
 # Historical: the act nudge's text. The loop no longer sends it (the turn
@@ -279,10 +312,18 @@ class _Round:
         self.answer: Optional[str] = None     # set when the turn ends here
         self.collapse = False                 # lone final_answer/plan round
         self.delegated = 0                    # plan tasks guru spawned
+        # A contract re-prompt is due: ``reason`` says why, ``fallback``
+        # is the answer once the re-prompt cap is spent.
+        self.reprompt = False
+        self.reason = ''
+        self.fallback = ''
 
     def call(self, name: str) -> Optional[dict]:
         """Arguments of the first call named ``name`` in this round."""
         return next((args for n, args, _ in self.calls if n == name), None)
+
+    def ask_again(self, reason: str, fallback: str) -> None:
+        self.reprompt, self.reason, self.fallback = True, reason, fallback
 
 
 def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
@@ -292,6 +333,9 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
     cancel, error or a delegating turn) and the plan tasks spawned."""
     called: set = set()
     reprompts = 0
+    rounds = 0
+    last_text = ''
+    last_plan: Optional[dict] = None
     delegation_nudged = False
     panel_asked = False
     delegated = 0
@@ -300,6 +344,20 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
         if session.cancel_requested:
             ui.console.print("[yellow]* cancelled[/yellow]")
             return '', delegated
+        cap = _MAX_ROUNDS if session.controller else _MAX_TOOL_ROUNDS
+        if rounds >= cap:
+            # The cap is the only exit while the model keeps calling
+            # tools (or a controller keeps planning without an accepted
+            # plan): end on what it last wrote.
+            ledger.bump('protocol_violation')
+            ui.console.print(
+                f"[dim yellow]\\[CONTRACT][/dim yellow] {rounds} rounds"
+                " without a final answer — ending the turn")
+            content = _capped_text(last_text, last_plan, rounds)
+            _settle(content, False)
+            _render_answer(content)
+            return content, delegated
+        rounds += 1
         ui.note_thinking()
         result = step()
         if result is None:
@@ -310,6 +368,8 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
         ui.status_draw()
         rnd = _Round(*result)
         forced = forced_tool()
+        if rnd.text:
+            last_text = rnd.text
 
         if not rnd.calls:
             # A text-only reply. A controller's text may carry the plan as
@@ -317,34 +377,46 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
             # decides whether the text is the answer.
             if forced == FORCE_PLAN and _plan_from_text(
                     rnd, add_user, tools_used, turn0):
-                if rnd.answer is None and not session.turn_waiting:
-                    continue
+                last_plan = plan.from_text(rnd.text) or last_plan
             elif not rnd.text or _forcing(forced):
-                if reprompts < _REPROMPT_CAP:
-                    reprompts += 1
-                    reason = ('empty reply' if not rnd.text
-                              else 'text where a tool call was forced')
-                    ui.console.print(
-                        f"[dim yellow]\\[CONTRACT][/dim yellow] {reason}"
-                        " — asking for a tool call")
-                    add_user(plan.PLAN_REPROMPT_TEXT
-                             if forced == FORCE_PLAN else plan.REPROMPT_TEXT)
-                    continue
-                ledger.bump('protocol_violation')
-                rnd.answer = rnd.text
+                rnd.ask_again('empty reply' if not rnd.text
+                              else 'text where a tool call was forced',
+                              rnd.text)
             else:
                 rnd.answer = rnd.text
         else:
             pending = []
+            seen_plan = False
             for name, args, ref in rnd.calls:
                 tools_used.append(name)
-                key = (name, _args_key(args))
-                duplicate = key in called
-                if not duplicate:
-                    called.add(key)
+                if name == 'plan':
+                    duplicate = seen_plan       # one plan verdict per round
+                    seen_plan = True
+                    if not duplicate:
+                        last_plan = args
+                elif name in _NEVER_DUPLICATE:
+                    duplicate = False
+                else:
+                    key = (name, _args_key(args))
+                    duplicate = key in called
+                    if not duplicate:
+                        called.add(key)
                 pending.append((name, args, ref, duplicate))
+            before = len(session.messages)
             run_tools(pending)
-            _after_tools(rnd, turn0)
+            _after_tools(rnd, turn0, before)
+
+        if rnd.reprompt:
+            if reprompts < _REPROMPT_CAP:
+                reprompts += 1
+                ui.console.print(
+                    f"[dim yellow]\\[CONTRACT][/dim yellow] {rnd.reason}"
+                    " — asking for a tool call")
+                add_user(plan.PLAN_REPROMPT_TEXT
+                         if forced == FORCE_PLAN else plan.REPROMPT_TEXT)
+                continue
+            ledger.bump('protocol_violation')
+            rnd.answer = rnd.fallback
 
         delegated += rnd.delegated
         if session.turn_waiting:
@@ -382,6 +454,18 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
         return content, delegated
 
 
+def _capped_text(last_text: str, last_plan: Optional[dict], rounds: int
+                 ) -> str:
+    """The answer when the round cap ends a turn: a controller's last
+    plan rendered through ``plan.fallback_text`` (its own text first),
+    else the last text the model wrote, else a fixed line."""
+    if session.controller and last_plan is not None:
+        return plan.fallback_text(
+            last_text, last_plan,
+            [f'{rounds} plan rounds without an accepted plan'])
+    return last_text or _CAPPED_TEXT.format(n=rounds)
+
+
 def _args_key(args: object) -> str:
     """A hashable identity for a call's arguments (nested lists — the
     plan's tasks — included)."""
@@ -391,15 +475,26 @@ def _args_key(args: object) -> str:
         return repr(args)
 
 
+def _answer_text(args: dict, text: str) -> str:
+    """The reply of an accepted ``answer`` plan: its ``answer`` field, else
+    ``text`` (the round's own assistant text). ``answer`` is never
+    rejected for lacking text; only when both are empty does the loop
+    fall to the empty-reply re-prompt."""
+    parsed, _ = plan.parse(args)
+    answer = parsed.answer if parsed is not None else ''
+    return answer or text.strip()
+
+
 def _plan_from_text(rnd: _Round, add_user, tools_used: list,
                     turn0: int) -> bool:
     """A controller's text reply parsed as a plan (the text path of an
     adapter that cannot force a tool call). False when the text holds no
     plan object. Otherwise the plan runs through the ``plan`` tool: an
-    accepted ``answer`` sets ``rnd.answer``, a ``delegate`` ends the turn
-    (``session.turn_waiting``), a re-ask or refusal goes back to the model
-    as a user message — a second re-ask ends the turn on the fallback
-    text with ``protocol_violation``."""
+    accepted ``answer`` sets ``rnd.answer`` (its text, else the prose
+    around the plan object, else the empty-reply re-prompt), a
+    ``delegate`` ends the turn (``session.turn_waiting``), a re-ask or
+    refusal goes back to the model as a user message — a second re-ask
+    ends the turn on the fallback text with ``protocol_violation``."""
     args = plan.from_text(rnd.text)
     if args is None:
         return False
@@ -407,8 +502,13 @@ def _plan_from_text(rnd: _Round, add_user, tools_used: list,
     result = tools.execute_tool('plan', args)
     kind = _plan_kind(result)
     if kind == 'answer':
-        parsed, _ = plan.parse(args)
-        rnd.answer = parsed.answer if parsed is not None else ''
+        answer = _answer_text(args, plan.prose_around(rnd.text))
+        if answer:
+            rnd.answer = answer
+        else:
+            rnd.ask_again('answer plan without text',
+                          plan.fallback_text('', args,
+                                             ['outcome answer without text']))
     elif kind == 'delegated':
         rnd.delegated = _task_count(args)
     elif kind == 'reask' and _reasks_exceeded(turn0, result):
@@ -420,17 +520,24 @@ def _plan_from_text(rnd: _Round, add_user, tools_used: list,
     return True
 
 
-def _after_tools(rnd: _Round, turn0: int) -> None:
+def _after_tools(rnd: _Round, turn0: int, start: int) -> None:
     """Read a round's ``plan`` / ``final_answer`` outcome after its tools
-    ran (the adapter threaded each result into ``session.messages``)."""
+    ran (the adapter threaded each result into ``session.messages`` from
+    index ``start`` on; the first ``plan`` result there is the round's
+    verdict — a second plan in the round was refused unrun)."""
     args = rnd.call('plan')
     if args is not None:
-        result = _last_tool_result('plan')
+        result = _round_tool_result('plan', start)
         kind = _plan_kind(result)
         if kind == 'answer':
-            parsed, _ = plan.parse(args)
-            rnd.answer = parsed.answer if parsed is not None else ''
-            rnd.collapse = len(rnd.calls) == 1
+            answer = _answer_text(args, rnd.text)
+            if answer:
+                rnd.answer = answer
+                rnd.collapse = len(rnd.calls) == 1
+            else:
+                rnd.ask_again('answer plan without text',
+                              plan.fallback_text(
+                                  '', args, ['outcome answer without text']))
         elif kind == 'delegated':
             rnd.delegated = _task_count(args)
         elif kind == 'reask' and _reasks_exceeded(turn0):
@@ -469,9 +576,11 @@ def _task_count(args: dict) -> int:
     return len(parsed.tasks) if parsed is not None else 0
 
 
-def _last_tool_result(name: str) -> str:
-    """Content of the most recent tool message named ``name``."""
-    for m in reversed(session.messages):
+def _round_tool_result(name: str, start: int) -> str:
+    """Content of the first tool message named ``name`` appended at or
+    after index ``start`` of ``session.messages`` (this round's results);
+    ``''`` when there is none."""
+    for m in session.messages[start:]:
         if isinstance(m, dict) and m.get('role') == 'tool' \
                 and m.get('tool_name') == name:
             return m.get('content') or ''

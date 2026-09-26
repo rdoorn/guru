@@ -1991,7 +1991,8 @@ class TestConfigureKind:
     def test_child_system_context_carries_the_brief(self, monkeypatch) -> None:
         import guru.orchestrator as orch_mod
         monkeypatch.setattr(orch_mod, '_brief_block',
-                            lambda task: '\n\n[project brief]\nmap: x')
+                            lambda task, project: '\n\n[project brief]\n'
+                                                  'map: x')
         from guru.orchestrator import Orchestrator
         o = Orchestrator()
         main = o.manager.active
@@ -2000,3 +2001,98 @@ class TestConfigureKind:
         assert child.task == 'review app/'
         assert child.state.messages[0]['content'].endswith(
             '[project brief]\nmap: x')
+
+
+class TestProjectBrief:
+    """The brief reaches the controller (the map) and every child (the
+    slice) from one cached object per (root, HEAD)."""
+
+    def _brief(self, head='h1'):
+        from guru.domain.brief import Brief
+        return Brief(root='/p', head_sha=head, built_at='t',
+                     build_seconds=0.1, files=3, python_files=2,
+                     dirs={'.': 1, 'app': 2}, modules=['app'],
+                     outlines={'app/core.py': ['L1-2 def alpha(x)']},
+                     symbols={'alpha': ['app/core.py:1']},
+                     test_command='make test')
+
+    def test_controller_gets_the_map_workers_the_slice(self, monkeypatch):
+        import guru.orchestrator as orch_mod
+        from guru.agents import Agent
+        from guru.orchestrator import Orchestrator
+        b = self._brief()
+        calls: list = []
+        monkeypatch.setattr(orch_mod._brief, 'head_sha', lambda r: 'h1')
+
+        def current(root, store, refresh=False, head=None):
+            calls.append((str(root), head))
+            return b
+        monkeypatch.setattr(orch_mod._brief, 'current', current)
+        o = Orchestrator()
+        main = o.manager.active
+        ctrl = Agent(id='c', title='c')
+        o.configure(ctrl, main.state, can_spawn=True, controller=True)
+        system = ctrl.state.messages[0]['content']
+        assert '\n\n[project map]\n[project brief] p @ h1:' in system
+        assert 'tests: make test' in system
+        assert 'L1-2 def alpha' not in system          # the map, not outlines
+        child = o._make_child(main, 'fix alpha in core.py', env=_FAKE_ENV)
+        assert child is not None
+        worker = child.state.messages[0]['content']
+        assert '[project brief]' in worker and 'L1-2 def alpha' in worker
+        assert '[project map]' not in worker
+        # One build/load for the controller and the child alike.
+        import os
+        assert calls == [(os.path.realpath(os.getcwd()), 'h1')]
+
+    def test_cache_is_per_root_and_head(self, monkeypatch) -> None:
+        import guru.orchestrator as orch_mod
+        from guru.orchestrator import Orchestrator
+        heads = iter(['h1', 'h1', 'h1', 'h2'])
+        monkeypatch.setattr(orch_mod._brief, 'head_sha',
+                            lambda r: next(heads))
+        built: list = []
+
+        def current(root, store, refresh=False, head=None):
+            built.append(head)
+            return self._brief(head)
+        monkeypatch.setattr(orch_mod._brief, 'current', current)
+        o = Orchestrator()
+        for _ in range(3):
+            assert o.project_brief().head_sha == 'h1'
+        assert built == ['h1']                    # five children, one load
+        assert o.project_brief().head_sha == 'h2'
+        assert built == ['h1', 'h2']              # HEAD moved: rebuilt
+
+    def test_failure_is_logged_and_empty(self, monkeypatch) -> None:
+        import guru.orchestrator as orch_mod
+        from guru import log
+        from guru.agents import Agent
+        from guru.orchestrator import Orchestrator
+        logged: list = []
+        monkeypatch.setattr(log, 'exc', logged.append)
+
+        def boom(r):
+            raise RuntimeError('no git')
+        monkeypatch.setattr(orch_mod._brief, 'head_sha', boom)
+        o = Orchestrator()
+        assert o.project_brief() is None
+        assert logged == ['project brief unavailable']
+        main = o.manager.active
+        ctrl = Agent(id='c', title='c')
+        o.configure(ctrl, main.state, can_spawn=True, controller=True)
+        assert '[project map]' not in ctrl.state.messages[0]['content']
+        assert orch_mod._brief_block('t', None) == ''
+        assert orch_mod._map_block(None) == ''
+
+    def test_slice_failure_is_logged(self, monkeypatch) -> None:
+        import guru.orchestrator as orch_mod
+        from guru import log
+        logged: list = []
+        monkeypatch.setattr(log, 'exc', logged.append)
+
+        def boom(project, task):
+            raise ValueError('bad brief')
+        monkeypatch.setattr(orch_mod._brief, 'slice', boom)
+        assert orch_mod._brief_block('t', self._brief()) == ''
+        assert logged == ['brief slice failed']

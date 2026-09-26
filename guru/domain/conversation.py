@@ -183,6 +183,21 @@ def turn_start(messages: list) -> int:
     return 0
 
 
+def request_start(messages: list) -> int:
+    """Index in ``messages`` of the user's current request: the last user
+    message that is neither a loop nudge nor a mailbox delivery (a
+    delivery opens a *turn*, not a request); 0 when there is none. The
+    span from here is one request's whole delegate/resume history."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if msg_role(m) != 'user':
+            continue
+        text = msg_content(m).strip()
+        if text and not is_nudge(text) and not is_mailbox(text):
+            return i
+    return 0
+
+
 def mailbox_turn(messages: list) -> bool:
     """True when the current turn was opened by a mailbox delivery (a
     joined or single sub-agent result): its text is the sub-agents'
@@ -192,14 +207,16 @@ def mailbox_turn(messages: list) -> bool:
     return is_mailbox(msg_content(messages[turn_start(messages)]).strip())
 
 
-def request_in(messages: list) -> str:
+def request_in(messages: list, cap: Optional[int] = REQUEST_CHARS) -> str:
     """The user's request in ``messages``: the most recent user message
     that is neither a loop nudge nor a mailbox delivery, capped at
-    ``REQUEST_CHARS``; when only deliveries are there (a history that
-    starts with one), the most recent of those, capped the same way;
-    ``''`` when there is no user message at all. Pure: for any agent's
-    history (the orchestrator reads a parent's for the panel judge, the
-    gate reviewer the worker's), not only the bound session's."""
+    ``cap`` characters (``REQUEST_CHARS``; ``None`` for the full text —
+    the plan handler's concern coverage reads the whole request); when
+    only deliveries are there (a history that starts with one), the most
+    recent of those, capped the same way; ``''`` when there is no user
+    message at all. Pure: for any agent's history (the orchestrator reads
+    a parent's for the panel judge, the gate reviewer the worker's), not
+    only the bound session's."""
     delivery = ''
     for m in reversed(messages):
         if msg_role(m) != 'user':
@@ -210,8 +227,8 @@ def request_in(messages: list) -> str:
         if is_mailbox(text):
             delivery = delivery or text
             continue
-        return text[:REQUEST_CHARS]
-    return delivery[:REQUEST_CHARS]
+        return text[:cap]
+    return delivery[:cap]
 
 
 def group_messages(msgs: list) -> list:

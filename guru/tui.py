@@ -508,8 +508,8 @@ def run(registry=None, routing=None) -> None:
                 orch.set_routing(new_routing)
             return True
         if text == '/brief' or text.startswith('/brief '):
-            from guru.domain import brief
-            await _in_terminal(lambda: print(brief.brief_command(
+            from guru import briefcmd
+            await _in_terminal(lambda: print(briefcmd.brief_command(
                 text[6:].strip())))
             return True
         if text == '/review' or text.startswith('/review '):

@@ -18,15 +18,21 @@ __all__ = ['ALWAYS_ON_TOOLS', 'KIND_HIDDEN_TOOLS', 'ToolsPolicy',
            'kind_refusal', 'set_policy']
 
 # Tools every agent has regardless of the project tool policy: discovery,
-# method selection and the delegation mailbox are not registry tools.
+# method selection, the delegation mailbox and the turn contract's own
+# calls (``final_answer``, a controller's ``plan``) are not registry tools
+# and are never gated.
 ALWAYS_ON_TOOLS = frozenset(
-    ('search_tools', 'use_skill', 'spawn', 'check', 'join'))
+    ('search_tools', 'use_skill', 'spawn', 'check', 'join', 'final_answer',
+     'plan'))
 
 # Every registry tool that changes files -- directly, or in the sandbox
-# copy and through the gate. The per-task-kind policy below hides them.
+# copy (``sandbox_run`` executes a command in the copy; ``sandbox_python``
+# runs code there) and through the gate. The per-task-kind policy below
+# hides them: a reviewer reads, it neither edits nor runs.
 WRITE_TOOLS = frozenset((
     'write_file', 'edit_file', 'apply_patch', 'delete_file',
-    'sandbox_python', 'sandbox_submit', 'request_dependency'))
+    'sandbox_run', 'sandbox_python', 'sandbox_submit',
+    'request_dependency'))
 
 # Per task kind (``guru.domain.routing.KINDS``): the registry tools a task
 # of that kind neither sees nor may call (structural round, Package C

@@ -277,9 +277,17 @@ _PLAN_SPEC = {
         'tasks': 'The tasks to run in parallel (outcome delegate)',
     },
     'optional': ['answer', 'tasks'],
+    'types': {'tasks': 'list'},
     # The full JSON schema (nested tasks); adapters send it verbatim.
     'schema': _plan.SCHEMA,
 }
+
+# The turn contract's own calls validate themselves: ``plan`` through
+# ``guru.domain.plan.parse`` (typed, nested, with the re-ask the loop
+# allows once) and ``final_answer`` through ``plan.final_text`` (a
+# misnamed field still answers). ``validate_arguments`` leaves them as-is
+# so the generic one-line error never pre-empts that contract.
+_SELF_VALIDATING = frozenset(('plan', 'final_answer'))
 
 
 def final_answer(text: str) -> str:
@@ -1033,7 +1041,7 @@ TOOL_REGISTRY: dict = {
 # The always-on tools' specs by name (they are not registry entries).
 _BUILTIN_SPECS: dict = {
     'search_tools': None, 'use_skill': None, 'spawn': None, 'check': None,
-    'join': None}
+    'join': None, 'plan': None, 'final_answer': None}
 
 
 def _match_tools(query: str) -> list:
@@ -1236,7 +1244,7 @@ def validate_arguments(name: str, arguments: object) -> tuple:
     example. An unknown tool validates as-is (``execute_tool`` names it).
     """
     spec = tool_spec(name)
-    if not spec:
+    if not spec or name in _SELF_VALIDATING:
         return arguments, ''
     tail = f" Expected {signature_text(spec)}, e.g. {example_text(spec)}"
     if not isinstance(arguments, dict):
@@ -1538,4 +1546,5 @@ def execute_tool(name: str, arguments: dict) -> str:
 
 _BUILTIN_SPECS.update({
     'search_tools': _SEARCH_TOOLS_SPEC, 'use_skill': _USE_SKILL_SPEC,
-    'spawn': _SPAWN_SPEC, 'check': _CHECK_SPEC, 'join': _JOIN_SPEC})
+    'spawn': _SPAWN_SPEC, 'check': _CHECK_SPEC, 'join': _JOIN_SPEC,
+    'plan': _PLAN_SPEC, 'final_answer': _FINAL_ANSWER_SPEC})

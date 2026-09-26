@@ -59,8 +59,11 @@ from rich.console import Console
 
 from guru import config, log, session, ui
 from guru.agents import Agent, AgentManager
+from guru.domain import brief as _brief
 from guru.domain import (conversation, decisions, ledger, plan, policy,
                          routing, spend, tools)
+from guru.domain.brief import Brief
+from guru.repositories import briefs
 from guru.repositories import settings as routing_settings
 from guru.repositories.settings import RoutingSettings
 
@@ -124,18 +127,33 @@ class _Plan:
         return self.route is not None and self.route.refused
 
 
-def _brief_block(task: str) -> str:
+def _brief_block(task: str, project: Optional[Brief]) -> str:
     """The project brief slice for ``task`` as a system-context block
-    (``brief.slice`` over ``brief.current(cwd)``: map, test command, the
-    modules and symbols the task names), so a worker starts informed
-    instead of exploring. Empty on any failure — the brief is a saving,
-    never a dependency."""
+    (``brief.slice`` over ``project``: map, test command, the modules and
+    symbols the task names), so a worker starts informed instead of
+    exploring. Empty without a brief or on any failure (logged) — the
+    brief is a saving, never a dependency."""
+    if project is None:
+        return ''
     try:
-        from guru.domain import brief as _brief
-        text = _brief.slice(_brief.current(Path.cwd()), task)
+        text = _brief.slice(project, task)
     except Exception:                                    # noqa: BLE001
+        log.exc('brief slice failed')
         return ''
     return f"\n\n[project brief]\n{text}" if text.strip() else ''
+
+
+def _map_block(project: Optional[Brief]) -> str:
+    """The controller's block: the map alone (``brief.render_map``) — what
+    it needs to plan, not the outlines. Empty without a brief."""
+    if project is None:
+        return ''
+    try:
+        text = _brief.render_map(project)
+    except Exception:                                    # noqa: BLE001
+        log.exc('brief map failed')
+        return ''
+    return f"\n\n[project map]\n{text}" if text.strip() else ''
 
 
 class Orchestrator:
@@ -165,6 +183,26 @@ class Orchestrator:
         # instead of "None of those are your sub-agents".
         self._pending: dict = {}
         self._pending_lock = threading.Lock()
+        # The project brief by (root, HEAD): one build or load per HEAD,
+        # not one per child (a five-worker plan reads the ~400 KB JSON once;
+        # the controller's map comes from the same object).
+        self._briefs: dict = {}
+
+    def project_brief(self) -> Optional[Brief]:
+        """The brief of the project in the current working directory at
+        its checked-out HEAD (``brief.current`` over the JSON store),
+        cached on this orchestrator per (root, HEAD); None when it cannot
+        be built (logged) — the brief is a saving, never a dependency."""
+        try:
+            root = Path.cwd().resolve()
+            head = _brief.head_sha(root)
+            key = (str(root), head)
+            if key not in self._briefs:
+                self._briefs[key] = _brief.current(root, briefs, head=head)
+            return self._briefs[key]
+        except Exception:                                # noqa: BLE001
+            log.exc('project brief unavailable')
+            return None
 
     # --- routing -------------------------------------------------------------
 
@@ -357,6 +395,7 @@ class Orchestrator:
             {'role': 'system', 'content': config.build_system_prompt()}]
         if controller:
             st.messages[0]['content'] += "\n\n" + config.CONTROLLER_HINT
+            st.messages[0]['content'] += _map_block(self.project_brief())
         elif can_spawn:
             st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
         st.active_tools, st.active_tool_names = tools.initial_tools(
@@ -699,7 +738,7 @@ class Orchestrator:
         # the child's own state and filters its initial tool list).
         self.configure(child, parent.state, can_spawn=False, role=role,
                        skill=skill, kind=kind)
-        block = _brief_block(task)
+        block = _brief_block(task, self.project_brief())
         if block:
             child.state.messages[0]['content'] += block
         self._apply_route(child, route, reason)
@@ -977,13 +1016,19 @@ class Orchestrator:
         :meth:`spawn_panel` (its kind/complexity route it), opens the
         join barrier and ends the caller's turn (``turn_waiting``, join
         semantics); when routing refuses them all the refusal is returned
-        and the turn goes on. A second ``plan`` in one round is ignored.
+        and the turn goes on. A ``delegate`` after
+        ``plan.MAX_DELEGATE_ROUNDS`` delegations for the same request
+        (counted in the history, ``plan.delegations_in``) is refused with
+        a text that says to answer from the results. A second ``plan`` in
+        one round is ignored.
         """
         if caller_state.turn_waiting:
             return 'Already delegated this turn; the extra plan is ignored.'
         messages = caller_state.messages
         followup = conversation.mailbox_turn(messages)
-        request = conversation.request_in(messages)
+        # The full request (no REQUEST_CHARS cap): a concern named late in
+        # a long request counts for coverage too.
+        request = conversation.request_in(messages, cap=None)
         verdict = plan.evaluate(request, args, followup=followup)
         reasks = plan.reasks_in(
             messages[conversation.turn_start(messages):])
@@ -995,6 +1040,12 @@ class Orchestrator:
                      ' re-ask', ', '.join(verdict.missing))
         if verdict.plan.outcome == 'answer':
             return plan.ANSWER_ACK
+        rounds = plan.delegations_in(
+            messages[conversation.request_start(messages):])
+        if rounds >= plan.MAX_DELEGATE_ROUNDS:
+            log.info('plan: delegate refused after %d rounds for one'
+                     ' request', rounds)
+            return plan.delegate_cap_text(rounds)
         caller = self.agent_for_state(caller_state)
         refusal: list = []
         titles = self.spawn_panel(caller, verdict.plan.tasks, refusal=refusal)

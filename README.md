@@ -363,13 +363,32 @@ clarifications, follow-ups on delivered results — no worker runs; a
 simple question has no task). `delegate` hands the tasks to guru, which
 validates the plan in code — known `kind`/`complexity`, at least one task,
 and when the request names several concerns (correctness, security,
-performance, reliability, design, tests, docs) every named concern must
-appear in some task goal — spawns every task on its routed rung (a
-`review` task takes the review ladder), joins them and ends the turn; the
-joined results resume the controller, which answers with `plan` again. A
-rejected plan gets one re-ask naming the problem; a second malformed plan
-ends the turn on a plain-text fallback with `protocol_violation = 1` in
-the row's `struggle` counters. `answer` is never rejected. The key
+performance, reliability, design, tests, docs — noun forms only; "fix",
+"test", "auth" and other everyday task words do not count) joined by
+"and", a comma, "&" or a sentence break, every named concern must appear
+in some task goal (`plan.coverage_concerns`; the handler reads the full
+request, not the ledger's 1000-character `request` column) — spawns every
+task on its routed rung (a `review` task takes the review ladder), joins
+them and ends the turn; the joined results resume the controller, which
+answers with `plan` again. A rejected plan gets one re-ask naming the
+problem; a second malformed plan ends the turn on a plain-text fallback
+with `protocol_violation = 1` in the row's `struggle` counters. `answer` is
+never rejected: an `answer` without text takes the round's own assistant
+text, and only when both are empty does the loop's empty-reply re-prompt
+apply (once, then the fallback). `plan` and `final_answer` are never
+suppressed as duplicate calls (the same plan again after a coverage
+re-ask is the accepted second try); a second `plan` in one round is
+refused unrun and the first one's verdict stands. A controller that keeps
+planning without an accepted plan is stopped after `turn._MAX_ROUNDS`
+(12) rounds, any other agent after `_MAX_TOOL_ROUNDS` (40) tool rounds:
+the turn ends on the last text with `protocol_violation`. One user request
+gets at most `plan.MAX_DELEGATE_ROUNDS` (3) `delegate` plans (counted in
+the history from the request, `plan.delegations_in`): the fourth is
+refused with a text that says to answer from the results in hand. The
+`plan` tool's own description states the controller's contract (it has no
+other tools; anything that needs a file, a command, a package, a test or
+the sandbox is delegated) — there is no prose hint and no heuristic on the
+answer text. The key
 defaults to on as soon as any ladder rung is configured; set
 `controller = false` next to a ladder to keep the main agent hands-on
 (`spawn`/`check`/`join`), and it is off without a ladder. A controller
@@ -609,8 +628,10 @@ Registry tools:
   (`files.READ_OUTLINE_LINES`) reads whole; a longer one without `lines=`
   returns its def/class outline with line ranges, the first 20 lines and
   how to fetch a span -- never the text -- and one `lines='a-b'` call
-  returns at most 200 lines (`files.READ_RANGE_SPAN`). A whole-file read of
-  a long file is impossible, not discouraged.
+  returns at most 800 lines (`files.READ_RANGE_SPAN`; an explicit span is
+  a deliberate choice, so it is wider than the 200-line structural
+  threshold). A whole-file read of a long file is impossible, not
+  discouraged.
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
 - **Code** — the eight audited verbs below.
 - **Sandbox** — `sandbox_run`, `sandbox_python`, `sandbox_diff`,
@@ -637,7 +658,9 @@ lines='40-80')` -- counts as a tool error and is audited with `ok = false`.
 **Review tasks are read-only.** `toolpolicy.for_kind(kind)` names the tools
 a task of that kind neither sees nor may call; for `review` that is every
 write tool (`write_file`, `edit_file`, `apply_patch`, `delete_file`,
-`sandbox_python`, `sandbox_submit`, `request_dependency`). The orchestrator
+`sandbox_run`, `sandbox_python`, `sandbox_submit`, `request_dependency`) —
+a reviewer reads and reports; it neither edits nor runs commands in the
+sandbox copy (`sandbox_diff` and `code_health` stay). The orchestrator
 passes the kind to `tools.initial_tools(..., kind=)` and sets
 `session.task_kind`; a hidden tool named anyway answers
 `Refused: <tool> is not available to a review task (read-only) ...` and is
@@ -654,14 +677,23 @@ conventions declared in `pyproject.toml` `[tool.*]` sections (plus
 `[flake8]` from `.flake8`/`setup.cfg`). The walk stops outlining after 3 s
 (`BUILD_BUDGET_S`) and keeps counting; on guru itself a build takes about
 0.2-0.6 s. Briefs are stored as JSON under
-`~/.guru/briefs/<project-key>/<head_sha>.json` (`guru.repositories.briefs`,
-five per project kept) and rebuilt when HEAD changes or on `/brief refresh`.
+`~/.guru/briefs/<project-key>/<head_sha>.json` (`guru.repositories.briefs`;
+`GURU_BRIEFS_DIR` overrides the root, five briefs per project and twenty
+project directories kept, oldest removed on save) and rebuilt when HEAD
+changes or on `/brief refresh` (`guru.briefcmd`). The eval runner points
+`GURU_BRIEFS_DIR` inside each case's workdir, so fixture copies never
+leave briefs under your home. Outline signatures show defaults as `...`
+(`def f(a, b=...)`) so no project string literal lands in a system prompt.
 
 `brief.slice(brief, task_text, max_tokens=1500)` is what a worker gets in
-its task text: the map, the test command, then the outline of every module
-the task names (by path, basename or stem) and the location of every
-code-like symbol it names, cut at a 4-chars-per-token estimate. The
-controller gets `brief.render_map(brief)` to plan with.
+its system context (`[project brief]`): the map, the test command, then
+the outline of every module the task names (by path, basename or stem) and
+the location of every code-like symbol it names, cut at a 4-chars-per-token
+estimate. The controller gets `brief.render_map(brief)` in its system
+context (`[project map]`). The orchestrator loads the brief once per
+(root, HEAD) and hands the same object to the controller and every child
+(`Orchestrator.project_brief`); a brief that cannot be built is logged and
+left out — it is a saving, never a dependency.
 
 ### Tool contract benchmark
 

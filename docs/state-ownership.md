@@ -104,9 +104,13 @@ is injected through setters rather than hard-coded:
   refused call. The same predicate filters what the model is told about:
   `_core_tool_fns` (pre-activation), `activate`, `search_tools` results and
   `specs_for` all skip a disabled tool, so a policy never has to rely on the
-  refusal alone. The always-on tools (`search_tools`, `use_skill`,
-  `final_answer`, `spawn`, `check`, `join`, a controller's `plan`) are
-  never subject to it.
+  refusal alone. The always-on tools (`toolpolicy.ALWAYS_ON_TOOLS`:
+  `search_tools`, `use_skill`, `final_answer`, `spawn`, `check`, `join`, a
+  controller's `plan`) are never subject to it — `is_enabled` returns True
+  for them before it looks at the policy. `plan` and `final_answer` are
+  also exempt from `validate_arguments` (`tools._SELF_VALIDATING`): the
+  plan is validated by `guru.domain.plan.parse` with the loop's one
+  re-ask, and `final_text` tolerates a misnamed field.
 
 These are the dependency-injection points, and they already exist where
 front-ends actually diverge.

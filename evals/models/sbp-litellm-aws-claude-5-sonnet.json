@@ -134,7 +134,7 @@
    "arguments": {
     "path": "."
    },
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-719ffb:\n755 - tests/\n644 114B conftest.py\n644 1.2KB FIXTURE.md\n644 239B pyp"
+   "result_head": "<copy>:\n755 - tests/\n644 114B conftest.py\n644 1.2KB FIXTURE.md\n644 239B pyp"
   },
   "list_tree": {
    "tool": "list_tree",
@@ -154,7 +154,7 @@
     "path": ".",
     "depth": "2"
    },
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-8a15e5 (tree):\n755 - tests/\n644 589B tests/test_wordcount.py\n644 114B conft"
+   "result_head": "<copy> (tree):\n755 - tests/\n644 589B tests/test_wordcount.py\n644 114B conft"
   },
   "read_file": {
    "tool": "read_file",
@@ -174,7 +174,7 @@
     "path": "wordcount.py",
     "lines": "1-12"
    },
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-bfa3cd/wordcount.py (lines 1-12 of 29, sha:69c04bd3b0cf):\n     1\t\"\"\"wordcou"
+   "result_head": "<copy>/wordcount.py (lines 1-12 of 29, sha:69c04bd3b0cf):\n     1\t\"\"\"wordcou"
   },
   "search_code": {
    "tool": "search_code",
@@ -194,7 +194,7 @@
     "pattern": "count_words",
     "glob": "*.py"
    },
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-d511e7 \u2014 matches for 'count_words':\nwordcount.py:8: def count_words(text: s"
+   "result_head": "<copy> \u2014 matches for 'count_words':\nwordcount.py:8: def count_words(text: s"
   },
   "write_file": {
    "tool": "write_file",
@@ -214,7 +214,7 @@
     "path": "notes.txt",
     "content": "hello\n"
    },
-   "result_head": "Wrote 6 bytes to /private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-bec741/notes.txt. (sha:5891b5b522d5)"
+   "result_head": "Wrote 6 bytes to <copy>/notes.txt. (sha:5891b5b522d5)"
   },
   "edit_file": {
    "tool": "edit_file",
@@ -236,7 +236,7 @@
     "new": "text.split()",
     "sha": "69c04bd3b0cf"
    },
-   "result_head": "Edited /private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-13d666/wordcount.py (replaced 1 occurrence). (sha:2b702e471685)"
+   "result_head": "Edited <copy>/wordcount.py (replaced 1 occurrence). (sha:2b702e471685)"
   },
   "delete_file": {
    "tool": "delete_file",
@@ -255,7 +255,7 @@
    "arguments": {
     "path": "scratch.txt"
    },
-   "result_head": "Deleted /private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-4be8a6/scratch.txt."
+   "result_head": "Deleted <copy>/scratch.txt."
   },
   "outline": {
    "tool": "outline",
@@ -274,7 +274,7 @@
    "arguments": {
     "path": "wordcount.py"
    },
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-b5b3fe/wordcount.py (29 lines, sha:69c04bd3b0cf) outline:\n\"\"\"wordcount: a `"
+   "result_head": "<copy>/wordcount.py (29 lines, sha:69c04bd3b0cf) outline:\n\"\"\"wordcount: a `"
   },
   "find_symbol": {
    "tool": "find_symbol",
@@ -293,7 +293,7 @@
    "arguments": {
     "name": "count_words"
    },
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-278f23 \u2014 'count_words': 1 definition(s), 8 reference(s):\ndef: wordcount.py:"
+   "result_head": "<copy> \u2014 'count_words': 1 definition(s), 8 reference(s):\ndef: wordcount.py:"
   },
   "run_tests": {
    "tool": "run_tests",
@@ -329,7 +329,7 @@
    "arguments": {
     "path": "wordcount.py"
    },
-   "result_head": "ok: /private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-87510e/wordcount.py compiles."
+   "result_head": "ok: <copy>/wordcount.py compiles."
   },
   "lint": {
    "tool": "lint",
@@ -365,7 +365,7 @@
    "cost_usd": 0.0015906000000000002,
    "seconds": 1.97,
    "arguments": {},
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-8e3d79: working tree clean."
+   "result_head": "<copy>: working tree clean."
   },
   "git_diff": {
    "tool": "git_diff",
@@ -382,7 +382,7 @@
    "cost_usd": 0.0017688,
    "seconds": 2.15,
    "arguments": {},
-   "result_head": "/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-921793: 1 file changed, 2 insertions(+)\nwordcount.py | 2 ++\n(detail=true re"
+   "result_head": "<copy>: 1 file changed, 2 insertions(+)\nwordcount.py | 2 ++\n(detail=true re"
   },
   "apply_patch": {
    "tool": "apply_patch",
@@ -401,7 +401,7 @@
    "arguments": {
     "diff": "--- a/wordcount.py\n+++ b/wordcount.py\n@@ -7,7 +7,7 @@\n \n def count_words(text: str) -> int:\n     \"\"\"Number of whitespace-separated words in ``text``.\"\"\"\n-    return len([w for w in text.split(' ') if w])\n+    return len([w for w in text.split() if w])\n \n \n def main(argv: list) -> int:\n"
    },
-   "result_head": "Applied patch:\n/private/var/folders/8v/kx_s88051jjb8sjznby29s0c0000gp/T/guru-contract-k4a_05oo/copy-8b8f72/wordcount.py: 1 hunk(s) applied (sha:2b702e471685)"
+   "result_head": "Applied patch:\n<copy>/wordcount.py: 1 hunk(s) applied (sha:2b702e471685)"
   },
   "web_search": {
    "tool": "web_search",

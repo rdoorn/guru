@@ -41,7 +41,7 @@ class TestFileTools:
         assert '(500 lines, sha:' in out and 'structural view' in out
         assert 'First 20 lines:' in out
         assert '\n    20\trow20' in out and 'row21' not in out
-        assert "lines='21-220'" in out and 'at most 200 lines' in out
+        assert "lines='21-500'" in out and 'at most 800 lines' in out
         assert 'Outline' not in out
 
     def test_read_file_long_python_file_has_outline(self, tmp_path,
@@ -65,15 +65,18 @@ class TestFileTools:
 
     def test_read_file_range_is_clipped(self, tmp_path, monkeypatch) -> None:
         # C1: an explicit range never returns more than READ_RANGE_SPAN
-        # lines, so a whole-file read of a long file is impossible.
+        # (800) lines, so a whole-file read of a long file is impossible.
         self._only(monkeypatch, tmp_path)
         big = tmp_path / 'big.txt'
-        big.write_text('\n'.join(str(i) for i in range(1, 501)) + '\n')
+        big.write_text('\n'.join(str(i) for i in range(1, 1001)) + '\n')
+        out = files.read_file(str(big), '1-1000')
+        assert 'lines 1-800 of 1000' in out and '\n   801\t' not in out
+        assert "clipped at 800 lines; continue with lines='801-1000'" in out
+        out = files.read_file(str(big), '900-1000')
+        assert 'lines 900-1000 of 1000' in out and 'clipped' not in out
+        # A 500-line span fits in one explicit call now.
         out = files.read_file(str(big), '1-500')
-        assert 'lines 1-200 of 500' in out and '\n   201\t' not in out
-        assert "clipped at 200 lines; continue with lines='201-400'" in out
-        out = files.read_file(str(big), '450-500')
-        assert 'lines 450-500 of 500' in out and 'clipped' not in out
+        assert 'lines 1-500 of 1000' in out and 'clipped' not in out
 
     def test_read_file_refuses_binary(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch, tmp_path)
@@ -130,8 +133,9 @@ class TestFileTools:
         assert files._parse_range('bad', 10) == (None, None)
         assert files._parse_range('5-3', 10) == (None, None)
         assert files._parse_range('1-9999', 50) == (1, 50)
-        assert files._parse_range('1-9999', 5000) == (1, 200)
-        assert files.READ_OUTLINE_LINES == files.READ_RANGE_SPAN == 200
+        assert files._parse_range('1-9999', 5000) == (1, 800)
+        assert files.READ_OUTLINE_LINES == 200
+        assert files.READ_RANGE_SPAN == 800
 
     def test_search_code_finds_matches(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch, tmp_path)

@@ -32,12 +32,14 @@ _DEFAULT_TREE_DEPTH = 3     # levels list_tree recurses when depth is unset
 # Structural read (structural round, Package C item 1): a read_file without
 # ``lines`` on a file longer than READ_OUTLINE_LINES returns the outline and
 # the first READ_HEAD_LINES lines instead of the text, and no single call
-# returns more than READ_RANGE_SPAN lines -- so a whole-file read of a long
-# file is impossible rather than discouraged. Files up to READ_OUTLINE_LINES
-# lines still read whole in one call.
+# returns more than READ_RANGE_SPAN lines. Files up to READ_OUTLINE_LINES
+# lines still read whole in one call. The structural view stays at 200
+# lines (the model must pick a span from the outline); an explicit span is
+# a deliberate choice, so it may be wider (800: one function or class of
+# any realistic size in one call, still not a whole long module).
 READ_OUTLINE_LINES = 200
 READ_HEAD_LINES = 20
-READ_RANGE_SPAN = 200
+READ_RANGE_SPAN = 800
 _MAX_MATCHES = 100          # global cap on rows returned by search_code
 _MAX_PER_FILE = 20          # per-file cap so one big file can't eat the budget
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than this in search_code
