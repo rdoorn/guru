@@ -133,6 +133,19 @@ class TestDoPlan:
         assert out.startswith(plan.DELEGATED_PREFIX)
         assert len(o.manager.agents) == 2
 
+    def test_coverage_reads_the_full_request(self, monkeypatch, fake_repo):
+        """A concern named after the ledger's 1000-char request cap still
+        counts: the handler evaluates the whole request."""
+        request = ('Review this repository for correctness' + ' details' * 200
+                   + ' and security.')
+        assert len(request) > conversation.REQUEST_CHARS
+        assert 'security' not in conversation.request_in(
+            [{'role': 'user', 'content': request}])
+        o, main = _orch(monkeypatch, request=request)
+        one = {'outcome': 'delegate', 'tasks': [_TWO['tasks'][0]]}
+        out = o.do_plan(main.state, one)
+        assert plan.is_reask(out) and "'security'" in out
+
     def test_mailbox_turn_skips_coverage(self, monkeypatch, fake_repo):
         one = {'outcome': 'delegate', 'tasks': [
             {'goal': 're-check the injection finding in app/upload.py',
@@ -143,6 +156,45 @@ class TestDoPlan:
             {'role': 'user', 'content': '[joined results]\n— agent1: A1'}])
         out = o.do_plan(main.state, one)
         assert out.startswith(plan.DELEGATED_PREFIX)
+
+    def _delegated_history(self, rounds: int) -> list:
+        msgs: list = [{'role': 'system', 'content': 's'},
+                      {'role': 'user', 'content': _REQUEST}]
+        for i in range(rounds):
+            msgs += [{'role': 'assistant', 'content': ''},
+                     {'role': 'tool', 'tool_name': 'plan',
+                      'content': plan.delegated_text(
+                          [f'agent{i}'], plan.parse(_TWO)[0].tasks[:1])},
+                     {'role': 'user',
+                      'content': f'[joined results]\n— agent{i}: partial'}]
+        return msgs
+
+    def test_delegate_refused_at_the_cap_answer_still_fine(
+            self, monkeypatch, fake_repo) -> None:
+        msgs = self._delegated_history(plan.MAX_DELEGATE_ROUNDS)
+        o, main = _orch(monkeypatch, messages=msgs)
+        out = o.do_plan(main.state, _TWO)
+        assert out == plan.delegate_cap_text(3)
+        assert len(o.manager.agents) == 1              # nothing spawned
+        assert main.state.turn_waiting is False
+        # The controller answers from what it has: always accepted.
+        assert o.do_plan(main.state, {'outcome': 'answer',
+                                      'answer': 'Done so far: ...'}) == \
+            plan.ANSWER_ACK
+
+    def test_delegate_under_the_cap_runs(self, monkeypatch, fake_repo):
+        msgs = self._delegated_history(plan.MAX_DELEGATE_ROUNDS - 1)
+        o, main = _orch(monkeypatch, messages=msgs)
+        out = o.do_plan(main.state, _TWO)
+        assert out.startswith(plan.DELEGATED_PREFIX)
+        assert len(o.manager.agents) == 3
+
+    def test_a_new_request_resets_the_count(self, monkeypatch, fake_repo):
+        msgs = self._delegated_history(plan.MAX_DELEGATE_ROUNDS)
+        msgs += [{'role': 'assistant', 'content': 'Here is the summary.'},
+                 {'role': 'user', 'content': _REQUEST + ' Again, please.'}]
+        o, main = _orch(monkeypatch, messages=msgs)
+        assert o.do_plan(main.state, _TWO).startswith(plan.DELEGATED_PREFIX)
 
     def test_second_plan_in_one_round_is_ignored(self, monkeypatch,
                                                  fake_repo) -> None:

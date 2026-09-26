@@ -466,9 +466,14 @@ class TestModelSlugAndContract:
         ('SBP Litellm|aws/claude-4-5-haiku',
          'sbp-litellm-aws-claude-4-5-haiku'),
         ('Ollama|qwen3:8b', 'ollama-qwen3-8b'),
-        ('A|m', 'a-m'), ('X y|a.b_c', 'x-y-a-b-c')])
+        ('A|m', 'a-m'), ('X y|a.b_c', 'x-y-a-b-c'),
+        (' A | hf.co/x:Q4_K_M ', 'a-hf-co-x-q4-k-m')])   # collapsed, stripped
     def test_model_slug(self, spec: str, slug: str) -> None:
         assert runs.model_slug(spec) == slug
+
+    def test_bench_uses_the_same_slug(self) -> None:
+        from bench import tool_contract
+        assert tool_contract.slug is runs.model_slug
 
     def test_load_contract_reads_the_slug_file(self, tmp_path: Path) -> None:
         (tmp_path / 'ollama-qwen3-8b.json').write_text(

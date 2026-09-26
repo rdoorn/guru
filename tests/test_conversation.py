@@ -7,6 +7,31 @@ from guru import config, session, skills
 from guru.domain import conversation, files, tools
 
 
+class TestRequestCap:
+    def test_request_in_cap_none_is_the_full_text(self) -> None:
+        long = 'x' * (conversation.REQUEST_CHARS + 50)
+        msgs = [{'role': 'user', 'content': long}]
+        assert len(conversation.request_in(msgs)) == \
+            conversation.REQUEST_CHARS
+        assert conversation.request_in(msgs, cap=None) == long
+        assert conversation.request_in(msgs, cap=5) == 'xxxxx'
+
+    def test_request_start_skips_deliveries_and_nudges(self) -> None:
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'first request'},
+                {'role': 'assistant', 'content': ''},
+                {'role': 'user', 'content': 'second request'},
+                {'role': 'assistant', 'content': ''},
+                {'role': 'user', 'content': '[joined results]\n— a1: ok'},
+                {'role': 'assistant', 'content': ''},
+                {'role': 'user', 'content': conversation.DELEGATION_TEXT}]
+        assert conversation.request_start(msgs) == 3
+        assert conversation.turn_start(msgs) == 5         # the delivery
+        assert conversation.request_start([]) == 0
+        assert conversation.request_start(
+            [{'role': 'user', 'content': '[joined results]\nx'}]) == 0
+
+
 class TestMessageToDict:
     """Tests for conversation.message_to_dict normalisation."""
 

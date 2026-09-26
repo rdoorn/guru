@@ -44,7 +44,8 @@ from typing import Optional, Union
 from guru import log, session, ui
 from guru.adapters import turn
 from guru.adapters.base import (FORCE_PLAN, JSON_ONLY, Adapter, ModelInfo,
-                                dump_request, parameters_schema)
+                                dump_request, is_tool_choice_error,
+                                parameters_schema)
 from guru.domain import ledger, pricing, tools
 
 # Non-streaming per tool-call round (parity with the Ollama adapter). Kept at
@@ -177,12 +178,6 @@ def tool_defs(specs: list) -> list:
     (:func:`guru.adapters.base.parameters_schema` for the input)."""
     return [{'name': spec['name'], 'description': spec['description'],
              'input_schema': parameters_schema(spec)} for spec in specs]
-
-
-def is_tool_choice_error(exc: Exception) -> bool:
-    """Whether a provider error is about the ``tool_choice`` we sent (the
-    forced round is then retried without it)."""
-    return 'tool_choice' in str(exc).lower()
 
 
 def system_blocks(system: str,
@@ -538,8 +533,7 @@ class AnthropicAdapter(Adapter):
                 if duplicate:
                     ui.console.print(
                         f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = (f"Already called {name} with these arguments."
-                               " Use the previous result.")
+                    content = turn.DUPLICATE_RESULT.format(name=name)
                 else:
                     content = tools.execute_tool(name, args)
                 results.append({

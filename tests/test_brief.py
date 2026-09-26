@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from guru import config
-from guru.domain import brief
+from guru import briefcmd, config
+from guru.domain import brief, code
 from guru.repositories import briefs
 
 PROJECT_PY = '''"""A module."""
@@ -97,6 +97,28 @@ class TestBuild:
         assert brief.build(project, 'abc').test_command == \
             'python -m unittest discover -s tests'
         assert brief.build(project / 'app', 'abc').test_command == ''
+
+    def test_flake8_format_with_percent_does_not_raise(self, project):
+        (project / '.flake8').write_text(
+            '[flake8]\nmax-line-length = 79\n'
+            'format = %(path)s:%(row)d:%(col)d: %(code)s %(text)s\n')
+        conv = brief._conventions(project)
+        assert conv['flake8']['max-line-length'] == '79'
+        assert conv['flake8']['format'].startswith('%(path)s')
+
+    def test_signatures_carry_no_default_values(self, tmp_path,
+                                                monkeypatch) -> None:
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', {str(tmp_path)})
+        (tmp_path / 'm.py').write_text(
+            'def f(a, b="s3cret-token", *, c=3, d=None) -> int:\n'
+            '    return 1\n')
+        b = brief.build(tmp_path, 'h1')
+        [row] = b.outlines['m.py']
+        assert row == 'L1-2 def f(a, b=..., *, c=..., d=...) -> int'
+        assert 's3cret-token' not in json.dumps(b.to_dict())
+        # The outline tool itself still shows defaults.
+        assert code.outline_rows((tmp_path / 'm.py').read_text()) == [
+            'L1-2 def f(a, b=\'s3cret-token\', *, c=3, d=None) -> int']
 
     def test_conventions(self, project) -> None:
         conv = brief.build(project, 'abc').conventions
@@ -237,34 +259,69 @@ class TestCurrent:
         b = brief.current(project, store=store)
         assert b.head_sha == brief.NO_HEAD and store.saved == []
 
-    def test_default_store_is_the_repository(self, project, tmp_path,
-                                             monkeypatch) -> None:
-        monkeypatch.setattr(brief, 'head_sha', lambda root: 'h1')
-        monkeypatch.setattr(briefs, 'BRIEFS_DIR', tmp_path / 'store')
-        b = brief.current(project)
-        assert briefs.path_for(project, 'h1').is_file()
-        assert briefs.load(project, 'h1') == b
+    def test_known_head_skips_rev_parse(self, project, monkeypatch) -> None:
+        def boom(root):
+            raise AssertionError('rev-parse ran')
+        monkeypatch.setattr(brief, 'head_sha', boom)
+        store = FakeStore()
+        b = brief.current(project, store, head='h9')
+        assert b.head_sha == 'h9' and store.saved == [b]
+
+    def test_store_is_a_parameter_no_repository_import(self) -> None:
+        import ast
+        src = Path(brief.__file__).read_text(encoding='utf-8')
+        names = [n.module or '' for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.ImportFrom)]
+        assert not any(m.startswith('guru.repositories') for m in names)
+        with pytest.raises(TypeError):
+            brief.current(Path('.'))                  # type: ignore[call-arg]
 
 
 class TestBriefCommand:
+    """``guru.briefcmd`` (endpoint): the domain over the JSON store."""
+
     def test_show_refresh_slice_usage(self, project, monkeypatch) -> None:
         monkeypatch.setattr(brief, 'head_sha', lambda root: 'h1')
         store = FakeStore()
-        out = brief.brief_command('', root=project, store=store)
+        out = briefcmd.brief_command('', root=project, store=store)
         assert out.startswith('[project brief] ')
         assert 'built in ' in out and 'modules outlined' in out
         assert len(store.saved) == 1
-        brief.brief_command('refresh', root=project, store=store)
+        briefcmd.brief_command('refresh', root=project, store=store)
         assert len(store.saved) == 2
-        out = brief.brief_command('slice fix core.py', root=project,
-                                  store=store)
+        out = briefcmd.brief_command('slice fix core.py', root=project,
+                                     store=store)
         assert 'app/core.py:' in out and len(store.saved) == 2
-        assert brief.brief_command('bogus', root=project) == brief.BRIEF_USAGE
-        assert '/brief refresh' in brief.BRIEF_USAGE
+        assert briefcmd.brief_command('bogus', root=project) == \
+            briefcmd.BRIEF_USAGE
+        assert '/brief refresh' in briefcmd.BRIEF_USAGE
+        assert not hasattr(brief, 'brief_command')     # moved out of domain
 
     def test_no_git_note(self, project) -> None:
-        out = brief.brief_command('', root=project, store=FakeStore())
+        out = briefcmd.brief_command('', root=project, store=FakeStore())
         assert 'not a git checkout, so not stored' in out
+
+    def test_default_store_is_the_repository(self, project, tmp_path,
+                                             monkeypatch) -> None:
+        monkeypatch.setattr(brief, 'head_sha', lambda root: 'h1')
+        monkeypatch.setenv(briefs.BRIEFS_DIR_ENV, str(tmp_path / 'store'))
+        out = briefcmd.brief_command('', root=project)
+        assert out.startswith('[project brief] ')
+        path = briefs.path_for(project, 'h1')
+        assert path.is_file() and path.is_relative_to(tmp_path / 'store')
+
+    def test_any_failure_is_one_line(self, project, monkeypatch) -> None:
+        class Broken:
+            def load(self, root, head_sha):
+                raise RuntimeError('disk on fire')
+
+            def save(self, b):
+                raise RuntimeError('never reached')
+        monkeypatch.setattr(brief, 'head_sha', lambda root: 'h1')
+        out = briefcmd.brief_command('', root=project, store=Broken())
+        assert out == (f'brief: cannot build for {project.resolve()}:'
+                       ' RuntimeError: disk on fire')
+        assert '\n' not in out
 
 
 class TestRepository:
@@ -302,5 +359,32 @@ class TestRepository:
         path.write_text('{"root": "x"}')
         assert briefs.load(project, 'h1', base=base) is None
 
-    def test_default_dir_under_guru_home(self) -> None:
+    def test_default_dir_under_guru_home(self, monkeypatch) -> None:
         assert briefs.BRIEFS_DIR == config.GURU_HOME / 'briefs'
+        monkeypatch.delenv(briefs.BRIEFS_DIR_ENV, raising=False)
+        assert briefs.root() == briefs.BRIEFS_DIR
+
+    def test_root_honours_the_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(briefs.BRIEFS_DIR_ENV, str(tmp_path / 'b'))
+        assert briefs.root() == tmp_path / 'b'
+        assert briefs.path_for(tmp_path, 'h1').is_relative_to(tmp_path / 'b')
+        monkeypatch.setenv(briefs.BRIEFS_DIR_ENV, '  ')
+        assert briefs.root() == briefs.BRIEFS_DIR
+
+    def test_project_dirs_are_capped(self, project, tmp_path,
+                                     monkeypatch) -> None:
+        base = tmp_path / 'store'
+        monkeypatch.setattr(briefs, 'KEEP_PROJECTS', 3)
+        import os
+        for i in range(5):
+            root = tmp_path / f'copy{i}'
+            root.mkdir()
+            (root / 'a.py').write_text('x = 1\n')
+            monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', {str(root)})
+            path = briefs.save(brief.build(root, 'h1'), base=base)
+            # Distinct mtimes so "oldest" is well defined.
+            os.utime(path.parent, (1_000_000 + i, 1_000_000 + i))
+        kept = sorted(d.name for d in base.iterdir())
+        assert len(kept) == 3
+        assert kept == sorted(briefs.project_key(tmp_path / f'copy{i}')
+                              for i in (2, 3, 4))

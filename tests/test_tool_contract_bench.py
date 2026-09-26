@@ -9,6 +9,7 @@ import pytest
 
 from guru import config, session
 from guru.domain import tools
+from guru.evals import runs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench import tool_contract as tc                        # noqa: E402
@@ -53,7 +54,7 @@ class TestTasks:
     def test_one_task_per_non_sandbox_tool(self) -> None:
         covered = {t.tool for t in tc.TASKS}
         expected = (set(tools.TOOL_REGISTRY) - set(tools.SANDBOX_TOOLS)
-                    | tools.ALWAYS_ON_TOOLS)
+                    | tools.ALWAYS_ON_TOOLS) - tc.LOOP_TOOLS
         assert covered == expected
         assert len(covered) == len(tc.TASKS)          # no duplicates
         web = {t.tool for t in tc.TASKS if t.web}
@@ -73,6 +74,7 @@ class TestTasks:
         assert tc.slug('SBP Litellm|aws/claude-4-5-haiku') == \
             'sbp-litellm-aws-claude-4-5-haiku'
         assert tc.slug('Ollama|qwen3:4b') == 'ollama-qwen3-4b'
+        assert tc.slug is runs.model_slug            # one implementation
 
         class A:
             name = 'SBP Litellm'
@@ -211,3 +213,17 @@ class TestReport:
             for name, row in data['tools'].items():
                 assert row['tool'] == name
                 assert row['status'] in ('run', 'skipped')
+                # Item 16: no temp copy path in the committed heads.
+                assert '/guru-contract-' not in row.get('result_head', '')
+            assert any(tc.COPY_TOKEN in row.get('result_head', '')
+                       for row in data['tools'].values())
+
+    def test_result_head_strips_the_copy_path(self, tmp_path) -> None:
+        copy = tmp_path / 'copy-abc123'
+        copy.mkdir()
+        text = (f'{copy}/wordcount.py (lines 1-12 of 29):\n'
+                f'Wrote 6 bytes to {copy.resolve()}/notes.txt.')
+        out = tc._strip_copy(text, copy)
+        assert out == ('<copy>/wordcount.py (lines 1-12 of 29):\n'
+                       'Wrote 6 bytes to <copy>/notes.txt.')
+        assert tc._strip_copy('no path here', copy) == 'no path here'

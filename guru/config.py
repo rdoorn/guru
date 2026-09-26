@@ -358,8 +358,19 @@ CONTROLLER_HINT = (
 
 # The plan tool's description (guru.domain.tools._PLAN_SPEC); the field
 # semantics live in the schema (guru.domain.plan.SCHEMA).
+# The controller's contract, stated where the controller reads it: in the
+# plan tool's own description (the tool is all it has; the prose hint that
+# used to say so is gone). Eval sandbox-dependency-request 689aecc6283a:
+# the controller answered "I need to search for the sandbox tool ..."
+# instead of delegating.
+PLAN_CONTRACT_SENTENCE = (
+    'You have no other tools. Anything that needs a file, a command, a'
+    ' package, a test or the sandbox must be delegated; answer is for'
+    ' replies that need no work.')
+
 PLAN_TOOL_DESCRIPTION = (
-    'Your one reply per turn. outcome answer: reply to the user with'
+    'Your one reply per turn. ' + PLAN_CONTRACT_SENTENCE
+    + ' outcome answer: reply to the user with'
     ' answer (no worker runs; a simple question has no task). outcome'
     ' delegate: guru runs every task in tasks on a routed worker in'
     ' parallel, joins them and resumes you with their results; when a'

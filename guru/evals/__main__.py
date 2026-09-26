@@ -370,16 +370,21 @@ MATRIX_HEADERS = ['model', 'passed', 'tok', 'tool kB', 'seconds', 'cost',
 
 
 def contract_cell(contract: Optional[dict]) -> str:
-    """``ok/calls`` from a tool-contract record (``bench/tool_contract.py``
-    writes ``{"model", "calls", "ok", "schema_errors", ...}``); ``-``
-    without a record or when either key is missing or not a number."""
+    """``ok/tools`` from a tool-contract record: ``bench/tool_contract.py``
+    writes ``{"model", ..., "summary": {"tools", "ok", ...}, "tools":
+    {...}}`` and the cell reads ``summary.ok`` over ``summary.tools`` (the
+    tools that ran). ``-`` without a record or when either number is
+    missing or not a number."""
     if not contract:
         return '-'
-    ok, calls = contract.get('ok'), contract.get('calls')
-    if not isinstance(ok, (int, float)) or isinstance(ok, bool) or \
-            not isinstance(calls, (int, float)) or isinstance(calls, bool):
+    summary = contract.get('summary')
+    if not isinstance(summary, dict):
         return '-'
-    return f'{int(ok)}/{int(calls)}'
+    ok, tools = summary.get('ok'), summary.get('tools')
+    if not isinstance(ok, (int, float)) or isinstance(ok, bool) or \
+            not isinstance(tools, (int, float)) or isinstance(tools, bool):
+        return '-'
+    return f'{int(ok)}/{int(tools)}'
 
 
 def _matrix_row(spec: str, run: Run, models_dir: Path) -> list:

@@ -25,6 +25,21 @@ class TestSchema:
         assert task['required'] == ['goal', 'kind', 'complexity']
         assert task['properties']['files']['items'] == {'type': 'string'}
 
+    def test_descriptions_carry_the_controller_contract(self) -> None:
+        """The controller has no other tool and no prose hint saying so:
+        the contract lives in the plan tool's own descriptions."""
+        from guru import config
+        from guru.domain import tools
+        sentence = ('You have no other tools. Anything that needs a file, a'
+                    ' command, a package, a test or the sandbox must be'
+                    ' delegated; answer is for replies that need no work.')
+        assert config.PLAN_CONTRACT_SENTENCE == sentence
+        assert sentence in config.PLAN_TOOL_DESCRIPTION
+        assert sentence in tools.tool_spec('plan')['description']
+        outcome = plan.SCHEMA['properties']['outcome']['description']
+        assert 'You have no other tools' in outcome
+        assert 'must be delegated' in outcome
+
     def test_schema_is_json(self) -> None:
         json.dumps(plan.SCHEMA)
 
@@ -37,6 +52,43 @@ class TestSchema:
             assert f'{kind} = {desc}' in text
 
 
+class TestDelegateCap:
+    def _history(self, rounds: int, text_path: bool = False) -> list:
+        msgs: list = [{'role': 'user', 'content': 'fix the sandbox tool'}]
+        for i in range(rounds):
+            if text_path:
+                msgs.append({'role': 'assistant',
+                             'content': '{"outcome": "delegate"}'})
+            else:
+                msgs.append({'role': 'assistant', 'content': ''})
+                msgs.append({'role': 'tool', 'tool_name': 'plan',
+                             'content': plan.delegated_text(
+                                 [f'agent{i}'], [plan.Task('g')])})
+            msgs.append({'role': 'user',
+                         'content': f'[joined results]\n— agent{i}: done'})
+        return msgs
+
+    def test_delegations_in_counts_tool_results_or_deliveries(self) -> None:
+        assert plan.delegations_in([]) == 0
+        assert plan.delegations_in(self._history(3)) == 3
+        assert plan.delegations_in(self._history(2, text_path=True)) == 2
+        # A refusal or an answer ack is not a delegation.
+        msgs = [{'role': 'tool', 'tool_name': 'plan',
+                 'content': plan.refused_text(['x'])},
+                {'role': 'tool', 'tool_name': 'plan',
+                 'content': plan.ANSWER_ACK},
+                {'role': 'tool', 'tool_name': 'read_file',
+                 'content': plan.DELEGATED_PREFIX + 'not a plan'}]
+        assert plan.delegations_in(msgs) == 0
+
+    def test_cap_text_is_a_refusal_that_says_answer(self) -> None:
+        text = plan.delegate_cap_text(3)
+        assert text.startswith(plan.REFUSED_PREFIX)
+        assert 'delegated 3 times' in text and 'outcome answer' in text
+        assert not plan.is_reask(text)
+        assert plan.MAX_DELEGATE_ROUNDS == 3
+
+
 class TestParse:
     def test_answer(self) -> None:
         p, errors = plan.parse({'outcome': 'answer', 'answer': 'Hi.'})
@@ -47,13 +99,15 @@ class TestParse:
                                 'tasks': [_task()]})
         assert errors == [] and p.tasks == []
 
-    def test_answer_without_text_is_malformed(self) -> None:
+    def test_answer_without_text_is_never_rejected(self) -> None:
+        # The loop takes the round's own text instead (turn._answer_text).
         for args in ({'outcome': 'answer'},
                      {'outcome': 'answer', 'answer': '  '},
                      {'outcome': 'answer', 'answer': 3}):
             p, errors = plan.parse(args)
-            assert p is not None and p.outcome == 'answer'
-            assert errors == ['outcome answer needs the reply text in answer']
+            assert p == plan.Plan('answer', answer='') and errors == []
+            assert plan.evaluate('review for correctness and security',
+                                 args).ok
 
     @pytest.mark.parametrize('args', [
         {}, {'outcome': 'plan'}, {'outcome': None}, 'answer', None, [],
@@ -131,14 +185,49 @@ class TestValidate:
          ['correctness', 'security']),
         ('Is there a path traversal risk in the upload handler?',
          ['security']),
-        ('fix the failing test in wordcount.py', ['correctness', 'tests']),
+        ('fix the failing test in wordcount.py', []),   # verbs/artefacts
         ('hi, what can you do?', []),
         ('check error handling and the README', ['reliability', 'docs']),
         ('is the design performant?', ['design']),   # no fuzzy matching
         ('secure-by-default settings', []),          # hyphenated compound
+        ('run the fast tests and fix the failure', ['tests']),
+        ('Add docstrings and comments to auth.py', ['docs']),
+        ('does the test suite cover the retry path?', ['tests']),
     ])
     def test_concerns_in(self, request_text, named) -> None:
         assert plan.concerns_in(request_text) == named
+
+    @pytest.mark.parametrize('term', [
+        'fix', 'fast', 'test', 'comments', 'structure', 'failure', 'auth',
+        'secret', 'retry', 'timeout'])
+    def test_ambiguous_triggers_are_out(self, term) -> None:
+        assert plan.concerns_in(term) == []
+        assert not any(term in terms for terms in plan.CONCERNS.values())
+
+    @pytest.mark.parametrize('request_text, named', [
+        ('run the fast tests and fix the failure', []),
+        ('Add docstrings and comments to auth.py', []),
+        ('Review this repository for correctness and security',
+         ['correctness', 'security']),
+        ('check correctness, security & performance of app/',
+         ['correctness', 'security', 'performance']),
+        ('Is the design sound? Also review the docs.', ['design', 'docs']),
+        ('add docstrings to the security module', []),      # no coordinator
+        ('review the docs of the tests directory', []),     # no coordinator
+        ('security of the design', []),
+        ('review app/ for bugs and for more bugs', []),     # one concern
+        ('', []),
+    ])
+    def test_coverage_concerns_need_two_and_a_coordinator(
+            self, request_text, named) -> None:
+        assert plan.coverage_concerns(request_text) == named
+
+    def test_coverage_skips_a_request_without_a_coordinator(self) -> None:
+        # Two vocabulary words, one task: no re-ask for the "missing" one.
+        request = 'add docstrings to the security module'
+        args = {'outcome': 'delegate', 'tasks': [
+            _task(goal='write docstrings in app/security.py')]}
+        assert plan.evaluate(request, args).ok
 
     def test_missing_concern_is_soft(self) -> None:
         request = 'Review this repository for correctness and security.'
@@ -207,6 +296,23 @@ class TestFromText:
     def test_plan_object_inside_a_list_still_counts(self) -> None:
         assert plan.from_text('[{"outcome": "answer"}]') == {
             'outcome': 'answer'}
+
+
+class TestProseAround:
+    def test_bare_json_is_removed(self) -> None:
+        text = 'Glad to help.\n{"outcome": "answer", "answer": ""} bye'
+        assert plan.prose_around(text) == 'Glad to help.\n  bye'
+
+    def test_fence_is_removed_whole(self) -> None:
+        text = 'Sure.\n```json\n{"outcome": "answer"}\n```\n'
+        assert plan.prose_around(text) == 'Sure.'
+
+    def test_no_plan_object_is_the_text(self) -> None:
+        assert plan.prose_around('  hello {"x": 1} ') == 'hello {"x": 1}'
+        assert plan.prose_around('') == ''
+
+    def test_only_json_is_empty(self) -> None:
+        assert plan.prose_around('{"outcome": "answer"}') == ''
 
 
 class TestTexts:

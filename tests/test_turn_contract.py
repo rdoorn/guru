@@ -26,7 +26,9 @@ class Lenient:
 
 class Scripted:
     """Drive ``run_loop`` with scripted rounds; ``run_tools`` threads a
-    tool message per call the way an adapter does, executing ``plan``
+    tool message per call the way an adapter does — honouring the
+    duplicate flag (the call does not run; ``turn.DUPLICATE_RESULT`` is
+    the result, as in the three real adapters), executing ``plan``
     through the tool layer (a scripted handler) and echoing every other
     tool."""
 
@@ -54,6 +56,7 @@ class Scripted:
         self.steps = iter(rounds)
         self.user_msgs: list = []
         self.ran: list = []
+        self.skipped: list = []
         self.handler_calls: list = []
         self.handler = handler
         tools.set_plan_handler(self._handle)
@@ -66,13 +69,23 @@ class Scripted:
         return next(self.steps)
 
     def _run_tools(self, pending) -> None:
-        for name, args, _ref, _dup in pending:
-            self.ran.append(name)
-            content = (tools.execute_tool(name, args)
-                       if name in ('plan', 'final_answer')
-                       else f'{name} ran')
+        for name, args, _ref, dup in pending:
+            if dup:
+                self.skipped.append(name)
+                content = turn.DUPLICATE_RESULT.format(name=name)
+            else:
+                self.ran.append(name)
+                content = (tools.execute_tool(name, args)
+                           if name in ('plan', 'final_answer')
+                           else f'{name} ran')
             session.messages.append({'role': 'tool', 'tool_name': name,
                                      'tool_args': args, 'content': content})
+
+    def script(self, rounds) -> None:
+        """Replace the scripted rounds (callables that append the
+        assistant message and return ``(text, calls)``)."""
+        it = iter(rounds)
+        self._step = lambda: next(it)()               # type: ignore
 
     def _add_user(self, text: str) -> None:
         self.user_msgs.append(text)
@@ -367,6 +380,223 @@ class TestControllerPlan:
         [row] = s.run(fake_repo)
         assert row['controller_executed'] is False
         assert row['request'] == 'review auth for security'
+
+
+class TestDuplicates:
+    """Duplicate suppression: same name and arguments as an earlier call
+    in the turn is answered unrun; never ``plan``/``final_answer``."""
+
+    def test_repeated_read_is_answered_unrun(self, monkeypatch, fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        s.script([
+            lambda: _assistant('', [('read_file', {'path': 'a.py'}, 'r1')]),
+            lambda: _assistant('', [('read_file', {'path': 'a.py'}, 'r2')]),
+            lambda: _assistant('', [('final_answer', {'text': 'ok'},
+                                     'r3')])])
+        s.run(fake_repo)
+        assert s.ran == ['read_file', 'final_answer']
+        assert s.skipped == ['read_file']
+        dup = [m for m in session.messages if m.get('role') == 'tool'][1]
+        assert dup['content'] == turn.DUPLICATE_RESULT.format(
+            name='read_file')
+
+    def test_identical_plan_after_coverage_reask_is_accepted(
+            self, monkeypatch, fake_repo):
+        """The documented path: the handler re-asks once for coverage,
+        the model sends the very same plan again and the handler (not
+        the duplicate filter) accepts it."""
+        args = {'outcome': 'delegate', 'tasks': [
+            {'goal': 'review app/ for injection', 'kind': 'review',
+             'complexity': 'hard'}]}
+        verdicts = iter([plan.reask_text(["no task goal covers 'tests'"])])
+
+        def handler(a):
+            nxt = next(verdicts, None)
+            if nxt is not None:
+                return nxt
+            session.turn_waiting = True
+            return plan.delegated_text(['agent1'], plan.parse(a)[0].tasks)
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True,
+                     handler=handler)
+        s.script([lambda: _assistant('', [('plan', args, 'p1')]),
+                  lambda: _assistant('', [('plan', args, 'p2')])])
+        [row] = s.run(fake_repo)
+        assert len(s.handler_calls) == 2 and s.skipped == []
+        assert row['tasks_spawned'] == 1
+        assert row['struggle']['protocol_violation'] == 0
+
+    def test_identical_final_answer_is_never_a_duplicate(self, monkeypatch,
+                                                         fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        s.script([lambda: _assistant('', [('final_answer', {'text': 'A'},
+                                           'r1')])])
+        s.run(fake_repo)
+        assert s.skipped == [] and s.rendered == ['A']
+
+
+class TestRoundCap:
+    """The per-turn round cap: the only exit while the model keeps
+    calling tools or a controller keeps planning without an accepted
+    plan."""
+
+    def test_controller_refused_forever_ends_at_the_cap(self, monkeypatch,
+                                                        fake_repo):
+        args = {'outcome': 'delegate', 'tasks': [
+            {'goal': 'look at auth', 'kind': 'review',
+             'complexity': 'hard'}]}
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True,
+                     handler=lambda a: plan.refused_text(['no rung']))
+        s.script([lambda: _assistant('', [('plan', args, f'p{i}')])
+                  for i in range(100)])
+        [row] = s.run(fake_repo)
+        assert len(s.handler_calls) == turn._MAX_ROUNDS == 12
+        assert row['tools_used'].count('plan') == 12
+        assert row['struggle']['protocol_violation'] == 1
+        [text] = s.rendered
+        assert text.startswith("(guru could not run the controller's plan:"
+                               " 12 plan rounds without an accepted plan.)")
+        assert 'look at auth' in text
+        assert session.messages[-1] == {'role': 'assistant',
+                                        'content': text}
+
+    def test_controller_cap_prefers_its_own_text(self, monkeypatch,
+                                                 fake_repo):
+        args = {'outcome': 'delegate', 'tasks': [{'goal': 'g'}]}
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True,
+                     handler=lambda a: plan.refused_text(['no rung']))
+        s.script([lambda: _assistant('Trying again.', [('plan', args, 'p')])
+                  for _ in range(100)])
+        s.run(fake_repo)
+        assert s.rendered == ['Trying again.']
+
+    def test_worker_tool_rounds_end_at_the_wider_cap(self, monkeypatch,
+                                                     fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        s.script([lambda i=i: _assistant('', [('read_file',
+                                               {'path': f'{i}.py'}, 'r')])
+                  for i in range(100)])
+        [row] = s.run(fake_repo)
+        assert len(s.ran) == turn._MAX_TOOL_ROUNDS == 40
+        assert row['struggle']['protocol_violation'] == 1
+        assert s.rendered == [turn._CAPPED_TEXT.format(n=40)]
+
+    def test_worker_cap_keeps_the_last_text(self, monkeypatch, fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        texts = iter(['first', 'Looking at 3.py'] + [''] * 100)
+        s.script([lambda i=i: _assistant(next(texts),
+                                         [('read_file', {'path': f'{i}.py'},
+                                           'r')])
+                  for i in range(100)])
+        s.run(fake_repo)
+        assert s.rendered == ['Looking at 3.py']
+
+    def test_under_the_cap_nothing_changes(self, monkeypatch, fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        s.script([lambda i=i: _assistant('', [('read_file',
+                                               {'path': f'{i}.py'}, 'r')])
+                  for i in range(39)]
+                 + [lambda: _assistant('', [('final_answer',
+                                             {'text': 'done'}, 'f')])])
+        [row] = s.run(fake_repo)
+        assert s.rendered == ['done']
+        assert row['struggle']['protocol_violation'] == 0
+
+
+class TestTwoPlansInOneRound:
+    def test_second_plan_is_refused_unrun_first_verdict_kept(
+            self, monkeypatch, fake_repo):
+        first = {'outcome': 'answer', 'answer': 'From the first.'}
+        second = {'outcome': 'answer', 'answer': 'From the second.'}
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True)
+        s.script([lambda: _assistant('', [('plan', first, 'p1'),
+                                          ('plan', second, 'p2')])])
+        [row] = s.run(fake_repo)
+        assert s.handler_calls == [first]
+        assert s.skipped == ['plan']
+        assert s.rendered == ['From the first.']
+        assert row['tools_used'] == ['plan', 'plan']
+
+    def test_second_plan_refusal_does_not_hide_a_delegation(
+            self, monkeypatch, fake_repo):
+        first = {'outcome': 'delegate', 'tasks': [
+            {'goal': 'review auth', 'kind': 'review',
+             'complexity': 'hard'}]}
+
+        def handler(a):
+            session.turn_waiting = True
+            return plan.delegated_text(['agent1'], plan.parse(a)[0].tasks)
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True,
+                     handler=handler)
+        s.script([lambda: _assistant('', [
+            ('plan', first, 'p1'),
+            ('plan', {'outcome': 'answer', 'answer': 'x'}, 'p2')])])
+        [row] = s.run(fake_repo)
+        assert len(s.handler_calls) == 1 and row['tasks_spawned'] == 1
+        assert s.rendered == []
+
+
+class TestAnswerWithoutText:
+    """``answer`` is never rejected: an empty ``answer`` field takes the
+    round's own text; only when both are empty does the loop re-prompt
+    (once), then fall back with ``protocol_violation``."""
+
+    def test_empty_answer_takes_the_round_text(self, monkeypatch, fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True)
+        s.script([lambda: _assistant('Here is my reply.',
+                                     [('plan', {'outcome': 'answer'}, 'p')])])
+        [row] = s.run(fake_repo)
+        assert s.handler_calls == [{'outcome': 'answer'}]
+        assert s.rendered == ['Here is my reply.']
+        assert row['struggle']['protocol_violation'] == 0
+        assert session.messages[-1] == {'role': 'assistant',
+                                        'content': 'Here is my reply.'}
+
+    def test_both_empty_reprompts_once_then_falls_back(self, monkeypatch,
+                                                       fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True)
+        s.script([lambda: _assistant('', [('plan', {'outcome': 'answer'},
+                                           'p1')]),
+                  lambda: _assistant('', [('plan', {'outcome': 'answer',
+                                                    'answer': ' '}, 'p2')]),
+                  lambda: _assistant('', [('plan', {'outcome': 'answer'},
+                                           'p3')])])
+        [row] = s.run(fake_repo)
+        assert len(s.handler_calls) == 2               # never a third round
+        assert s.user_msgs == [plan.PLAN_REPROMPT_TEXT]
+        assert row['struggle']['protocol_violation'] == 1
+        assert s.rendered == ["(guru could not run the controller's plan:"
+                              " outcome answer without text.)"]
+
+    def test_reprompt_then_text_answers(self, monkeypatch, fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True)
+        s.script([lambda: _assistant('', [('plan', {'outcome': 'answer'},
+                                           'p1')]),
+                  lambda: _assistant('', [('plan', {'outcome': 'answer',
+                                                    'answer': 'Now.'},
+                                           'p2')])])
+        [row] = s.run(fake_repo)
+        assert s.rendered == ['Now.']
+        assert row['struggle']['protocol_violation'] == 0
+
+    def test_text_path_uses_the_prose_around_the_json(self, monkeypatch,
+                                                      fake_repo):
+        text = 'Glad to help.\n{"outcome": "answer", "answer": ""}'
+        s = Scripted(monkeypatch, [], adapter=Lenient(), controller=True)
+        s.script([lambda: _assistant(text)])
+        [row] = s.run(fake_repo)
+        assert s.rendered == ['Glad to help.']
+        assert row['struggle']['protocol_violation'] == 0
+        assert session.messages[-1]['content'] == 'Glad to help.'
+
+    def test_text_path_bare_empty_plan_reprompts(self, monkeypatch,
+                                                 fake_repo):
+        s = Scripted(monkeypatch, [], adapter=Lenient(), controller=True)
+        s.script([lambda: _assistant('{"outcome": "answer"}'),
+                  lambda: _assistant('Right: hello.')])
+        [row] = s.run(fake_repo)
+        assert s.user_msgs == [plan.PLAN_REPROMPT_TEXT]
+        assert s.rendered == ['Right: hello.']
+        assert row['struggle']['protocol_violation'] == 0
 
 
 class TestControllerTextPath:

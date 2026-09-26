@@ -3039,7 +3039,8 @@ class TestCliMatrix:
         models_dir.mkdir()
         (models_dir / 'sbp-litellm-aws-claude-4-5-haiku.json').write_text(
             json.dumps({'model': 'SBP Litellm|aws/claude-4-5-haiku',
-                        'calls': 12, 'ok': 11, 'schema_errors': 1}))
+                        'summary': {'tools': 12, 'ok': 11,
+                                    'schema_errors': 1}, 'tools': {}}))
         (models_dir / 'ollama-qwen3-8b.json').write_text(
             json.dumps({'model': 'Ollama|qwen3:8b', 'seconds': 3.0}))
         seen: list = []
@@ -3151,11 +3152,48 @@ class TestCliMatrix:
 
 class TestContractCell:
     @pytest.mark.parametrize('record, cell', [
-        (None, '-'), ({}, '-'), ({'calls': 12}, '-'), ({'ok': 3}, '-'),
-        ({'calls': 12, 'ok': 11}, '11/12'),
-        ({'calls': 12.0, 'ok': 11.0, 'schema_errors': 1}, '11/12'),
-        ({'calls': '12', 'ok': 11}, '-'), ({'calls': 12, 'ok': True}, '-'),
+        (None, '-'), ({}, '-'), ({'summary': {'tools': 12}}, '-'),
+        ({'summary': {'ok': 3}}, '-'),
+        ({'summary': {'tools': 12, 'ok': 11}}, '11/12'),
+        ({'summary': {'tools': 12.0, 'ok': 11.0, 'schema_errors': 1}},
+         '11/12'),
+        ({'summary': {'tools': '12', 'ok': 11}}, '-'),
+        ({'summary': {'tools': 12, 'ok': True}}, '-'),
+        ({'summary': [12, 11]}, '-'),
+        ({'calls': 12, 'ok': 11}, '-'),        # the old, top-level shape
     ])
-    def test_ok_over_calls_or_dash(self, record, cell) -> None:
+    def test_ok_over_tools_or_dash(self, record, cell) -> None:
         from guru.evals.__main__ import contract_cell
         assert contract_cell(record) == cell
+
+    def test_reads_the_committed_reports(self) -> None:
+        """The real shape ``bench/tool_contract.py`` writes: the cell
+        comes out of ``summary``, and the matrix finds the file by the
+        shared slug."""
+        from guru.evals.__main__ import contract_cell
+        models_dir = Path(__file__).resolve().parents[1] / 'evals' / 'models'
+        reports = sorted(models_dir.glob('*.json'))
+        assert reports
+        for path in reports:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            s = data['summary']
+            assert contract_cell(data) == f"{s['ok']}/{s['tools']}" != '-'
+            assert runs.load_contract(models_dir, data['model']) == data
+
+
+class TestBriefStorePerCase:
+    def test_sandbox_points_the_brief_store_next_to_the_copy(
+            self, tmp_path, monkeypatch) -> None:
+        from guru.repositories import briefs
+        copy = tmp_path / 'work' / 'cli-tool'
+        copy.mkdir(parents=True)
+        monkeypatch.setenv(briefs.BRIEFS_DIR_ENV, '/elsewhere')
+        repo = JsonlLedger(tmp_path / 'ledger')
+        with runner._sandbox(copy, config.MODE_AUTO, repo):
+            assert briefs.root() == tmp_path / 'work' / runner.BRIEFS_DIRNAME
+            assert briefs.root() != copy      # not inside the git copy
+        assert os.environ[briefs.BRIEFS_DIR_ENV] == '/elsewhere'
+        monkeypatch.delenv(briefs.BRIEFS_DIR_ENV)
+        with runner._sandbox(copy, config.MODE_AUTO, repo):
+            assert briefs.root().name == runner.BRIEFS_DIRNAME
+        assert briefs.BRIEFS_DIR_ENV not in os.environ

@@ -37,6 +37,29 @@ class TestSpecs:
         for name in toolpolicy.ALWAYS_ON_TOOLS:
             spec = tools.tool_spec(name)
             assert spec and spec['parameters'], name
+        assert {'final_answer', 'plan'} <= toolpolicy.ALWAYS_ON_TOOLS
+
+    def test_turn_contract_tools_validate_themselves(self) -> None:
+        args = {'outcome': 'delegate', 'tasks': [
+            {'goal': 'g', 'kind': 'review', 'complexity': 'hard'}]}
+        assert tools.validate_arguments('plan', args) == (args, '')
+        assert tools.validate_arguments('plan', {'outcome': 'later'}) == \
+            ({'outcome': 'later'}, '')                # plan.parse re-asks
+        misnamed = {'answer': 'Named wrong.'}
+        assert tools.validate_arguments('final_answer', misnamed) == \
+            (misnamed, '')                            # final_text copes
+        assert tools.tool_spec('plan')['parameters']
+        assert tools.tool_spec('final_answer')['parameters'] == {
+            'text': 'Your complete answer to the user'}
+
+    def test_turn_contract_tools_are_never_policy_gated(self) -> None:
+        toolpolicy.set_policy(toolpolicy.ToolsPolicy(enabled={'read_file'}))
+        try:
+            assert toolpolicy.is_enabled('plan')
+            assert toolpolicy.is_enabled('final_answer')
+            assert not toolpolicy.is_enabled('edit_file')
+        finally:
+            toolpolicy.set_policy(None)
         assert tools.tool_spec('spawn')['enum']['kind'] == list(routing.KINDS)
         assert tools.tool_spec('nope') == {}
 
@@ -183,9 +206,10 @@ class TestForKind:
         hidden = toolpolicy.for_kind('review')
         assert hidden == toolpolicy.WRITE_TOOLS
         assert {'write_file', 'edit_file', 'apply_patch', 'delete_file',
-                'sandbox_python', 'sandbox_submit',
+                'sandbox_run', 'sandbox_python', 'sandbox_submit',
                 'request_dependency'} == set(hidden)
-        assert 'sandbox_run' not in hidden and 'read_file' not in hidden
+        assert 'sandbox_diff' not in hidden and 'code_health' not in hidden
+        assert 'read_file' not in hidden
 
     def test_other_kinds_hide_nothing(self) -> None:
         for kind in routing.KINDS:

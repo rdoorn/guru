@@ -119,6 +119,37 @@ Project brief on guru itself (222 files, 134 Python, 123 modules outlined,
 through `procs.run`, stored JSON ~390 KB; the 3 s outlining budget is
 never reached. A slice for a two-file review task is ~1240 tokens.
 
+### Package A — delivered 2026-09-26 (branch feat/structural-A, merged 89eb935)
+
+Typed plan (`guru/domain/plan.py`): `parse`/`schema_errors`/
+`missing_concerns`/`evaluate` return a `Verdict`; the handler
+(`Orchestrator.do_plan`) re-asks once, then runs a coverage-gapped plan as
+given and never a malformed one; `answer` is never rejected. Turn contract
+(`guru/adapters/turn.py`): `forced_tool()` per round, `Adapter.forces`
+per adapter (Anthropic `tool_choice: any`/`tool`, LiteLLM `required`/
+named; Ollama cannot), one re-prompt then `protocol_violation`; a lone
+`final_answer`/`plan` round collapses into the assistant's text so every
+reader of the final answer sees it once. The controller's tool set is
+`plan` alone (`tools.CONTROLLER_TOOLS`); guru spawns the plan's tasks
+through `spawn_panel` with the plan's kind/complexity. Prose removed from
+`guru/config.py` (enforced in code instead): the `SYSTEM_PROMPT` sentences
+"Prefer outline ... over read_file on a whole file; then read_file only the
+line range you need" and "After editing a .py file, verify with
+check_syntax and run_tests before you report the change"; the
+`DELEGATION_HINT` sentences "Use check to poll and join to be resumed when
+a group finishes" and "Prefer outline and find_symbol over read_file on
+whole files, and verify edits with check_syntax/run_tests before reporting
+them"; the whole `CONTROLLER_HINT` decomposition text ("You are a
+CONTROLLER ... DECOMPOSE every piece of actual work", the
+`spawn(task, kind, complexity, role, skill)` label lists, "Every task that
+edits code must say: verify ...", the complexity-tier sentence, "use check
+to poll and join to be resumed ... then SYNTHESISE", "When a request names
+several concerns ... spawn one worker per named concern", "Reply directly,
+briefly, for greetings ..."), and the over-read guard (`OVER_READ_LIMIT`,
+the preamble stall path and its nudge). Tests at the review round:
+`tests/test_plan.py` 76, `tests/test_turn_contract.py` 43,
+`tests/test_orchestrator_plan.py` 15, `tests/test_adapter_forcing.py` 22.
+
 ## Package E — metrics, matrix, gate hygiene
 
 Files: guru/evals/*, guru/domain/ledger.py (metrics only),
@@ -147,10 +178,53 @@ evals/cases/*, Makefile, evals/README.md, tests.
    (review ladder only); the panel point stays shadow until labelled rows
    say otherwise (README sentence). Labels judge unchanged.
 
+### Package E — delivered 2026-09-26 (branch feat/structural-E, merged 89eb935)
+
+Per case `metrics` (`ledger.usage_metrics` over the case's `calls` and
+`tool_events` rows: tokens in/out, cache read, tool bytes shown, turns,
+calls) and `smells` (`case_smells`: whole-file reads, repeated calls,
+refused calls); the eval table has `tok`, `turns` and `smells` columns,
+the summary and TRAJECTORY row carry tokens per case, `--repeat` reports
+tokens mean ± spread, and the ledger report has the same numbers per
+task. `python -m guru.evals matrix --models 'A|m1,B|m2'` runs the
+selection once per model and prints passed, tokens, tool kB, seconds,
+cost and the `contract` column read from `evals/models/<slug>.json`
+(`summary.ok/summary.tools`; one slug implementation, `runs.model_slug`,
+shared with the bench). `planted-failure-digest` and
+`find-symbol-outline` no longer forbid `read_file`. `make eval-gate` =
+fast + sandbox cases + dogfood, `--repeat 3`. `panel = false` in the
+default routing block; `claude-tiers-panel.toml` is
+`claude-tiers-review.toml`. Tests at the review round:
+`tests/test_evals_runs.py` 55, `tests/test_evals_runner.py` 183,
+`tests/test_evals_checks.py` 37, `tests/test_evals_cases.py` 48,
+`tests/test_ledger_report.py` 62.
+
+### Review round — delegate loop (open item)
+
+Baseline runs 7730e6c1c39c and 689aecc6283a: the controller re-delegated
+seven times on the dogfood case because every follow-up worker starts on
+a fresh sandbox task copy (`verbs._task_key` keys copies by task id, and
+`Orchestrator.on_done` removes a task's copies through
+`verbs.cleanup_task` when the worker finishes), so the previous worker's
+edits were gone. Done in code: `plan.MAX_DELEGATE_ROUNDS = 3` per request
+(refusal text says to answer from the results) and the controller's
+contract in the `plan` tool description. Open: a task that carries
+`continue: "<agent title>"` and reuses that worker's sandbox copy. It is
+not a small change — the copy would have to survive `cleanup_task`
+(retention until the *request* ends, not the task), be re-keyed to the
+new task id (or the child given the previous task id, which is the ledger
+row's identity), and be released when the controller answers. Design it
+against `verbs._copies`/`_tally` keying and the on_done cleanup before
+touching either.
+
 ## Measurement after the merge
 
 Suite as before (fast ×3, real + dogfood, sandbox, review-multi-file ×3)
 with tokens per task as the headline, compared with suite 3 of
 `evals/triage/2026-09-25-loop-1.md`; tool contract numbers for three
 models; independent review of the diff; triage note
-`evals/triage/2026-09-26-structural.md`. Budget ≈ $10.
+`evals/triage/2026-09-26-structural.md`. Budget ≈ $10. Note when reading
+cache numbers: every worker's system prompt now differs by its brief slice
+(and the controller's by the project map), so the system-block cache is
+written once per worker instead of shared across them — expect a cache
+write per worker and read the tokens-per-task headline with that in mind.

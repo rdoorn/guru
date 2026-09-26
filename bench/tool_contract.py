@@ -26,7 +26,6 @@ import argparse
 import difflib
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -46,6 +45,7 @@ from guru.adapters.anthropic import AnthropicAdapter            # noqa: E402
 from guru.adapters.litellm import LiteLLMAdapter                # noqa: E402
 from guru.adapters.ollama import OllamaAdapter                  # noqa: E402
 from guru.domain import files, pricing, procs, tools            # noqa: E402
+from guru.evals import runs                                     # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parents[1] / 'evals/fixtures/cli-tool'
 OUT_DIR = Path('evals/models')
@@ -379,8 +379,8 @@ def resolve(spec: str, adapters: list) -> tuple:
                      f" (have: {', '.join(a.name for a in adapters)})")
 
 
-def slug(spec: str) -> str:
-    return re.sub(r'[^a-z0-9]+', '-', spec.lower()).strip('-')
+# The result file stem: one implementation, shared with the matrix reader.
+slug = runs.model_slug
 
 
 # --- running -----------------------------------------------------------------
@@ -416,6 +416,11 @@ def _quiet() -> None:
         ui._base_console.quiet = True
     except AttributeError:
         pass
+
+
+# The turn contract's own calls: always-on but not benchmarked here — the
+# turn loop forces them and tests/test_turn_contract.py pins them.
+LOOP_TOOLS = frozenset(('plan', 'final_answer'))
 
 
 def _install_fake_handlers() -> None:
@@ -507,8 +512,22 @@ def run_task(task: Task, driver: Driver, copy: Path) -> ToolResult:
             out.note = 'call ran but did not do the job'
         break
     out.seconds = round(time.monotonic() - started, 2)
-    out.result_head = result[:160]
+    out.result_head = _strip_copy(result, copy)[:160]
     return out
+
+
+# What replaces the fixture copy's absolute path in ``result_head``: the
+# temp path differs per run and per task and says nothing about the tool.
+COPY_TOKEN = '<copy>'
+
+
+def _strip_copy(text: str, copy: Path) -> str:
+    """``text`` with every spelling of the copy's path (as given and
+    resolved) replaced by ``COPY_TOKEN``."""
+    for spelling in sorted({str(copy), str(copy.resolve())}, key=len,
+                           reverse=True):
+        text = text.replace(spelling, COPY_TOKEN)
+    return text
 
 
 def run_all(spec: str, adapters: list, *, web: bool = False,

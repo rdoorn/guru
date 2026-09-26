@@ -100,6 +100,13 @@ FORCE_PLAN = 'plan'      # a controller round: the ``plan`` tool
 FORCE_ANY = 'any'        # a worker round: any tool (or ``final_answer``)
 
 
+def is_tool_choice_error(exc: Exception) -> bool:
+    """Whether a provider error is about the ``tool_choice`` we sent (the
+    forced round is then retried without it). Shared by the Anthropic and
+    LiteLLM adapters."""
+    return 'tool_choice' in str(exc).lower()
+
+
 @dataclass
 class ModelInfo:
     """A selectable model, grouped in /models under its adapter."""
