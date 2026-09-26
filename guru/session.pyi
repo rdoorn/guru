@@ -35,6 +35,7 @@ class SessionState:
     task_id: str
     turn_id: str
     task_text: str
+    task_kind: str
     call_count: int
     cost_usd: float
     cost_known: bool
@@ -75,6 +76,7 @@ agent_id: str
 task_id: str
 turn_id: str
 task_text: str
+task_kind: str
 call_count: int
 cost_usd: float
 cost_known: bool

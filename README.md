@@ -51,6 +51,7 @@ Requires the Ollama app running in the menu bar (for local models).
 | `/good [note]`, `/bad [note]` | Label the last completed turn (and the sub-agent tasks it spawned) in the ledger's `labels` stream |
 | `/ledger` | Print this run's spend: calls, tokens and cost per model, tasks per model, the three most expensive tasks |
 | `/tools` | Print the last turn's tool calls from the audit stream: tool, args head, seconds, bytes shown/produced, denials |
+| `/brief`, `/brief refresh`, `/brief slice <text>` | Show the project brief for the checked-out HEAD (built once, stored under `~/.guru/briefs/`), rebuild it, or preview the slice a worker gets for a task (see **Project brief**) |
 | `/routing`, `/routing off`, `/routing on` | Show the active routing configuration (mode, ladders, judges) or flip `mode` in `settings.toml` and reload it |
 | `/sandbox [status \| provision [--force] \| gate \| deps …]` | Inspect the project's sandbox, build its image, review the pending gate, manage dependency requests (see **Sandbox**) |
 | `exit` / `quit` | Exit |
@@ -576,7 +577,13 @@ Registry tools:
 
 - **Filesystem** — `list_dir`, `list_tree`, `read_file`, `search_code`
   (grep), `write_file`, `edit_file`, `delete_file`. All are restricted to
-  allowed directories and gated by the access mode.
+  allowed directories and gated by the access mode. `read_file` is
+  **structural** on long files: a file up to 200 lines
+  (`files.READ_OUTLINE_LINES`) reads whole; a longer one without `lines=`
+  returns its def/class outline with line ranges, the first 20 lines and
+  how to fetch a span -- never the text -- and one `lines='a-b'` call
+  returns at most 200 lines (`files.READ_RANGE_SPAN`). A whole-file read of
+  a long file is impossible, not discouraged.
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
 - **Code** — the eight audited verbs below.
 - **Sandbox** — `sandbox_run`, `sandbox_python`, `sandbox_diff`,
@@ -585,6 +592,62 @@ Registry tools:
 
 `search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
 `check`, `join` are always available and not part of the registry.
+
+**Strict arguments.** Every call -- registry or always-on tool -- is
+validated against the tool's spec before anything runs
+(`tools.validate_arguments`): an object of named parameters, no unknown
+parameter, every required one present, each value of its declared type
+(`str` by default; `int`, `bool` and `list` are coerced from the strings a
+provider sends, so `depth="3"` and `argv='["pytest", "-q"]'` are fine but
+`argv="pytest -q"` is not) and within its enum (`find_symbol kind`,
+`spawn kind`/`complexity`, `lint detail`). A rejected call returns ONE line
+-- the problem, the expected shape and an example, e.g.
+`Invalid arguments: read_file is missing required 'path'. Expected
+read_file(path: str, lines?: str), e.g. read_file(path='src/app.py',
+lines='40-80')` -- counts as a tool error and is audited with `ok = false`.
+
+**Review tasks are read-only.** `toolpolicy.for_kind(kind)` names the tools
+a task of that kind neither sees nor may call; for `review` that is every
+write tool (`write_file`, `edit_file`, `apply_patch`, `delete_file`,
+`sandbox_python`, `sandbox_submit`, `request_dependency`). The orchestrator
+passes the kind to `tools.initial_tools(..., kind=)` and sets
+`session.task_kind`; a hidden tool named anyway answers
+`Refused: <tool> is not available to a review task (read-only) ...` and is
+recorded with `denied = "kind"`.
+
+### Project brief
+
+`guru.domain.brief` builds, once per checked-out HEAD, what a worker needs
+before its first tool call: the file map (directories with counts,
+top-level modules), a capped def/class outline per Python module, a symbol
+index (name -> `path:line`), how to run the tests (`make test` when the
+Makefile has the target, else pytest/unittest as configured) and the
+conventions declared in `pyproject.toml` `[tool.*]` sections (plus
+`[flake8]` from `.flake8`/`setup.cfg`). The walk stops outlining after 3 s
+(`BUILD_BUDGET_S`) and keeps counting; on guru itself a build takes about
+0.2-0.6 s. Briefs are stored as JSON under
+`~/.guru/briefs/<project-key>/<head_sha>.json` (`guru.repositories.briefs`,
+five per project kept) and rebuilt when HEAD changes or on `/brief refresh`.
+
+`brief.slice(brief, task_text, max_tokens=1500)` is what a worker gets in
+its task text: the map, the test command, then the outline of every module
+the task names (by path, basename or stem) and the location of every
+code-like symbol it names, cut at a 4-chars-per-token estimate. The
+controller gets `brief.render_map(brief)` to plan with.
+
+### Tool contract benchmark
+
+`bench/tool_contract.py --model 'Adapter|model' [--out evals/models]
+[--web] [--only a,b]` qualifies a model by measurement: one canned
+mini-task per tool on a fresh copy of the `cli-tool` fixture, the call
+forced where the provider allows it (Anthropic and OpenAI-style
+`tool_choice`; Ollama is asked), up to three attempts with the corrective
+line fed back. Per tool it records whether a call came, whether it was the
+right tool, schema errors, retries, whether the executed call did the job,
+tokens, USD and seconds; the result lands in `evals/models/<slug>.json`
+(the eval matrix reads it for its `contract` column) and prints as a table.
+Web tools need `--web`; the sandbox verbs are listed as skipped until the
+fixture has an image.
 
 ### Audited tools
 

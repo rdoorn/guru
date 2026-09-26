@@ -78,6 +78,9 @@ class SessionState:
         # The sub-agent task text (empty for the main agent): the sandbox
         # quality gate hands it to the reviewer next to the user's request.
         self.task_text: str = ''
+        # The sub-agent task's kind (routing.KINDS; empty for the main
+        # agent): toolpolicy.for_kind hides/refuses tools per kind.
+        self.task_kind: str = ''
         # Ledger accumulators (guru.domain.ledger.record_call / bump): calls
         # made, USD spent (cost_known drops to False once any call could not
         # be priced; unpriced_calls counts them so a turn can tell whether

@@ -4,6 +4,7 @@ Tool execution is provider-agnostic. Adapters call ``execute_tool`` when a
 model requests a tool; this module handles the domain allow-list gate,
 ``search_tools`` activation, and running the tool, returning a result string.
 """
+import json
 import time
 
 import requests
@@ -60,15 +61,25 @@ def _sandbox_available() -> bool:
         return False
 
 
-def _advertised() -> list:
-    """The registry tool names the project policy lets run, in registry
-    order. Discovery, pre-activation and the specs sent to the model all
-    draw from this list, so a disabled tool is never described to the
-    model (and ``execute_tool`` refuses it anyway if called by name). The
-    sandbox verbs are listed only while the project has a sandbox image,
-    and then the direct write tools are not (``DIRECT_WRITE_TOOLS``)."""
+def _task_kind() -> str:
+    """The bound session's task kind (``session.task_kind``; empty for the
+    main agent or a state that predates the field)."""
+    return str(getattr(session.current(), 'task_kind', '') or '')
+
+
+def _advertised(kind: object = None) -> list:
+    """The registry tool names the project policy lets run for a task of
+    ``kind`` (default: the bound session's), in registry order. Discovery,
+    pre-activation and the specs sent to the model all draw from this
+    list, so a disabled tool is never described to the model (and
+    ``execute_tool`` refuses it anyway if called by name). The sandbox
+    verbs are listed only while the project has a sandbox image, and then
+    the direct write tools are not (``DIRECT_WRITE_TOOLS``); the tools
+    ``toolpolicy.for_kind`` hides for the kind are left out too."""
     sandbox = _sandbox_available()
     hidden = DIRECT_WRITE_TOOLS if sandbox else frozenset(SANDBOX_TOOLS)
+    hidden = hidden | toolpolicy.for_kind(
+        _task_kind() if kind is None else kind)
     return [name for name in TOOL_REGISTRY if is_enabled(name)
             and name not in hidden]
 
@@ -136,6 +147,11 @@ _SPAWN_SPEC = {
         'skill': 'Optional method name from the catalog (or empty)',
     },
     'optional': ['kind', 'complexity', 'role', 'skill'],
+    'enum': {'kind': list(routing.KINDS),
+             'complexity': list(routing.COMPLEXITY)},
+    'example': {'task': 'Review guru/domain/files.py for path traversal',
+                'kind': 'review', 'complexity': 'standard',
+                'role': 'security-engineer', 'skill': 'code-review'},
 }
 
 
@@ -192,6 +208,7 @@ _CHECK_SPEC = {
     'parameters': {
         'target': 'A sub-agent name, or "all" for every one',
     },
+    'example': {'target': 'all'},
 }
 
 _JOIN_SPEC = {
@@ -206,6 +223,7 @@ _JOIN_SPEC = {
     'parameters': {
         'targets': 'Sub-agent names, space- or comma-separated',
     },
+    'example': {'targets': 'agent2 agent3'},
 }
 
 
@@ -231,6 +249,7 @@ _USE_SKILL_SPEC = {
         ' (e.g. code-review, systematic-debugging). Stays active until'
         ' switched. Use the catalog names shown in your context.'),
     'parameters': {'name': 'A skill name from the catalog'},
+    'example': {'name': 'code-review'},
 }
 
 
@@ -377,9 +396,8 @@ def sandbox_run(argv: str, detail: str = '') -> str:
     of the project (no network; nothing touches the real tree). argv must be
     a JSON list of strings, e.g. ["pytest", "-q"], whose first item is one
     of python, python3, pytest, uv, ruff, mypy, flake8, make (a plain
-    string is only split on whitespace: no quoting, no shell). Returns the
-    exit code and the first lines of output; detail=true returns the last
-    4 KB.
+    command string is refused: no quoting, no shell). Returns the exit
+    code and the first lines of output; detail=true returns the last 4 KB.
     """
     from guru.sandbox import verbs
     return verbs.sandbox_run(argv, detail)
@@ -457,6 +475,7 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "query": "Search terms to look up on the web",
         },
+        "example": {"query": "python 3.14 release date"},
         "retain": "summarize",
     },
     "web_fetch": {
@@ -474,6 +493,7 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "url": "Full URL to fetch (e.g. https://example.com/page)",
         },
+        "example": {"url": "https://example.com/page"},
         "retain": "summarize",
     },
     "fetch_github_releases": {
@@ -494,6 +514,7 @@ TOOL_REGISTRY: dict = {
                 " (e.g. 'kubernetes/kubernetes')"
             ),
         },
+        "example": {"repo": "kubernetes/kubernetes"},
     },
     "list_dir": {
         "fn": files.list_dir,
@@ -510,6 +531,7 @@ TOOL_REGISTRY: dict = {
             "path": "Directory to list (default: current directory)",
         },
         "optional": ["path"],
+        "example": {"path": "src"},
     },
     "list_tree": {
         "fn": files.list_tree,
@@ -528,14 +550,19 @@ TOOL_REGISTRY: dict = {
             "depth": "Max levels to recurse (default: 3)",
         },
         "optional": ["path", "depth"],
+        "types": {"depth": "int"},
+        "example": {"path": ".", "depth": "2"},
     },
     "read_file": {
         "fn": files.read_file,
         "description": (
-            "Read the text content of a file. For large files, pass 'lines'"
-            " as a 1-based inclusive range like '10-20' to read just that"
-            " span. Output is line-numbered. Restricted to allowed"
-            " directories."
+            "Read the text content of a file. A file up to"
+            f" {files.READ_OUTLINE_LINES} lines is returned whole; a longer"
+            " one returns its structural view (def/class outline with line"
+            " ranges, first lines) unless you pass 'lines' as a 1-based"
+            f" inclusive range like '10-20' (at most {files.READ_RANGE_SPAN}"
+            " lines per call). Output is line-numbered and carries the sha"
+            " edit_file needs. Restricted to allowed directories."
         ),
         "tags": [
             "read", "file", "open", "cat", "view", "content", "source",
@@ -546,6 +573,7 @@ TOOL_REGISTRY: dict = {
             "lines": "Optional line range 'start-end' (e.g. '10-20')",
         },
         "optional": ["lines"],
+        "example": {"path": "src/app.py", "lines": "40-80"},
         "retain": "outline",
     },
     "search_code": {
@@ -572,6 +600,8 @@ TOOL_REGISTRY: dict = {
                 " comma-separated (e.g. '*.py,*.md')"),
         },
         "optional": ["path", "glob"],
+        "example": {"pattern": "def count_words", "path": ".",
+                    "glob": "*.py"},
     },
     "write_file": {
         "fn": files.write_file,
@@ -589,6 +619,7 @@ TOOL_REGISTRY: dict = {
             "path": "File to write",
             "content": "Full text content to write to the file",
         },
+        "example": {"path": "notes.txt", "content": "hello\n"},
     },
     "edit_file": {
         "fn": files.edit_file,
@@ -610,6 +641,8 @@ TOOL_REGISTRY: dict = {
             "new": "Replacement text",
             "sha": "sha the last read/write/edit of this file returned",
         },
+        "example": {"path": "app.py", "old": "return 1", "new": "return 2",
+                    "sha": "c70f427ad894"},
     },
     "delete_file": {
         "fn": files.delete_file,
@@ -625,6 +658,7 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "path": "File to delete",
         },
+        "example": {"path": "scratch.txt"},
     },
     # --- audited coding verbs (design plan chunk B) --------------------------
     "outline": {
@@ -645,6 +679,7 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "path": "Source file to outline",
         },
+        "example": {"path": "src/app.py"},
     },
     "find_symbol": {
         "fn": code.find_symbol,
@@ -666,6 +701,8 @@ TOOL_REGISTRY: dict = {
             "kind": "Optional filter: 'def' or 'ref' (default both)",
         },
         "optional": ["kind"],
+        "enum": {"kind": ["", "def", "ref"]},
+        "example": {"name": "count_words", "kind": "def"},
     },
     "run_tests": {
         "fn": quality.run_tests,
@@ -690,6 +727,9 @@ TOOL_REGISTRY: dict = {
             "detail": "A failing test id to expand into its full block",
         },
         "optional": ["target", "k", "maxfail", "detail"],
+        "types": {"maxfail": "int"},
+        "example": {"target": "tests/test_app.py", "k": "words",
+                    "maxfail": "1"},
         "retain": "keep",
     },
     "check_syntax": {
@@ -707,6 +747,7 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "path": "Python file to compile",
         },
+        "example": {"path": "src/app.py"},
         "retain": "keep",
     },
     "lint": {
@@ -726,6 +767,8 @@ TOOL_REGISTRY: dict = {
             "detail": "Optional: 'flake8' or 'mypy' to expand that output",
         },
         "optional": ["path", "detail"],
+        "enum": {"detail": ["", "flake8", "mypy"]},
+        "example": {"path": "src/app.py", "detail": "flake8"},
         "retain": "keep",
     },
     "git_status": {
@@ -740,6 +783,7 @@ TOOL_REGISTRY: dict = {
             "working tree", "dirty", "repository", "vcs", "local",
         ],
         "parameters": {},
+        "example": {},
         "retain": "keep",
     },
     "git_diff": {
@@ -759,6 +803,8 @@ TOOL_REGISTRY: dict = {
             "detail": "true to return the unified diff instead of the stat",
         },
         "optional": ["path", "detail"],
+        "types": {"detail": "bool"},
+        "example": {"path": "src/app.py", "detail": "true"},
         "retain": "keep",
     },
     "apply_patch": {
@@ -782,6 +828,8 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "diff": "The unified diff text to apply",
         },
+        "example": {"diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n"
+                            "-x = 1\n+x = 2\n"},
     },
     # --- sandbox verbs (design plan sandbox §1; chunk S3) --------------------
     "sandbox_run": {
@@ -791,8 +839,8 @@ TOOL_REGISTRY: dict = {
             " inside the project's sandbox container on this task's copy of"
             " the project: no network, nothing touches the real tree. argv"
             " must be a JSON list of strings, e.g. [\"pytest\", \"-q\"] —"
-            " not a plain command string (a string is only split on"
-            " whitespace: no quoting, no shell). Returns the exit code and"
+            " a plain command string is refused (no quoting, no shell)."
+            " Returns the exit code and"
             " the first 30 lines of stdout/stderr; detail=true returns the"
             " last 4 KB instead. Use sandbox_submit to bring changes back."
         ),
@@ -802,11 +850,13 @@ TOOL_REGISTRY: dict = {
         ],
         "parameters": {
             "argv": ("The command as a JSON list of strings, e.g."
-                     " [\"python\", \"-c\", \"print(1)\"]; a plain string is"
-                     " split on whitespace only"),
+                     " [\"python\", \"-c\", \"print(1)\"]; a plain command"
+                     " string is refused"),
             "detail": "true to return the last 4 KB of output",
         },
         "optional": ["detail"],
+        "types": {"argv": "list", "detail": "bool"},
+        "example": {"argv": ["pytest", "-q"], "detail": "false"},
         "retain": "keep",
     },
     "sandbox_python": {
@@ -827,6 +877,8 @@ TOOL_REGISTRY: dict = {
             "detail": "true to return the last 4 KB of output",
         },
         "optional": ["detail"],
+        "types": {"detail": "bool"},
+        "example": {"code": "print(open('app.py').read()[:80])"},
         "retain": "keep",
     },
     "sandbox_diff": {
@@ -840,6 +892,7 @@ TOOL_REGISTRY: dict = {
             "review", "pending", "local",
         ],
         "parameters": {},
+        "example": {},
         "retain": "keep",
     },
     "code_health": {
@@ -861,6 +914,7 @@ TOOL_REGISTRY: dict = {
             "path": "Optional project-relative Python file to report on",
         },
         "optional": ["path"],
+        "example": {"path": "src/app.py"},
         "retain": "keep",
     },
     "sandbox_submit": {
@@ -881,6 +935,8 @@ TOOL_REGISTRY: dict = {
         "parameters": {
             "intent": "One or two sentences: what the change does and why",
         },
+        "example": {"intent": "Split on any whitespace so newline-separated"
+                              " words are counted (fixes the failing test)"},
     },
     "request_dependency": {
         "fn": request_dependency,
@@ -900,8 +956,14 @@ TOOL_REGISTRY: dict = {
             "constraint": "Optional version constraint (e.g. '>=1.16')",
         },
         "optional": ["constraint"],
+        "example": {"name": "six", "constraint": ">=1.16"},
     },
 }
+
+# The always-on tools' specs by name (they are not registry entries).
+_BUILTIN_SPECS: dict = {
+    'search_tools': None, 'use_skill': None, 'spawn': None, 'check': None,
+    'join': None}
 
 
 def _match_tools(query: str) -> list:
@@ -992,7 +1054,148 @@ _SEARCH_TOOLS_SPEC = {
     'parameters': {
         'query': 'A short phrase describing the action you want to perform',
     },
+    'example': {'query': 'fetch webpage url'},
 }
+
+
+# --- argument validation (structural round, Package C item 2) ---------------
+
+INVALID_ARGS_PREFIX = 'Invalid arguments:'
+_TYPE_NAMES = ('str', 'int', 'bool', 'list')
+_TRUE_WORDS = ('true', '1', 'yes', 'on')
+_FALSE_WORDS = ('false', '0', 'no', 'off', '')
+
+
+def tool_spec(name: str) -> dict:
+    """The provider-neutral spec of any callable tool -- a registry entry
+    or an always-on tool -- as ``{name, description, parameters, optional,
+    types, enum, example}``; ``{}`` for an unknown name."""
+    if name in TOOL_REGISTRY:
+        info = TOOL_REGISTRY[name]
+    elif name in _BUILTIN_SPECS and _BUILTIN_SPECS[name] is not None:
+        info = _BUILTIN_SPECS[name]
+    else:
+        return {}
+    return {'name': name, 'description': info.get('description', ''),
+            'parameters': dict(info.get('parameters', {})),
+            'optional': list(info.get('optional', [])),
+            'types': dict(info.get('types', {})),
+            'enum': dict(info.get('enum', {})),
+            'example': dict(info.get('example', {}))}
+
+
+def signature_text(spec: dict) -> str:
+    """``name(path: str, lines?: str)`` for a spec (``?`` = optional)."""
+    optional = set(spec.get('optional', []))
+    types = spec.get('types', {})
+    parts = [f"{p}{'?' if p in optional else ''}: {types.get(p, 'str')}"
+             for p in spec.get('parameters', {})]
+    return f"{spec['name']}({', '.join(parts)})"
+
+
+def example_text(spec: dict) -> str:
+    """``name(path='src/app.py', lines='40-80')`` from the spec's example
+    (or from placeholders when none is given)."""
+    example = spec.get('example')
+    if example is None:
+        example = {p: f'<{p}>' for p in spec.get('parameters', {})
+                   if p not in spec.get('optional', [])}
+    parts = [f"{k}={json.dumps(v) if isinstance(v, list) else repr(v)}"
+             for k, v in example.items()]
+    return f"{spec['name']}({', '.join(parts)})"
+
+
+def _coerce(name: str, value: object, kind: str, choices: list) -> tuple:
+    """``(coerced, problem)`` for one argument against its declared type
+    (``str`` unless the spec says ``int``/``bool``/``list``) and enum."""
+    if kind == 'int':
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            return None, f"'{name}' must be an integer, got {value!r}"
+        try:
+            value = int(str(value).strip())
+        except ValueError:
+            return None, f"'{name}' must be an integer, got {value!r}"
+    elif kind == 'bool':
+        if isinstance(value, bool):
+            pass
+        elif isinstance(value, str) and value.strip().lower() in _TRUE_WORDS:
+            value = True
+        elif (isinstance(value, str)
+              and value.strip().lower() in _FALSE_WORDS):
+            value = False
+        else:
+            return None, f"'{name}' must be true or false, got {value!r}"
+    elif kind == 'list':
+        if isinstance(value, str) and value.strip().startswith('['):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return None, f"'{name}' must be a JSON list, got {value!r}"
+        if isinstance(value, tuple):
+            value = list(value)
+        if not isinstance(value, list) or not all(
+                isinstance(v, (str, int, float)) and not isinstance(v, bool)
+                for v in value):
+            return None, (f"'{name}' must be a list of strings (not a"
+                          f" command string), got {value!r}")
+        value = [str(v) for v in value]
+    else:
+        if isinstance(value, bool) or not isinstance(
+                value, (str, int, float)):
+            return None, f"'{name}' must be a string, got {value!r}"
+        value = str(value)
+    if choices:
+        lowered = {str(c).lower(): c for c in choices}
+        key = str(value).strip().lower()
+        if key not in lowered:
+            shown = ', '.join(repr(c) for c in choices if c != '')
+            return None, f"'{name}' must be one of {shown}, got {value!r}"
+        value = lowered[key]
+    return value, ''
+
+
+def validate_arguments(name: str, arguments: object) -> tuple:
+    """Check ``arguments`` against ``name``'s spec: an object, no unknown
+    parameter, every required one present, each value of its declared
+    type (``str`` by default; ``int``, ``bool`` and ``list`` are coerced
+    from the strings a provider sends) and within its enum.
+
+    Returns ``(clean_arguments, '')`` -- ``None`` values of optional
+    parameters dropped, typed values coerced -- or ``(arguments, error)``
+    where ``error`` is ONE line: the problem, the expected shape and an
+    example. An unknown tool validates as-is (``execute_tool`` names it).
+    """
+    spec = tool_spec(name)
+    if not spec:
+        return arguments, ''
+    tail = f" Expected {signature_text(spec)}, e.g. {example_text(spec)}"
+    if not isinstance(arguments, dict):
+        return arguments, (f"{INVALID_ARGS_PREFIX} {name} takes an object"
+                           f" of named parameters, got"
+                           f" {type(arguments).__name__}.{tail}")
+    params = spec['parameters']
+    optional = set(spec['optional'])
+    clean: dict = {}
+    for key, value in arguments.items():
+        if key not in params:
+            accepted = ', '.join(params) or 'none'
+            return arguments, (f"{INVALID_ARGS_PREFIX} {name} has no"
+                               f" parameter '{key}' (accepted:"
+                               f" {accepted}).{tail}")
+        if value is None and key in optional:
+            continue
+        coerced, problem = _coerce(
+            key, value, spec['types'].get(key, 'str'),
+            list(spec['enum'].get(key, [])))
+        if problem:
+            return arguments, f"{INVALID_ARGS_PREFIX} {problem}.{tail}"
+        clean[key] = coerced
+    missing = [p for p in params if p not in optional and p not in clean]
+    if missing:
+        what = ', '.join(repr(m) for m in missing)
+        return arguments, (f"{INVALID_ARGS_PREFIX} {name} is missing"
+                           f" required {what}.{tail}")
+    return clean, ''
 
 
 def retain_policy(name: str) -> str:
@@ -1017,21 +1220,23 @@ def active_specs() -> list:
 
 
 def specs_for(active_tool_names, can_spawn: bool,
-              controller: bool = False) -> list:
+              controller: bool = False, kind: object = None) -> list:
     """Provider-neutral specs for a given tool set (no session routing).
 
     Lets callers (e.g. the context breakdown) price a specific agent's tool
     schemas without binding that agent's session context. A controller gets
     only spawn/check/join/use_skill, whatever ``active_tool_names`` holds.
     A tool the project policy disables is left out even if it is in
-    ``active_tool_names`` (e.g. activated before the policy changed).
+    ``active_tool_names`` (e.g. activated before the policy changed), as
+    is one ``toolpolicy.for_kind`` hides for ``kind`` (default: the bound
+    session's task kind).
     """
     if controller:
         return [_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC, _USE_SKILL_SPEC]
     specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC]
     if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
-    for name in _advertised():
+    for name in _advertised(kind):
         if name in active_tool_names:
             info = TOOL_REGISTRY[name]
             specs.append({
@@ -1043,12 +1248,13 @@ def specs_for(active_tool_names, can_spawn: bool,
     return specs
 
 
-def _core_tool_fns() -> list:
+def _core_tool_fns(kind: object = None) -> list:
     """(name, fn) for the pre-activated toolset — the tools an agent can call
     directly without going through search_tools first. Normally the
     config-driven core set; when [tools] flat = true it is the ENTIRE registry,
     so a capable model gets the whole toolset up front (no search_tools
-    hop). Either way a tool the project policy disables is skipped."""
+    hop). Either way a tool the project policy disables, or the task
+    ``kind`` hides, is skipped."""
     if config.FLAT_TOOLS:
         names = list(TOOL_REGISTRY)
     else:
@@ -1056,23 +1262,26 @@ def _core_tool_fns() -> list:
         # sandbox image (a worker must find them without a search hop).
         names = list(config.PREACTIVATE_TOOLS) + [
             n for n in SANDBOX_TOOLS if n not in config.PREACTIVATE_TOOLS]
-    advertised = set(_advertised())
+    advertised = set(_advertised(kind))
     return [(name, TOOL_REGISTRY[name]['fn']) for name in names
             if name in advertised]
 
 
-def initial_tools(can_spawn: bool, controller: bool = False) -> tuple:
+def initial_tools(can_spawn: bool, controller: bool = False,
+                  kind: object = None) -> tuple:
     """The active tool list + activated-name set an agent starts a turn with:
     the always-on tools (search_tools, use_skill, and spawn/check/join when
-    delegation-capable) plus the pre-activated core toolset. A controller
-    gets exactly spawn/check/join/use_skill and no core tools."""
+    delegation-capable) plus the pre-activated core toolset, minus what
+    ``toolpolicy.for_kind(kind)`` hides (the orchestrator passes the task's
+    kind when it configures a child; default: the bound session's). A
+    controller gets exactly spawn/check/join/use_skill and no core tools."""
     if controller:
         return [spawn, check, join, use_skill], set()
     base = [search_tools, use_skill]
     if can_spawn:
         base.extend([spawn, check, join])
     names = set()
-    for name, fn in _core_tool_fns():
+    for name, fn in _core_tool_fns(kind):
         base.append(fn)
         names.add(name)
     return base, names
@@ -1143,7 +1352,8 @@ def _mode_denial(result: str) -> bool:
 def _record_event(name: str, arguments: dict, raw: str, shown: str,
                   seconds: float, denied: str) -> None:
     """One ``tool_events`` audit row for a finished execute_tool call."""
-    ok = not denied and not raw.startswith(('Tool error:', 'Unknown tool:'))
+    ok = not denied and not raw.startswith(
+        ('Tool error:', 'Unknown tool:', INVALID_ARGS_PREFIX))
     ledger.record_tool_event(
         name, arguments, seconds=seconds, ok=ok, produced_bytes=len(raw),
         shown_bytes=len(shown), files_touched=_files_touched(name, arguments),
@@ -1167,10 +1377,13 @@ def _files_touched(name: str, arguments: dict) -> list:
 def execute_tool(name: str, arguments: dict) -> str:
     """Run a tool the model requested and return its result text.
 
-    Handles search_tools activation, the project tool policy, and
-    unknown/error cases; the domain and directory allow-list gates are
-    applied inside the individual tools. Every call — including refused
-    and unknown ones — writes one ``tool_events`` ledger row.
+    Handles search_tools activation, the project tool policy, the
+    per-task-kind policy (``toolpolicy.for_kind``), argument validation
+    against the tool's spec (``validate_arguments``: one corrective line,
+    nothing runs) and unknown/error cases; the domain and directory
+    allow-list gates are applied inside the individual tools. Every call —
+    including refused, invalid and unknown ones — writes one
+    ``tool_events`` ledger row.
     """
     # File-write tools render their own '⏺ Verb(file)' diff block, so the raw
     # note (which would dump the whole content/old/new) is shown as just the
@@ -1188,6 +1401,7 @@ def execute_tool(name: str, arguments: dict) -> str:
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
     denied = ''
     started = time.monotonic()
+    arguments, schema_error = validate_arguments(name, arguments)
     if session.controller and name not in CONTROLLER_TOOLS:
         # A controller coordinates only; CONTROLLER_HINT promises it has no
         # other tools, so keep that true (the attempt is still measured by
@@ -1200,6 +1414,11 @@ def execute_tool(name: str, arguments: dict) -> str:
     elif name in DIRECT_WRITE_TOOLS and _sandbox_available():
         result = SANDBOX_WRITE_REFUSAL
         denied = 'policy'
+    elif name in toolpolicy.for_kind(_task_kind()):
+        result = toolpolicy.kind_refusal(name, _task_kind())
+        denied = 'kind'
+    elif schema_error:
+        result = schema_error
     elif name == "search_tools":
         result = search_tools(**arguments)
         for tn in _top_matches(arguments.get("query", "")):
@@ -1224,9 +1443,10 @@ def execute_tool(name: str, arguments: dict) -> str:
         denied = 'mode'
     raw = result
     result = _redact_for_remote(name, result)
-    # Struggle counters: a tool that raised, or an edit_file refused because
-    # the model passed a stale sha (message text owned by files.edit_file).
-    if result.startswith('Tool error:'):
+    # Struggle counters: a tool that raised or was called with arguments
+    # off its schema, or an edit_file refused because the model passed a
+    # stale sha (message text owned by files.edit_file).
+    if result.startswith(('Tool error:', INVALID_ARGS_PREFIX)):
         ledger.bump('tool_errors')
     elif name == 'edit_file' and result.startswith('sha mismatch:'):
         ledger.bump('sha_mismatches')
@@ -1234,3 +1454,8 @@ def execute_tool(name: str, arguments: dict) -> str:
     # Show the output's size — the context cost of this tool result.
     ui.note_tool_result(len(result))
     return result
+
+
+_BUILTIN_SPECS.update({
+    'search_tools': _SEARCH_TOOLS_SPEC, 'use_skill': _USE_SKILL_SPEC,
+    'spawn': _SPAWN_SPEC, 'check': _CHECK_SPEC, 'join': _JOIN_SPEC})
