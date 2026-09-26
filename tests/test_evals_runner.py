@@ -2570,8 +2570,11 @@ class TestCliRubricAndRepeat:
         assert out.count('[evals] repeat ') == 3
         assert 'aggregate over 3 run(s):' in out
         agg = out.split('aggregate over 3 run(s):')[1]
-        assert 'a     3/3     $0.500 ± $0.000  12.0 ± 2.0  2.0/2' in agg
-        assert 'b     1/3     $0.500 ± $0.000  12.0 ± 2.0  0.0/2' in agg
+        # no metrics on these fake results: tok/turns read n/a, smells 0
+        assert ('a     3/3     $0.500 ± $0.000  12.0 ± 2.0  n/a  n/a    0'
+                '       2.0/2') in agg
+        assert ('b     1/3     $0.500 ± $0.000  12.0 ± 2.0  n/a  n/a    0'
+                '       0.0/2') in agg
         assert 'gate: every case must pass at least 2/3 — below: b' in agg
         assert 'runs: ' in agg
 
@@ -2831,3 +2834,328 @@ class TestNoLogFileUnderTests:
         assert not [h for h in log.log.handlers
                     if isinstance(h, logging.FileHandler)]
         assert log._configured is False
+
+
+# --- Package E: metrics, smells, matrix --------------------------------------
+
+def _measured_run(model_spec: str, verdicts: dict, tokens: int = 4_000,
+                  turns: int = 3, tool_bytes: int = 1_500, cost=0.1,
+                  smells=None, **kw) -> runs.Run:
+    r = _fake_run(model_spec, verdicts, {}, cost=cost, **kw)
+    for c in r.cases:
+        c.rubric = ''
+        c.metrics = {'tokens_in': tokens // 2, 'tokens_out': tokens // 4,
+                     'cache_read': tokens // 4, 'cache_write': 0,
+                     'tokens': tokens, 'tool_bytes': tool_bytes,
+                     'turns': turns, 'calls': turns + 1}
+        c.smells = dict(smells or {})
+    return r
+
+
+class TestRunCaseMetrics:
+    """``run_case`` stores the case's metrics and smells from the ledger
+    rows it appended (and only those)."""
+
+    def _record(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+
+        async def run_and_record(self, prompt, timeout=None):
+            ledger.submit('calls', {'tokens_in': 1000, 'tokens_out': 100,
+                                    'cache_read': 500, 'cache_write': 0,
+                                    'phase': 'step', 'cost_usd': 0.1})
+            ledger.submit('calls', {'tokens_in': 200, 'tokens_out': 20,
+                                    'phase': 'step', 'cost_usd': 0.1})
+            ledger.submit('calls', {'tokens_in': 50, 'tokens_out': 5,
+                                    'phase': 'complete', 'cost_usd': 0.1})
+            base = {'run_id': 'r', 'agent': 'main', 'task_id': 'k',
+                    'turn_id': 't'}
+            ledger.submit('tool_events', {
+                **base, 'tool': 'outline', 'args': {'path': 'a.py'},
+                'shown_bytes': 300})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'read_file', 'args': {'path': 'a.py'},
+                'shown_bytes': 4000})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'search_code', 'args': {'q': 'x'},
+                'shown_bytes': 100})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'search_code', 'args': {'q': 'x'},
+                'shown_bytes': 100})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'write_file', 'args': {'path': 'b'},
+                'shown_bytes': 0, 'denied': 'mode'})
+            return _canned_agents()
+
+        monkeypatch.setattr(bench.BenchRun, 'run', run_and_record)
+
+    def test_metrics_and_smells_from_the_case_rows(self, tmp_path: Path,
+                                                   monkeypatch) -> None:
+        self._record(monkeypatch)
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path)
+        assert res.metrics == {
+            'tokens_in': 1250, 'tokens_out': 125, 'cache_read': 500,
+            'cache_write': 0, 'tokens': 1875, 'tool_bytes': 4500,
+            'turns': 2, 'calls': 3}
+        assert res.tokens == 1875 and res.turns == 2
+        assert res.smells == {'whole_file_after_outline': 1,
+                              'repeated_calls': 1, 'refused': 1}
+        assert res.smell_total() == 3
+        # a second case in the same out dir counts only its own rows
+        res2 = runner.run_case(_case(name='second'), base, [base.adapter],
+                               tmp_path)
+        assert res2.metrics == res.metrics and res2.smells == res.smells
+        assert set(res.metrics) == set(ledger.METRIC_KEYS)
+        assert tuple(res.smells) == runs.SMELL_KEYS
+
+    def test_no_rows_means_zero_metrics(self, tmp_path: Path, canned):
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path)
+        assert res.metrics['tokens'] == 0 and res.metrics['calls'] == 0
+        assert res.smells == {'whole_file_after_outline': 0,
+                              'repeated_calls': 0, 'refused': 0}
+
+    def test_case_smells_ignores_preactivated_search(self) -> None:
+        rows = [{'tool': 'search_tools', 'args': {'query': 'read_file'},
+                 'agent': 'a', 'task_id': 'k', 'turn_id': 't'}]
+        assert runner.case_smells(rows) == {
+            'whole_file_after_outline': 0, 'repeated_calls': 0,
+            'refused': 0}
+
+    def test_run_file_round_trips_metrics(self, tmp_path: Path,
+                                          monkeypatch) -> None:
+        self._record(monkeypatch)
+        base = _base()
+        r = runner.run_suite([_case()], None, tmp_path / 'out', base,
+                             [base.adapter], trajectory_dir=tmp_path)
+        loaded = runs.load(next((tmp_path / 'out').glob('*.json')))
+        assert loaded.cases[0].metrics == r.cases[0].metrics
+        assert loaded.cases[0].smells == r.cases[0].smells
+        row = (tmp_path / 'TRAJECTORY.md').read_text().splitlines()[-1]
+        assert row.endswith('|  | 1.9 | 2.0 |')
+
+
+class TestCliMetricsColumns:
+    def test_table_and_summary_show_tok_turns_and_smells(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a', 'b')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            r = _measured_run(model_spec, {'a': True, 'b': True},
+                              tokens=12_345, turns=4,
+                              smells={'whole_file_after_outline': 1,
+                                      'repeated_calls': 0, 'refused': 2})
+            r.cases[1].metrics = dict(r.cases[1].metrics, tokens=655,
+                                      turns=1)
+            r.cases[1].smells = {'whole_file_after_outline': 0,
+                                 'repeated_calls': 0, 'refused': 0}
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r')]) == 0
+        out = capsys.readouterr().out
+        head = out.splitlines()[0].split()
+        assert head == ['case', 'result', 'seconds', 'tok', 'turns',
+                        'smells', 'cost', 'detail']
+        row_a = next(ln for ln in out.splitlines() if ln.startswith('a '))
+        assert row_a.split()[:5] == ['a', 'PASS', '2.0', '12.3', '4']
+        assert 'whole-file 1, refused 2' in row_a
+        row_b = next(ln for ln in out.splitlines() if ln.startswith('b '))
+        assert row_b.split()[:6] == ['b', 'PASS', '2.0', '0.7', '1', '-']
+        assert '· tok 13.0k (6.5k/case) · turns 5 · smells 3 ·' in out
+
+    def test_old_results_without_metrics_read_dash(self, tmp_path, capsys,
+                                                   monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            return _fake_run(model_spec, {'a': True}, {})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r')]) == 0
+        out = capsys.readouterr().out
+        row = next(ln for ln in out.splitlines() if ln.startswith('a '))
+        assert row.split()[:6] == ['a', 'PASS', '2.0', '-', '-', '-']
+        assert '· tok ' not in out and '· smells' not in out
+
+    def test_aggregate_reports_tokens_and_turns_mean_and_spread(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+        tokens = iter([4_000, 6_000])
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            r = _measured_run(model_spec, {'a': True}, tokens=next(tokens),
+                              turns=3, smells={'refused': 1})
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r'), '--repeat', '2']) == 0
+        out = capsys.readouterr().out
+        agg = out.split('aggregate over 2 run(s):')[1]
+        assert agg.splitlines()[1].split() == [
+            'case', 'passes', 'cost', 'seconds', 'tok', 'turns', 'smells',
+            'rubric']
+        row = next(ln for ln in agg.splitlines() if ln.startswith('a '))
+        assert '5.0 ± 1.4' in row and '3.0 ± 0.0' in row
+        assert row.split()[-2:] == ['2', '-']         # smells summed
+
+    def test_aggregate_without_metrics_says_na(self, tmp_path, capsys,
+                                               monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            r = _fake_run(model_spec, {'a': True}, {})
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r'), '--repeat', '2']) == 0
+        agg = capsys.readouterr().out.split('aggregate over')[1]
+        row = next(ln for ln in agg.splitlines() if ln.startswith('a '))
+        assert row.count('n/a') == 2                  # tok and turns
+
+
+class TestCliMatrix:
+    def _cases(self, tmp_path: Path) -> Path:
+        cdir = tmp_path / 'cases'
+        cdir.mkdir()
+        (cdir / 'a.toml').write_text(
+            'name = "a"\nfixture = "docs-only"\nprompt = "hi"\n'
+            'tags = ["fast"]\n')
+        (cdir / 'b.toml').write_text(
+            'name = "b"\nfixture = "docs-only"\nprompt = "hi"\n')
+        return cdir
+
+    def test_one_run_and_one_row_per_model(self, tmp_path, capsys,
+                                           monkeypatch) -> None:
+        cdir = self._cases(tmp_path)
+        models_dir = tmp_path / 'models'
+        models_dir.mkdir()
+        (models_dir / 'sbp-litellm-aws-claude-4-5-haiku.json').write_text(
+            json.dumps({'model': 'SBP Litellm|aws/claude-4-5-haiku',
+                        'calls': 12, 'ok': 11, 'schema_errors': 1}))
+        (models_dir / 'ollama-qwen3-8b.json').write_text(
+            json.dumps({'model': 'Ollama|qwen3:8b', 'seconds': 3.0}))
+        seen: list = []
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.append((model_spec, [c.name for c in suite], kw))
+            ok = model_spec.startswith('SBP')
+            r = _measured_run(model_spec, {'a': True, 'b': ok},
+                              tokens=30_700 if ok else 44_450,
+                              tool_bytes=9_100 if ok else 12_850,
+                              seconds=65.5, cost=0.125 if ok else 0.0)
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['matrix', '--cases-dir', str(cdir),
+                         '--models-dir', str(models_dir),
+                         '--models', 'SBP Litellm|aws/claude-4-5-haiku, '
+                                     'Ollama|qwen3:8b',
+                         '--out', str(tmp_path / 'r'), '--note', 'n1',
+                         '--num-ctx', '8192'])
+        assert code == 0
+        assert [(m, names) for m, names, _ in seen] == [
+            ('SBP Litellm|aws/claude-4-5-haiku', ['a', 'b']),
+            ('Ollama|qwen3:8b', ['a', 'b'])]
+        for spec, _, kw in seen:
+            assert kw['note'] == f'matrix {spec}: n1'
+            assert kw['num_ctx'] == 8192 and kw['routing'] is None
+            assert kw['allow_spend'] is False and kw['decisions'] is None
+            assert callable(kw['on_result'])
+            assert 'rubric_spec' not in kw          # matrix never grades
+        out = capsys.readouterr().out
+        assert '[evals] matrix: SBP Litellm|aws/claude-4-5-haiku' in out
+        lines = out.splitlines()
+        head = next(i for i, ln in enumerate(lines)
+                    if ln.split() == ['model', 'passed', 'tok', 'tool',
+                                      'kB', 'seconds', 'cost', 'contract'])
+        haiku, qwen = lines[head + 2], lines[head + 3]
+        assert haiku.split() == ['SBP', 'Litellm|aws/claude-4-5-haiku',
+                                 '2/2', '61.4', '18.2', '131.0', '$0.250',
+                                 '11/12']
+        assert qwen.split() == ['Ollama|qwen3:8b', '1/2', '88.9', '25.7',
+                                '131.0', '$0.000', '-']
+        assert 'runs: ' in out and 'compares' not in out
+
+    def test_routing_file_and_spend_are_passed(self, tmp_path, capsys,
+                                               monkeypatch) -> None:
+        cdir = self._cases(tmp_path)
+        routing_file = tmp_path / 'exp.toml'
+        routing_file.write_text(
+            '[routing]\ncontroller = true\n'
+            '[[routing.ladder]]\nadapter = "F"\nmodel = "w"\n'
+            'max_complexity = "hard"\n'
+            '[decisions]\nmode = "shadow"\n')
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            return _measured_run(model_spec, {'a': True})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['matrix', '--cases-dir', str(cdir),
+                         '--models-dir', str(tmp_path / 'none'),
+                         '--models', 'F|m', '--tags', 'fast',
+                         '--routing', str(routing_file), '--allow-spend',
+                         '--out', str(tmp_path / 'r')])
+        assert code == 0
+        assert isinstance(seen['routing'], RoutingSettings)
+        assert seen['routing'].controller is True
+        assert seen['routing_name'] == 'exp'
+        assert seen['decisions'] is not None
+        assert seen['decisions'].mode == 'shadow'
+        assert seen['allow_spend'] is True
+        assert '1 case(s) per model' in capsys.readouterr().out
+
+    @pytest.mark.parametrize('argv, message', [
+        (['--models', 'nomodel'], "'Adapter|model'"),
+        (['--models', 'A|m,B|'], "'Adapter|model'"),
+        (['--models', ' , '], "'Adapter|model'"),
+        (['--models', 'A|m', '--tags', 'nope'], 'nope'),
+        (['--models', 'A|m', '--num-ctx', '-1'], '--num-ctx'),
+        (['--models', 'A|m', '--routing', 'absent.toml'], 'routing file'),
+    ])
+    def test_usage_errors(self, tmp_path, capsys, monkeypatch, argv,
+                          message) -> None:
+        cdir = self._cases(tmp_path)
+        monkeypatch.setattr(runner, 'run_suite',
+                            lambda *a, **k: pytest.fail('must not run'))
+        assert cli_main(['matrix', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path / 'r'), *argv]) == 2
+        assert message in capsys.readouterr().err
+
+    def test_models_is_required(self, tmp_path) -> None:
+        with pytest.raises(SystemExit):
+            cli_main(['matrix', '--cases-dir', str(tmp_path)])
+
+    def test_run_suite_value_error_is_a_usage_error(self, tmp_path, capsys,
+                                                    monkeypatch) -> None:
+        cdir = self._cases(tmp_path)
+
+        def boom(*a, **k):
+            raise ValueError("no adapter 'A'")
+
+        monkeypatch.setattr(runner, 'run_suite', boom)
+        assert cli_main(['matrix', '--cases-dir', str(cdir), '--models',
+                         'A|m', '--out', str(tmp_path / 'r')]) == 2
+        assert "no adapter 'A'" in capsys.readouterr().err
+
+
+class TestContractCell:
+    @pytest.mark.parametrize('record, cell', [
+        (None, '-'), ({}, '-'), ({'calls': 12}, '-'), ({'ok': 3}, '-'),
+        ({'calls': 12, 'ok': 11}, '11/12'),
+        ({'calls': 12.0, 'ok': 11.0, 'schema_errors': 1}, '11/12'),
+        ({'calls': '12', 'ok': 11}, '-'), ({'calls': 12, 'ok': True}, '-'),
+    ])
+    def test_ok_over_calls_or_dash(self, record, cell) -> None:
+        from guru.evals.__main__ import contract_cell
+        assert contract_cell(record) == cell

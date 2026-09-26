@@ -2,7 +2,8 @@
 
     .venv/bin/python bench/ledger_report.py [--dir ~/.guru/ledger]
 
-Which models are called how often, task latency p50/p95 per (kind,
+Which models are called how often, the model-agnostic cost per task
+(tokens, tool bytes shown, turns, calls), task latency p50/p95 per (kind,
 complexity), tokens and cost per model, fallback/retry rates, how the
 shadow judges agree with the heuristics and with ``/good`` ``/bad`` labels,
 the tools called (per tool: calls, mean seconds, bytes shown vs produced,

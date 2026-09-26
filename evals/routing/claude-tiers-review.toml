@@ -1,0 +1,61 @@
+# Config 4: claude-tiers-judges plus the review ladder — the shape the
+# default block written on first run has (renamed from
+# claude-tiers-panel.toml on 2026-09-26; the runs before that date under
+# `+routed:claude-tiers-panel` in evals/TRAJECTORY.md had `panel = true`).
+#
+# Differences from claude-tiers-judges.toml: `type_router = true` with a
+# `[[routing.ladders.review]]` ladder that starts at Sonnet, so a
+# review-kind task never runs on Haiku. The panel judge (`needs_security`)
+# is configured but SHADOW (`panel = false` under [decisions.active]):
+# three suites of `review-multi-file` (evals/triage/2026-09-25-loop-1.md)
+# saw it answer no on every "correctness and security" request, so its
+# verdicts are recorded and measured until labelled rows say otherwise.
+# Used for `review-multi-file` and the review-ladder measurements.
+
+[routing]
+mode = "local-and-remote"
+controller = true
+complexity_router = true
+type_router = true
+spend_confirm = "auto"
+secret_scan = true
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-4-5-haiku"
+max_complexity = "trivial"
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
+default = true
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
+max_complexity = "hard"
+
+[[routing.ladders.review]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
+default = true
+
+[[routing.ladders.review]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
+max_complexity = "hard"
+
+[decisions]
+mode = "active"
+labels_margin = 0.15
+
+[decisions.points]
+panel = "encoder"
+injection = "injection"
+labels = "encoder"
+
+[decisions.active]
+labels = true
+panel = false

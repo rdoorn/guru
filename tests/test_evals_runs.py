@@ -127,12 +127,14 @@ class TestTrajectory:
         assert '| Ollama\\|qwen3:14b |' in lines[-1]
         assert '| 1/2 |' in lines[-1]
         assert '| 10.0 |' in lines[-1]
-        assert '| $1.00 |' in lines[-1] and lines[-1].endswith('| baseline |')
+        assert '| $1.00 |' in lines[-1]
+        # no metrics on these results: the two metric cells read '-'
+        assert lines[-1].endswith('| baseline | - | - |')
         runs.append_trajectory(run(run_id='def456'), tmp_path)
         text = path.read_text(encoding='utf-8')
         assert text.count('| ts |') == 1
         rows = [ln for ln in text.splitlines() if ln.startswith('| 2026')]
-        assert len(rows) == 2 and rows[1].endswith('|  |')
+        assert len(rows) == 2 and rows[1].endswith('|  | - | - |')
 
     def test_unknown_cost_and_empty_run(self, tmp_path: Path) -> None:
         r = run(cases=[result('a', True, cost=None),
@@ -146,7 +148,54 @@ class TestTrajectory:
 
     def test_note_pipes_are_escaped(self, tmp_path: Path) -> None:
         runs.append_trajectory(run(), tmp_path, note='a | b')
-        assert _last_row(tmp_path).endswith('| a \\| b |')
+        assert _last_row(tmp_path).endswith('| a \\| b | - | - |')
+
+    def test_header_names_the_metric_columns(self, tmp_path: Path) -> None:
+        runs.append_trajectory(run(), tmp_path)
+        head = (tmp_path / 'TRAJECTORY.md').read_text().splitlines()[4]
+        assert head == ('| ts | run_id | model | passed/total | mean seconds '
+                        '| cost | note | tok/case | turns/case |')
+
+    def test_metric_cells_are_mean_per_case(self, tmp_path: Path) -> None:
+        r = run(cases=[_measured('a', tokens=12_000, turns=4),
+                       _measured('b', tokens=8_000, turns=7)])
+        runs.append_trajectory(r, tmp_path, note='n')
+        assert _last_row(tmp_path).endswith('| n | 10.0 | 5.5 |')
+
+    def test_old_header_is_upgraded_in_place(self, tmp_path: Path) -> None:
+        old = ('# Eval trajectory\n\nOne row per recorded run.\n\n'
+               '| ts | run_id | model | passed/total | mean seconds | cost '
+               '| note |\n|---|---|---|---|---|---|---|\n'
+               '| 2026-09-23T15:45:06+00:00 | 088625f91b8c | Ollama\\|q '
+               '| 5/6 | 48.8 | $0.00 | baseline a \\| b |\n')
+        path = tmp_path / 'TRAJECTORY.md'
+        path.write_text(old, encoding='utf-8')
+        runs.append_trajectory(run(), tmp_path, note='new')
+        text = path.read_text(encoding='utf-8')
+        assert text.count('| ts |') == 1
+        assert '| note | tok/case | turns/case |' in text
+        assert '|---|---|---|---|---|---|---|---|---|' in text
+        assert text.startswith('# Eval trajectory\n\nOne row per recorded '
+                               'run.\n')
+        rows = runs.parse_trajectory(path)
+        assert [r['run_id'] for r in rows] == ['088625f91b8c', 'abc123']
+        assert rows[0]['note'] == 'baseline a | b'
+        assert rows[0]['model'] == 'Ollama|q'
+        assert 'tok/case' not in rows[0]          # an old seven-cell row
+        assert rows[1]['tok/case'] == '-' and rows[1]['turns/case'] == '-'
+        assert rows[1]['note'] == 'new'
+
+    def test_parse_reads_back_every_column(self, tmp_path: Path) -> None:
+        r = run(cases=[_measured('a', tokens=3_000, turns=2)])
+        runs.append_trajectory(r, tmp_path, note='x | y')
+        rows = runs.parse_trajectory(tmp_path / 'TRAJECTORY.md')
+        assert rows == [{
+            'ts': '2026-09-23T10:00:00+00:00', 'run_id': 'abc123',
+            'model': 'Ollama|qwen3:14b', 'passed/total': '1/1',
+            'mean seconds': '10.0', 'cost': '$0.50', 'note': 'x | y',
+            'tok/case': '3.0', 'turns/case': '2.0'}]
+        with pytest.raises(ValueError, match='cannot read'):
+            runs.parse_trajectory(tmp_path / 'absent.md')
 
 
 class TestNumCtx:
@@ -306,7 +355,8 @@ class TestAggregate:
     def test_single_run_has_zero_spread(self) -> None:
         agg = runs.aggregate([run('r1', cases=[result('a', True)])])
         assert agg['a'] == {'passes': 1, 'runs': 1, 'seconds': (10.0, 0.0),
-                            'cost_usd': (0.5, 0.0), 'rubric_mean': None}
+                            'cost_usd': (0.5, 0.0), 'rubric_mean': None,
+                            'tokens': None, 'turns': None, 'smells': 0}
 
     def test_unknown_cost_in_any_run_makes_cost_none(self) -> None:
         agg = runs.aggregate([run('r1', cases=[result('a', True, cost=1.0)]),
@@ -329,3 +379,110 @@ class TestAggregate:
                  run('r3', cases=[result('a', True), result('b', False)])]
         assert not runs.aggregate_ok(runs.aggregate(mixed), 3)
         assert runs.aggregate_ok({}, 3)           # nothing to fail
+
+
+def _measured(case: str, tokens: int, turns: int, ok: bool = True,
+              tool_bytes: int = 500, smells=None) -> CaseResult:
+    r = result(case, ok)
+    r.metrics = {'tokens_in': tokens // 2, 'tokens_out': tokens // 4,
+                 'cache_read': tokens // 4, 'cache_write': 0,
+                 'tokens': tokens, 'tool_bytes': tool_bytes,
+                 'turns': turns, 'calls': turns + 1}
+    r.smells = dict(smells or {})
+    return r
+
+
+class TestMetrics:
+    """``CaseResult.metrics``/``smells`` and the Run totals."""
+
+    def test_defaults_and_old_files_load(self, tmp_path: Path) -> None:
+        r = result('a', True)
+        assert r.metrics == {} and r.smells == {}
+        assert r.tokens is None and r.turns is None
+        assert r.metric('calls') is None and r.smell_total() == 0
+        path = runs.save(run(), tmp_path)
+        data = json.loads(path.read_text(encoding='utf-8'))
+        for c in data['cases']:
+            del c['metrics'], c['smells']
+        path.write_text(json.dumps(data), encoding='utf-8')
+        loaded = runs.load(path)
+        assert all(c.metrics == {} and c.smells == {} for c in loaded.cases)
+        assert loaded.total_metric('tokens') is None
+        assert loaded.mean_metric('turns') is None
+        assert loaded.total_smells() == 0
+
+    def test_round_trip_and_accessors(self, tmp_path: Path) -> None:
+        c = _measured('a', tokens=4_000, turns=3,
+                      smells={'whole_file_after_outline': 1,
+                              'repeated_calls': 0, 'refused': 2})
+        r = run(cases=[c])
+        assert runs.load(runs.save(r, tmp_path)) == r
+        assert c.tokens == 4_000 and c.turns == 3
+        assert c.metric('tool_bytes') == 500 and c.smell_total() == 3
+
+    def test_run_totals_and_means(self) -> None:
+        r = run(cases=[_measured('a', tokens=4_000, turns=3),
+                       _measured('b', tokens=2_000, turns=1,
+                                 smells={'refused': 2})])
+        assert r.total_metric('tokens') == 6_000
+        assert r.mean_metric('tokens') == 3_000
+        assert r.total_metric('turns') == 4 and r.mean_metric('turns') == 2
+        assert r.total_smells() == 2
+        assert run(cases=[]).total_metric('tokens') is None
+
+    def test_a_case_without_metrics_makes_the_total_unknown(self) -> None:
+        r = run(cases=[_measured('a', tokens=4_000, turns=3),
+                       result('b', True)])
+        assert r.total_metric('tokens') is None
+        assert r.mean_metric('tokens') is None
+
+    @pytest.mark.parametrize('value, text', [
+        (None, '-'), (0, '0.0'), (12_345, '12.3'), (950, '0.9'),
+        (1_000_000, '1000.0')])
+    def test_kilo(self, value, text: str) -> None:
+        assert runs.kilo(value) == text
+
+    def test_aggregate_tokens_turns_and_smells(self) -> None:
+        r1 = run('r1', cases=[_measured('a', tokens=4_000, turns=3,
+                                        smells={'refused': 1})])
+        r2 = run('r2', cases=[_measured('a', tokens=6_000, turns=5,
+                                        smells={'repeated_calls': 2})])
+        agg = runs.aggregate([r1, r2])['a']
+        mean, spread = agg['tokens']
+        assert mean == 5_000 and spread == pytest.approx(1414.2136, abs=0.01)
+        mean, spread = agg['turns']
+        assert mean == 4 and spread == pytest.approx(1.4142, abs=0.001)
+        assert agg['smells'] == 3
+
+    def test_aggregate_metrics_none_when_a_run_lacks_them(self) -> None:
+        agg = runs.aggregate([run('r1', cases=[_measured('a', 1_000, 1)]),
+                              run('r2', cases=[result('a', True)])])['a']
+        assert agg['tokens'] is None and agg['turns'] is None
+        assert agg['smells'] == 0
+
+
+class TestModelSlugAndContract:
+    @pytest.mark.parametrize('spec, slug', [
+        ('SBP Litellm|aws/claude-4-5-haiku',
+         'sbp-litellm-aws-claude-4-5-haiku'),
+        ('Ollama|qwen3:8b', 'ollama-qwen3-8b'),
+        ('A|m', 'a-m'), ('X y|a.b_c', 'x-y-a-b-c')])
+    def test_model_slug(self, spec: str, slug: str) -> None:
+        assert runs.model_slug(spec) == slug
+
+    def test_load_contract_reads_the_slug_file(self, tmp_path: Path) -> None:
+        (tmp_path / 'ollama-qwen3-8b.json').write_text(
+            json.dumps({'model': 'Ollama|qwen3:8b', 'calls': 12, 'ok': 11,
+                        'schema_errors': 1}), encoding='utf-8')
+        rec = runs.load_contract(tmp_path, 'Ollama|qwen3:8b')
+        assert rec == {'model': 'Ollama|qwen3:8b', 'calls': 12, 'ok': 11,
+                       'schema_errors': 1}
+
+    def test_load_contract_is_none_when_missing_or_not_an_object(
+            self, tmp_path: Path) -> None:
+        assert runs.load_contract(tmp_path, 'A|m') is None
+        (tmp_path / 'a-m.json').write_text('[1, 2]', encoding='utf-8')
+        assert runs.load_contract(tmp_path, 'A|m') is None
+        (tmp_path / 'a-m.json').write_text('not json', encoding='utf-8')
+        assert runs.load_contract(tmp_path, 'A|m') is None
+        assert runs.load_contract(tmp_path / 'absent', 'A|m') is None

@@ -84,7 +84,18 @@ class TestDefaultRoutingToml:
         assert d.mode == 'active' and d.labels_margin == 0.15
         assert d.points == {'labels': 'encoder', 'panel': 'encoder',
                             'injection': 'injection'}
-        assert d.active == {'labels': True, 'panel': True}
+        # panel stays shadow until labelled rows say otherwise
+        assert d.active == {'labels': True, 'panel': False}
+
+    def test_panel_is_shadow_regardless_of_the_extra(self) -> None:
+        for available in (True, False):
+            text = rs.default_routing_toml('SBP Litellm', 'litellm',
+                                           judges_available=available)
+            d = rs.load_decisions(tomllib.loads(text)['decisions'])
+            assert d.active['panel'] is False
+            assert d.points['panel'] == 'encoder'     # configured, observed
+        assert 'panel = false               # shadow until labelled rows' \
+            in text
 
     def test_judges_shadow_with_a_note_without_the_extra(self) -> None:
         text = rs.default_routing_toml('SBP Litellm', 'litellm',
@@ -134,7 +145,7 @@ class TestEnsureDefaultRouting:
         assert data['routing']['ladder'][0]['adapter'] == 'SBP Litellm'
         # the process picked the new [decisions] up right away
         assert config.DECISIONS_MODE == 'active'
-        assert config.DECISIONS_ACTIVE == {'labels': True, 'panel': True}
+        assert config.DECISIONS_ACTIVE == {'labels': True, 'panel': False}
 
     def test_creates_parent_directories(self, tmp_path, monkeypatch,
                                         config_snapshot) -> None:

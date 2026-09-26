@@ -6,12 +6,20 @@ Markdown table ``evals/TRAJECTORY.md``. Nothing here runs a case; the
 runner hands over a :class:`Run`. :func:`find_run` locates a run file by
 id (``grade RUN_ID``) and :func:`load_transcript` reads a case transcript
 back for offline grading.
+
+Trajectory columns: ``ts | run_id | model | passed/total | mean seconds |
+cost | note | tok/case | turns/case`` — the two metric columns were added
+at the end (2026-09-26) so rows written before them still parse
+(:func:`parse_trajectory` reads them with the metrics missing); an
+existing file's header is upgraded in place when the next row is
+appended.
 """
 from __future__ import annotations
 
 import gzip
 import json
 import math
+import re
 import statistics
 import uuid
 from dataclasses import asdict, dataclass, field, fields
@@ -21,11 +29,24 @@ from typing import Any, Optional
 
 TRAJECTORY_FILE = 'TRAJECTORY.md'
 RUBRIC_MAX = 2                   # points per graded case
-_TRAJECTORY_HEADER = (
+TRAJECTORY_COLUMNS = ('ts', 'run_id', 'model', 'passed/total',
+                      'mean seconds', 'cost', 'note', 'tok/case',
+                      'turns/case')
+_OLD_TRAJECTORY_COLUMNS = TRAJECTORY_COLUMNS[:7]
+_TRAJECTORY_INTRO = (
     '# Eval trajectory\n\n'
-    'One row per recorded run (appended by `python -m guru.evals run`).\n\n'
-    '| ts | run_id | model | passed/total | mean seconds | cost | note |\n'
-    '|---|---|---|---|---|---|---|\n')
+    'One row per recorded run (appended by `python -m guru.evals run`).\n\n')
+
+
+def _header_lines(columns: tuple) -> tuple[str, str]:
+    return ('| ' + ' | '.join(columns) + ' |', '|' + '---|' * len(columns))
+
+
+_TRAJECTORY_HEADER = (_TRAJECTORY_INTRO
+                      + '\n'.join(_header_lines(TRAJECTORY_COLUMNS)) + '\n')
+# Case metrics (``CaseResult.metrics``): the keys ``ledger.usage_metrics``
+# writes; ``smells`` the three tool-usage smell counts the runner keeps.
+SMELL_KEYS = ('whole_file_after_outline', 'repeated_calls', 'refused')
 
 
 @dataclass
@@ -51,11 +72,40 @@ class CaseResult:
     # more than once (``--samples N``; the score is their median); empty
     # for one sample and for run files from before this field.
     rubric_samples: list[int] = field(default_factory=list)
+    # Model-agnostic cost of the case from its ledger rows
+    # (``ledger.usage_metrics``: tokens in/out, cache read/write, their
+    # total ``tokens``, ``tool_bytes`` shown, ``turns``, ``calls``) and the
+    # tool-usage smell counts (``SMELL_KEYS``, from
+    # ``ledger_report.tool_smells`` over the case's tool events). Empty for
+    # run files from before these fields.
+    metrics: dict[str, int] = field(default_factory=dict)
+    smells: dict[str, int] = field(default_factory=dict)
 
     @property
     def seconds(self) -> float:
         """Wall-clock seconds of the case (from ``observed``)."""
         return float(self.observed.get('seconds', 0.0))
+
+    def metric(self, key: str) -> Optional[int]:
+        """``metrics[key]`` as an int; None when the case has no metrics
+        (an older run file)."""
+        if not self.metrics or key not in self.metrics:
+            return None
+        return int(self.metrics[key])
+
+    @property
+    def tokens(self) -> Optional[int]:
+        """Total tokens the case processed; None when unknown."""
+        return self.metric('tokens')
+
+    @property
+    def turns(self) -> Optional[int]:
+        """Agent-loop round trips of the case; None when unknown."""
+        return self.metric('turns')
+
+    def smell_total(self) -> int:
+        """Sum of the recorded smell counts (0 without any)."""
+        return sum(int(v) for v in self.smells.values())
 
 
 @dataclass
@@ -120,6 +170,23 @@ class Run:
         if not graded:
             return None
         return sum(graded), RUBRIC_MAX * len(graded)
+
+    def total_metric(self, key: str) -> Optional[int]:
+        """Sum of ``metrics[key]`` over the cases; None unless every case
+        has it (an older run, or no cases)."""
+        values = [c.metric(key) for c in self.cases]
+        if not values or any(v is None for v in values):
+            return None
+        return sum(v for v in values if v is not None)
+
+    def mean_metric(self, key: str) -> Optional[float]:
+        """``total_metric(key)`` per case; None when unknown."""
+        total = self.total_metric(key)
+        return None if total is None else total / len(self.cases)
+
+    def total_smells(self) -> int:
+        """Sum of every case's smell counts."""
+        return sum(c.smell_total() for c in self.cases)
 
 
 def ctx_label(num_ctx: int) -> str:
@@ -198,6 +265,26 @@ def find_run(directory: Path, run_id: str) -> Path:
         raise ValueError(f'run id {run_id!r} is ambiguous under {directory}: '
                          + ', '.join(h.name for h in hits))
     return hits[0]
+
+
+def model_slug(spec: str) -> str:
+    """``'SBP Litellm|aws/claude-4-5-haiku'`` ->
+    ``'sbp-litellm-aws-claude-4-5-haiku'``: the spec lowercased with every
+    non-alphanumeric character replaced by ``-`` (the file stem
+    ``bench/tool_contract.py`` writes under ``evals/models/``)."""
+    return re.sub(r'[^a-z0-9]', '-', spec.lower())
+
+
+def load_contract(models_dir: Path, spec: str) -> Optional[dict[str, Any]]:
+    """The tool-contract record ``models_dir/<model_slug(spec)>.json``
+    as a dict; None when there is no such file or it is not a JSON
+    object (nothing here is required, the matrix shows ``-``)."""
+    path = Path(models_dir) / f'{model_slug(spec)}.json'
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_transcript(path: Path) -> list[dict[str, Any]]:
@@ -295,12 +382,14 @@ def aggregate(run_list: list[Run]) -> dict[str, dict[str, Any]]:
     """Per case over several runs of the same selection.
 
     ``{case: {'passes', 'runs', 'seconds': (mean, spread), 'cost_usd':
-    (mean, spread) | None, 'rubric_mean': float | None}}`` in the order
-    the cases first appear. ``runs`` counts the runs the case appears in
-    (a case missing from a run is not a failure, it is absent); the cost
-    is None when any of its runs has no known cost; ``rubric_mean``
-    averages the graded runs only. The spread is the sample standard
-    deviation (0.0 for a single run).
+    (mean, spread) | None, 'rubric_mean': float | None, 'tokens': (mean,
+    spread) | None, 'turns': (mean, spread) | None, 'smells': int}}`` in
+    the order the cases first appear. ``runs`` counts the runs the case
+    appears in (a case missing from a run is not a failure, it is
+    absent); the cost is None when any of its runs has no known cost, the
+    token and turn pairs when any run lacks the metrics; ``rubric_mean``
+    averages the graded runs only; ``smells`` sums the smell counts. The
+    spread is the sample standard deviation (0.0 for a single run).
     """
     out: dict[str, dict[str, Any]] = {}
     per_case: dict[str, list[CaseResult]] = {}
@@ -319,8 +408,21 @@ def aggregate(run_list: list[Run]) -> dict[str, dict[str, Any]]:
                          else _mean_spread([float(v) for v in costs
                                             if v is not None])),
             'rubric_mean': (statistics.fmean(graded) if graded else None),
+            'tokens': _metric_spread(results, 'tokens'),
+            'turns': _metric_spread(results, 'turns'),
+            'smells': sum(c.smell_total() for c in results),
         }
     return out
+
+
+def _metric_spread(results: list[CaseResult],
+                   key: str) -> Optional[tuple[float, float]]:
+    """``(mean, spread)`` of a metric over the results; None when any of
+    them lacks it."""
+    values = [c.metric(key) for c in results]
+    if any(v is None for v in values):
+        return None
+    return _mean_spread([float(v) for v in values if v is not None])
 
 
 def aggregate_ok(agg: dict[str, dict[str, Any]], repeats: int) -> bool:
@@ -334,24 +436,88 @@ def _cell(text: str) -> str:
     return text.replace('|', '\\|').replace('\n', ' ')
 
 
+def kilo(value: Optional[float]) -> str:
+    """Tokens in thousands with one decimal (``12345`` -> ``'12.3'``);
+    ``'-'`` for None."""
+    return '-' if value is None else f'{value / 1000:.1f}'
+
+
+def _upgrade_header(path: Path) -> None:
+    """Rewrite the old seven-column header of an existing trajectory file
+    to the current one (rows keep their cells; a renderer shows the old
+    rows with empty metric columns)."""
+    text = path.read_text(encoding='utf-8')
+    old_head, old_rule = _header_lines(_OLD_TRAJECTORY_COLUMNS)
+    new_head, new_rule = _header_lines(TRAJECTORY_COLUMNS)
+    old = f'{old_head}\n{old_rule}\n'
+    if old in text and new_head not in text:
+        path.write_text(text.replace(old, f'{new_head}\n{new_rule}\n', 1),
+                        encoding='utf-8')
+
+
 def append_trajectory(run: Run, directory: Path, note: str = '') -> None:
     """Append one row for ``run`` to ``directory/TRAJECTORY.md``.
 
-    The header is written once, when the file is created.
+    The header is written once, when the file is created; a file with
+    the pre-metrics header gets the current one first. The last two
+    cells are the mean tokens per case in thousands and the mean turns
+    per case (``-`` when the run has no metrics).
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / TRAJECTORY_FILE
+    if path.is_file():
+        _upgrade_header(path)
     cost = run.total_cost()
+    turns = run.mean_metric('turns')
     fmt = ('| {ts} | {rid} | {model} | {p}/{t} | {secs:.1f} | {cost} '
-           '| {note} |\n')
+           '| {note} | {tok} | {turns} |\n')
     row = fmt.format(
         ts=_cell(run.ts), rid=_cell(run.run_id),
         model=_cell(run.model_label()),
         p=sum(1 for c in run.cases if c.passed), t=len(run.cases),
         secs=run.mean_seconds(),
-        cost='n/a' if cost is None else f'${cost:.2f}', note=_cell(note))
+        cost='n/a' if cost is None else f'${cost:.2f}', note=_cell(note),
+        tok=kilo(run.mean_metric('tokens')),
+        turns='-' if turns is None else f'{turns:.1f}')
     with path.open('a', encoding='utf-8') as fh:
         if fh.tell() == 0:
             fh.write(_TRAJECTORY_HEADER)
         fh.write(row)
+
+
+_UNESCAPED_PIPE = re.compile(r'(?<!\\)\|')
+
+
+def _split_row(line: str) -> list[str]:
+    """The cells of a Markdown table row (escaped pipes restored)."""
+    inner = line.strip()
+    if inner.startswith('|'):
+        inner = inner[1:]
+    if inner.endswith('|') and not inner.endswith('\\|'):
+        inner = inner[:-1]
+    return [c.strip().replace('\\|', '|')
+            for c in _UNESCAPED_PIPE.split(inner)]
+
+
+def parse_trajectory(path: Path) -> list[dict[str, str]]:
+    """The data rows of a trajectory file as ``{column: cell}`` dicts
+    keyed by :data:`TRAJECTORY_COLUMNS`.
+
+    Rows written before the metric columns lack ``tok/case`` and
+    ``turns/case`` (the keys are absent, not ``'-'``); header and rule
+    lines are skipped. ``ValueError`` when the file cannot be read.
+    """
+    try:
+        lines = Path(path).read_text(encoding='utf-8').splitlines()
+    except OSError as e:
+        raise ValueError(f'{path}: cannot read trajectory: {e}') from e
+    out: list[dict[str, str]] = []
+    for line in lines:
+        if not line.startswith('|'):
+            continue
+        cells = _split_row(line)
+        if not cells or cells[0] in ('ts', '') or set(cells[0]) <= {'-'}:
+            continue
+        out.append(dict(zip(TRAJECTORY_COLUMNS, cells)))
+    return out

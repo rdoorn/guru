@@ -28,12 +28,26 @@ evals/
 .venv/bin/python -m guru.evals run --routing evals/routing/<file>.toml --allow-spend   # routed; rubric cases graded by the file's cheapest rung
 .venv/bin/python -m guru.evals run --tags fast --allow-spend                             # unrouted; graded by the cheapest remote tier (Haiku)
 .venv/bin/python -m guru.evals run --tags fast --repeat 3                 # the x3 gate (make eval-fast)
+.venv/bin/python -m guru.evals run --tags fast,sandbox --repeat 3 --routing evals/routing/<file>.toml --allow-spend   # the full gate (make eval-gate, ~$4)
+.venv/bin/python -m guru.evals matrix --models 'SBP Litellm|aws/claude-4-5-haiku,Ollama|qwen3:8b' --tags fast   # one row per model
 .venv/bin/python -m guru.evals run --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric-min 1
 .venv/bin/python -m guru.evals grade fa5c42d05059 --rubric 'SBP Litellm|aws/claude-4-5-haiku' --rubric 'SBP Litellm|aws/claude-5-sonnet' --samples 3
 ```
 
 `make check` (lint, typecheck, unit tests, container tests) is the gate
-before any commit; `make eval-fast` is the measurement.
+before any commit; `make eval-fast` is the quick measurement and
+`make eval-gate` (fast + sandbox + dogfood, x3) the full one.
+
+The headline numbers are model-agnostic: **tokens per case** (`tok`,
+thousands; uncached input + cache read + cache write + output — what the
+model processed, so a local model and a cached remote one compare),
+**tool bytes** shown to the model, **turns** (agent-loop round trips:
+every `calls` row but context summaries and one-shot judge/gate/rubric
+completions) and **calls**. They come from the ledger rows the case
+appended (`CaseResult.metrics`) and appear in the table, the summary
+line, the trajectory row (`tok/case`, `turns/case`) and the `--repeat`
+aggregate (mean ± spread). Dollars come second: the cost column depends
+on the price table and says nothing about a local model.
 
 `--routing FILE` routes sub-agents through a `[routing]` table (same shape
 as `settings.toml`; the main agent becomes a controller when the table says
@@ -55,8 +69,22 @@ cases among a and b. An unknown name or tag is a usage error that lists
 what is available.
 
 `run` prints one line per case as it finishes (`timed out` is appended when
-the case hit `timeout_s`), then a table (case, PASS/FAIL, seconds, cost,
-detail) and exits 1 when any case failed. The detail column lists the
+the case hit `timeout_s`), then a table (case, PASS/FAIL, seconds, `tok`,
+`turns`, `smells`, cost, detail) and exits 1 when any case failed:
+
+```
+case                     result  seconds  tok   turns  smells        cost    detail
+-----------------------  ------  -------  ----  -----  ------------  ------  ------
+planted-failure-digest   PASS    14.2     8.1   5      whole-file 1  $0.031  routes: SBP Litellm|aws/claude-5-sonnet
+
+passed 1/1 · mean 14.2s · tok 8.1k (8.1k/case) · turns 5 · smells 1 · cost $0.031 · model ...
+```
+
+`smells` counts, from the case's `tool_events` rows, whole-file
+`read_file` calls after an `outline` of the same path, identical repeated
+calls within a task and refused calls (the same smells as the ledger
+report); it never fails a case — a smell is what triage reads next to
+`tok`, a check is what gates. The detail column lists the
 failed checks; for a timed-out case (every check fails by design) it shows
 what guru did instead — `timed out: tools=read_file(2), edit_file, spawn(2);
 spawned=2; files_changed=wordcount.py` — so triage can start without the
@@ -70,7 +98,35 @@ run JSON. It writes:
 - `evals/runs/<run_id>/ledger/` — the ledger rows the run produced; a case's
   cost is the sum of its `calls` rows (n/a for local models or when a price is
   unknown);
-- a row in `evals/TRAJECTORY.md` (`--note` lands in the last column).
+- a row in `evals/TRAJECTORY.md` (`--note`, then the mean tokens per case
+  in thousands and the mean turns per case; the two metric columns were
+  added at the end on 2026-09-26, so older rows have seven cells and
+  `runs.parse_trajectory` reads them without the metrics).
+
+### Matrix: one row per model
+
+```sh
+.venv/bin/python -m guru.evals matrix --models 'SBP Litellm|aws/claude-4-5-haiku,Ollama|qwen3:8b' --tags fast [--routing FILE] [--allow-spend]
+```
+
+Runs the selection once per `Adapter|model` as the main model (with
+`--routing` the file's ladder routes the sub-agents and the model under
+test is the controller) — one run file and one trajectory row per model
+(`matrix <spec>` in the note) — and prints one row per model:
+
+```
+model                              passed  tok    tool kB  seconds  cost    contract
+---------------------------------  ------  -----  -------  -------  ------  --------
+SBP Litellm|aws/claude-4-5-haiku   8/8     61.4   18.2     131.0    $0.25   11/12
+Ollama|qwen3:8b                    6/8     88.9   25.7     412.5    $0.00   -
+```
+
+`contract` is `ok/calls` from `evals/models/<slug>.json` when
+`bench/tool_contract.py --model 'Adapter|model'` has written one (the
+slug is the spec lowercased with every non-alphanumeric character
+replaced by `-`); `-` otherwise. `matrix` compares, it never gates: the
+exit code is 0 after the runs (2 for a usage error) and rubric cases are
+not graded.
 
 ### Rubric grading
 
@@ -249,11 +305,15 @@ table, for grading with the judge's column at hand. To grade:
 `--repeat N` runs the selection N times — a fresh fixture copy per case
 per run, one run file and one trajectory row per repeat (the note gains
 `(repeat i/N)`) — then prints an aggregate table: per case the pass
-count `x/N`, cost and seconds as `mean ± spread` (the sample standard
-deviation; 0.0 for one run) and the mean rubric. The exit code is 1 when
+count `x/N`, cost, seconds, `tok` (thousands of tokens) and `turns` as
+`mean ± spread` (the sample standard deviation; 0.0 for one run), the
+summed smells and the mean rubric. The exit code is 1 when
 any case passed fewer than `ceil(N/2)` times (2 of 3, 3 of 5); cost,
-time and rubric never fail the gate. `make eval-fast` is
-`run --tags fast --repeat 3`; pass extra flags with
+time, tokens, smells and rubric never fail the gate. `make eval-fast` is
+`run --tags fast --repeat 3`; `make eval-gate` is `run --tags fast,sandbox
+--repeat 3` (the eight fast cases, the three sandbox cases and the
+`guru-sandbox-ledger-origin` dogfood case; ≈ $4 with a Haiku controller,
+needs Colima). Pass extra flags to either with
 `EVAL_ARGS='--routing evals/routing/<file>.toml --allow-spend'`.
 
 Each case runs in a fresh copy of its fixture under a temp dir: the copy is
@@ -314,9 +374,12 @@ security-only, logic-bug, planted-failure-digest. None of them edits a file
 or needs delegation, so together they take about four minutes on an 8B at
 8k and cover tool choice, search, reading and review answers plus the
 audited code verbs: `find-symbol-outline` must answer through
-`outline`/`find_symbol` without `read_file`, and `planted-failure-digest`
+`outline`/`find_symbol`, and `planted-failure-digest`
 must run the fixture's tests through `run_tests` and name the failing test
-from the digest alone. Run `--tags fast` as the regular gate after any
+from the digest. Neither forbids `read_file` any more (the check measured
+a preference, not the outcome — `evals/triage/2026-09-26-structural.md`,
+"Case changes"): a whole-file read shows up in the `smells` and `tok`
+columns instead. Run `--tags fast` as the regular gate after any
 change; run the full suite (edit, delegation and safety cases, 15+ minutes
 on an 8B) only when delegation, editing or mode behaviour changed. The edit
 cases (`fix-failing-test`, `edit-then-verify`, `guru-add-version-flag`)

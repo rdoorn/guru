@@ -416,12 +416,12 @@ injection = "injection"     # shadow: fetched pages checked for injection
 
 [decisions.active]
 {note}labels = {flag}
-panel = {flag}
+panel = false               # shadow until labelled rows say otherwise
 """
 _JUDGE_EXTRA_NOTE = """\
 # The encoder judges need the judge extra (uv sync --extra judge);
-# until it is installed labels and panel stay shadow (verdicts are
-# logged, nothing changes). Set both to true afterwards.
+# until it is installed labels stays shadow (verdicts are logged,
+# nothing changes). Set it to true afterwards.
 """
 
 
@@ -458,12 +458,14 @@ def default_routing_toml(adapter_name: str, adapter_kind: str, *,
     Ladder: Haiku for trivial, Sonnet (default rung) for standard, Opus
     for hard; a ``review`` ladder starting at Sonnet (``type_router`` on
     so review-kind tasks take it). Judges: the ``labels`` tie-breaker
-    (margin 0.15) and the ``panel`` point active on the encoder judge,
-    ``injection`` shadow — active only when ``judges_available`` (default:
-    probe the ``judge`` extra); otherwise both are written ``false`` with a
-    note. ``decisions=False`` omits the ``[decisions]`` table (the file
-    already has one). Raises ``ValueError`` for an unknown kind or a name
-    that cannot sit in a TOML basic string.
+    (margin 0.15) active on the encoder judge — only when
+    ``judges_available`` (default: probe the ``judge`` extra), otherwise
+    written ``false`` with a note; ``panel`` (``needs_security``) and
+    ``injection`` shadow: the panel point stays shadow until labelled rows
+    show its question calibrated (triage 2026-09-25: it answered no on
+    every review request). ``decisions=False`` omits the ``[decisions]``
+    table (the file already has one). Raises ``ValueError`` for an unknown
+    kind or a name that cannot sit in a TOML basic string.
     """
     if adapter_kind not in DEFAULT_TIER_MODELS:
         raise ValueError(

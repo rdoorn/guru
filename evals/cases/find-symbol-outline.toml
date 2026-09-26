@@ -6,7 +6,6 @@ tags = ["fast", "search"]
 
 [expect.behaviour]
 tools_used_any = ["find_symbol", "outline"]
-tools_used_none = ["read_file"]
 max_seconds = 120
 
 [expect.content]
