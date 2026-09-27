@@ -11,11 +11,28 @@ Full tool parity: guru's tool directory is translated to Anthropic tool
 schema and the model's ``tool_use`` requests run through the shared
 ``guru.domain.tools.execute_tool``.
 
+History: a tool round guru ran on this adapter (or the LiteLLM one) keeps
+the provider's ids in the neutral messages (``id`` on each ``tool_calls``
+entry, ``tool_call_id`` on the tool message), so the next turn rebuilds it
+as the ``tool_use`` / ``tool_result`` blocks the previous request carried
+and the prompt cache reads the prefix back (previous turns' thinking
+blocks are not resent; the API strips them itself). A round without ids
+(an Ollama history, an older transcript) is flattened to text, and so is,
+with ``thinking`` on, a round that is the history's last assistant
+message: the API wants that one to start with a thinking block.
+
 Prompt caching (``cache = true`` in the adapter record, the default): the
 system prompt is sent as one text block and it and the last tool
 definition carry ``cache_control: {type: ephemeral}``, so the stable prefix
 (tools, then system) is cached across the rounds of a turn and across
-turns; the messages themselves stay uncached.
+turns. A third marker sits on the last non-empty content block of the
+conversation (the user's text, or the last ``tool_result`` of a tool round
+that has content — the API rejects a marker on an empty block): the model
+caches the whole history up to it, and the next round reads that prefix
+back and only pays for what was appended since. Three of Anthropic's four
+breakpoints per request are used; a prefix under the model's minimum
+(4096 tokens on Haiku 4.5, 1024-2048 on the larger models) is silently
+not cached.
 """
 import os
 import pathlib
@@ -26,7 +43,9 @@ from typing import Optional, Union
 
 from guru import log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo
+from guru.adapters.base import (FORCE_PLAN, JSON_ONLY, Adapter, ModelInfo,
+                                dump_request, is_tool_choice_error,
+                                parameters_schema)
 from guru.domain import ledger, pricing, tools
 
 # Non-streaming per tool-call round (parity with the Ollama adapter). Kept at
@@ -34,22 +53,41 @@ from guru.domain import ledger, pricing, tools
 _MAX_TOKENS = 16000
 _DEFAULT_CONTEXT = 200000
 CACHE_CONTROL = {'type': 'ephemeral'}
+# Tool forcing (the turn contract, guru.adapters.turn): ``tool_choice any``
+# makes the model answer with a tool call. The Messages API rejects it
+# together with extended thinking, so a forced round is sent without
+# ``thinking``: the controller's ``plan`` round always (a structured
+# decision), a worker round only on an adapter configured with
+# ``thinking = false`` (a thinking worker keeps its reasoning and its text
+# reply is taken as the answer, like Ollama's). A rejected ``tool_choice``
+# turns forcing off for this adapter after one retry without it.
+TOOL_CHOICE_ANY = {'type': 'any'}
 
 
 # --- pure translation helpers (unit-tested) ----------------------------------
 
-def to_anthropic_messages(messages: list) -> tuple:
+def to_anthropic_messages(messages: list, thinking: bool = False) -> tuple:
     """Translate neutral messages to (system_str, anthropic_messages).
 
     All ``system`` messages are merged into the top-level system string.
-    Historical tool calls/results are flattened to plain text — precise
-    tool_use/tool_result id-linking is only needed for the in-flight turn,
-    which the adapter builds natively. This keeps cross-provider history
-    (e.g. a chat started on Ollama) translatable without fabricated ids.
+    A tool round whose call ids are answered by the tool messages after it
+    is rebuilt as ``tool_use`` / ``tool_result`` blocks
+    (:func:`native_round`); any other historical tool call or result is
+    flattened to plain text, which keeps cross-provider history (e.g. a
+    chat started on Ollama) translatable without fabricated ids. With
+    ``thinking`` the round that is the history's last assistant message
+    is flattened too (see :func:`native_round`).
     """
     system_parts: list = []
     out: list = []
-    for m in messages:
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        rebuilt = native_round(messages, i, thinking=thinking)
+        if rebuilt is not None:
+            native, i = rebuilt
+            out.extend(native)
+            continue
         role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')
         content = (
             m.get('content') if isinstance(m, dict)
@@ -73,29 +111,73 @@ def to_anthropic_messages(messages: list) -> tuple:
             out.append({'role': 'assistant', 'content': text})
         else:  # user
             out.append({'role': 'user', 'content': content})
+        i += 1
     return "\n\n".join(system_parts), out
 
 
+def native_round(messages: list, i: int, thinking: bool = False):
+    """The Anthropic-native messages for the tool round starting at
+    ``messages[i]`` — an assistant message of a text block (when there is
+    text) and one ``tool_use`` block per call, then one user message of
+    ``tool_result`` blocks — with the index after the round; None unless
+    ``messages[i]`` is an assistant dict whose ``tool_calls`` all carry an
+    ``id`` and the tool messages right after it answer exactly those ids
+    (``tool_call_id``). With ``thinking`` also None when no assistant
+    message follows the round: with extended thinking on, the API
+    requires the *last* assistant message to start with a thinking block
+    when it carries ``tool_use``, and previous turns' thinking blocks are
+    not kept — so that round (a turn that ended on a ``join``, resumed by
+    a mailbox delivery) is flattened to text instead; earlier rounds,
+    which the API accepts without their thinking, are rebuilt."""
+    m = messages[i]
+    if not isinstance(m, dict) or m.get('role') != 'assistant':
+        return None
+    calls = m.get('tool_calls') or []
+    ids = [c.get('id') for c in calls if isinstance(c, dict)]
+    if not calls or len(ids) != len(calls) or not all(ids):
+        return None
+    j = i + 1
+    results: list = []
+    while j < len(messages):
+        t = messages[j]
+        if not isinstance(t, dict) or t.get('role') != 'tool' \
+                or not t.get('tool_call_id'):
+            break
+        results.append(t)
+        j += 1
+    if [t['tool_call_id'] for t in results] != ids:
+        return None
+    if thinking and not _assistant_follows(messages, j):
+        return None
+    blocks: list = []
+    text = m.get('content') or ''
+    if text:
+        blocks.append({'type': 'text', 'text': text})
+    for c in calls:
+        args = c['function'].get('arguments')
+        blocks.append({'type': 'tool_use', 'id': c['id'],
+                       'name': c['function']['name'],
+                       'input': args if isinstance(args, dict) else {}})
+    native = [
+        {'role': 'assistant', 'content': blocks},
+        {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': t['tool_call_id'],
+             'content': t.get('content') or ''} for t in results]}]
+    return native, j
+
+
+def _assistant_follows(messages: list, start: int) -> bool:
+    """Whether an assistant message sits at ``messages[start:]``."""
+    return any(
+        (m.get('role') if isinstance(m, dict) else getattr(m, 'role', ''))
+        == 'assistant' for m in messages[start:])
+
+
 def tool_defs(specs: list) -> list:
-    """Translate provider-neutral tool specs to Anthropic tool schema."""
-    defs = []
-    for spec in specs:
-        params = spec.get('parameters', {})
-        properties = {
-            name: {'type': 'string', 'description': desc}
-            for name, desc in params.items()
-        }
-        defs.append({
-            'name': spec['name'],
-            'description': spec['description'],
-            'input_schema': {
-                'type': 'object',
-                'properties': properties,
-                'required': [
-                    k for k in params if k not in spec.get('optional', ())],
-            },
-        })
-    return defs
+    """Translate provider-neutral tool specs to Anthropic tool schema
+    (:func:`guru.adapters.base.parameters_schema` for the input)."""
+    return [{'name': spec['name'], 'description': spec['description'],
+             'input_schema': parameters_schema(spec)} for spec in specs]
 
 
 def system_blocks(system: str,
@@ -120,14 +202,67 @@ def cached_tools(defs: list, cache: bool) -> list:
     return out
 
 
+def _block_is_empty(block: dict) -> bool:
+    """Whether a content block has nothing to cache: a ``text`` block with
+    empty text, or a ``tool_result`` with empty (or missing) content. Any
+    other block type (an image, a document) counts as content."""
+    kind = block.get('type')
+    if kind == 'text':
+        return not block.get('text')
+    if kind == 'tool_result':
+        return not block.get('content')
+    return False
+
+
+def cached_messages(messages: list, cache: bool) -> list:
+    """``messages`` with the cache marker on the last non-empty content
+    block of the last message — the conversation breakpoint — when that
+    message is the user's: a string becomes a one-block list, a block list
+    (a tool round's ``tool_result`` blocks) gets the marker on its last
+    block that has content. The API rejects a ``cache_control`` on an
+    empty block, so an empty tail (``text: ''``, a ``tool_result`` whose
+    content is empty) is skipped and the block before it is marked; when
+    no block has content nothing is marked. Copies: the list, the message
+    and the block. Unchanged when ``cache`` is off, the list is empty, or
+    the last message is not a user message."""
+    if not cache or not messages:
+        return messages
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get('role') != 'user':
+        return messages
+    content = last.get('content')
+    if isinstance(content, str) and content:
+        blocks: list = [{'type': 'text', 'text': content,
+                         'cache_control': dict(CACHE_CONTROL)}]
+    elif isinstance(content, list) and content:
+        index = next((i for i in range(len(content) - 1, -1, -1)
+                      if isinstance(content[i], dict)
+                      and not _block_is_empty(content[i])), None)
+        if index is None:
+            return messages
+        blocks = list(content)
+        blocks[index] = {**content[index],
+                         'cache_control': dict(CACHE_CONTROL)}
+    else:
+        return messages
+    return messages[:-1] + [{**last, 'content': blocks}]
+
+
 def neutral_assistant(text: str, tool_calls: list) -> dict:
-    """Build a neutral assistant message from text + [(name, input), ...]."""
+    """Build a neutral assistant message from text + tool calls, each
+    ``(name, input)`` or ``(name, input, block_id)``: the id, when given,
+    lets the next turn rebuild the round natively
+    (:func:`native_round`)."""
     msg: dict = {'role': 'assistant', 'content': text}
     if tool_calls:
-        msg['tool_calls'] = [
-            {'function': {'name': name, 'arguments': args}}
-            for name, args in tool_calls
-        ]
+        entries = []
+        for call in tool_calls:
+            entry: dict = {'function': {'name': call[0],
+                                        'arguments': call[1]}}
+            if len(call) > 2 and call[2]:
+                entry['id'] = call[2]
+            entries.append(entry)
+        msg['tool_calls'] = entries
     return msg
 
 
@@ -150,6 +285,10 @@ class AnthropicAdapter(Adapter):
         self.thinking = thinking
         self.cache = bool(cache)
         self._context_by_model: dict = {}
+        self._force_ok = True         # cleared after a tool_choice error
+
+    def forces(self, tool: str) -> bool:
+        return self._force_ok and (tool == FORCE_PLAN or not self.thinking)
 
     # --- client construction -------------------------------------------------
 
@@ -181,6 +320,12 @@ class AnthropicAdapter(Adapter):
         if self.base_url:
             kwargs['base_url'] = self.base_url
         return anthropic.Anthropic(**kwargs)
+
+    def _create(self, client, **kwargs):
+        """``client.messages.create(**kwargs)`` after
+        :func:`guru.adapters.base.dump_request` (``GURU_DUMP_REQUESTS``)."""
+        dump_request(self.name, kwargs)
+        return client.messages.create(**kwargs)
 
     # --- discovery -----------------------------------------------------------
 
@@ -307,27 +452,45 @@ class AnthropicAdapter(Adapter):
         except Exception as e:
             ui.console.print(f"[red]Anthropic auth error: {e}[/red]")
             return
-        system, native = to_anthropic_messages(session.messages)
+        system, native = to_anthropic_messages(session.messages,
+                                               thinking=self.thinking)
         anth_tools = cached_tools(tool_defs(tools.active_specs()), self.cache)
         system_field = system_blocks(system, self.cache)
 
-        def step():
-            """One Messages API round; returns (text, [(name, input, block)])
-            or None on error (printed) — the shared loop handles cancel."""
+        def request(force: bool) -> dict:
             kwargs: dict = {
                 'model': session.model,
                 'max_tokens': _MAX_TOKENS,
-                'messages': native,
+                'messages': cached_messages(native, self.cache),
                 'tools': anth_tools,
             }
             if system_field is not None:
                 kwargs['system'] = system_field
-            if self.thinking:
+            if force and anth_tools:
+                kwargs['tool_choice'] = dict(TOOL_CHOICE_ANY)
+            elif self.thinking:
                 kwargs['thinking'] = {
                     'type': 'adaptive', 'display': 'summarized'}
+            return kwargs
+
+        def step():
+            """One Messages API round; returns (text, [(name, input, block)])
+            or None on error (printed) — the shared loop handles cancel.
+            A forced round (see ``TOOL_CHOICE_ANY``) that the API rejects
+            for its ``tool_choice`` is retried once unforced."""
+            forced = turn.forced_tool()
+            force = forced is not None and self.forces(forced)
             t0 = time.perf_counter()
             try:
-                resp = client.messages.create(**kwargs)
+                try:
+                    resp = self._create(client, **request(force))
+                except Exception as e:
+                    if not (force and is_tool_choice_error(e)):
+                        raise
+                    log.warning('%s rejected tool_choice (%s); forcing off',
+                                self.name, str(e)[:120])
+                    self._force_ok = False
+                    resp = self._create(client, **request(False))
             except Exception as e:
                 _note_error(e)
                 ui.console.print(f"[red]Anthropic error: {e}[/red]")
@@ -358,7 +521,7 @@ class AnthropicAdapter(Adapter):
             native.append({'role': 'assistant', 'content': resp.content})
             session.messages.append(neutral_assistant(
                 ''.join(text_parts),
-                [(b.name, dict(b.input)) for b in tool_uses],
+                [(b.name, dict(b.input), b.id) for b in tool_uses],
             ))
             calls = [(b.name, dict(b.input), b) for b in tool_uses]
             return (''.join(text_parts), calls)
@@ -370,8 +533,7 @@ class AnthropicAdapter(Adapter):
                 if duplicate:
                     ui.console.print(
                         f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = (f"Already called {name} with these arguments."
-                               " Use the previous result.")
+                    content = turn.DUPLICATE_RESULT.format(name=name)
                 else:
                     content = tools.execute_tool(name, args)
                 results.append({
@@ -381,7 +543,7 @@ class AnthropicAdapter(Adapter):
                 })
                 session.messages.append({
                     'role': 'tool', 'tool_name': name, 'tool_args': args,
-                    'content': content})
+                    'tool_call_id': block.id, 'content': content})
             native.append({'role': 'user', 'content': results})
 
         def add_user(text):
@@ -395,7 +557,8 @@ class AnthropicAdapter(Adapter):
     def summarise(self, transcript: str) -> str:
         try:
             t0 = time.perf_counter()
-            resp = self._client().messages.create(
+            resp = self._create(
+                self._client(),
                 model=session.model,
                 max_tokens=1024,
                 system=(
@@ -416,7 +579,8 @@ class AnthropicAdapter(Adapter):
     def complete(self, prompt: str, max_tokens: int = 1024,
                  model: str = '') -> str:
         t0 = time.perf_counter()
-        resp = self._client().messages.create(
+        resp = self._create(
+            self._client(),
             model=model or session.model, max_tokens=int(max_tokens),
             system=JSON_ONLY,
             messages=[{'role': 'user', 'content': prompt}])

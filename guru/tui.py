@@ -507,6 +507,11 @@ def run(registry=None, routing=None) -> None:
             if new_routing is not None:
                 orch.set_routing(new_routing)
             return True
+        if text == '/brief' or text.startswith('/brief '):
+            from guru import briefcmd
+            await _in_terminal(lambda: print(briefcmd.brief_command(
+                text[6:].strip())))
+            return True
         if text == '/review' or text.startswith('/review '):
             area = text[7:].strip() or 'the repository'
             tasks = config.review_tasks(area)
@@ -584,7 +589,7 @@ def run(registry=None, routing=None) -> None:
             " · Shift+Tab cycle access mode · double Ctrl+C exit")
         main.console.print(
             "[dim]/mode /role /skill /review /models /context /adapters /save"
-            " /resume /compact /search /sandbox /routing[/dim]\n")
+            " /resume /compact /search /sandbox /routing /brief[/dim]\n")
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()

@@ -29,13 +29,54 @@ class TestFileTools:
         self._only(monkeypatch, Path.cwd())
         assert 'Invalid line range' in files.read_file('guru/session.py', 'x')
 
-    def test_read_file_caps_large_files(self, tmp_path, monkeypatch) -> None:
+    def test_read_file_long_file_is_structural(self, tmp_path,
+                                               monkeypatch) -> None:
+        # C1: no lines= on a file over READ_OUTLINE_LINES returns the
+        # structural view (first 20 lines + how to fetch a span), never the
+        # text; a text file has no outline.
         self._only(monkeypatch, tmp_path)
         big = tmp_path / 'big.txt'
-        big.write_text('\n'.join(str(i) for i in range(1, 501)) + '\n')
+        big.write_text('\n'.join(f'row{i}' for i in range(1, 501)) + '\n')
         out = files.read_file(str(big))
-        assert 'lines 1-400 of 500' in out
-        assert 'showing first 400 of 500' in out
+        assert '(500 lines, sha:' in out and 'structural view' in out
+        assert 'First 20 lines:' in out
+        assert '\n    20\trow20' in out and 'row21' not in out
+        assert "lines='21-500'" in out and 'at most 800 lines' in out
+        assert 'Outline' not in out
+
+    def test_read_file_long_python_file_has_outline(self, tmp_path,
+                                                    monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        big = tmp_path / 'big.py'
+        big.write_text(''.join(f'def f{i}():\n    return {i}\n\n\n'
+                               for i in range(60)))
+        out = files.read_file(str(big))
+        assert 'Outline (def/class, line ranges):' in out
+        assert '\nL1-2 def f0()' in out and 'L237-238 def f59()' in out
+        assert 'return 30' not in out          # the text is not returned
+
+    def test_read_file_at_threshold_reads_whole(self, tmp_path,
+                                                monkeypatch) -> None:
+        self._only(monkeypatch, tmp_path)
+        f = tmp_path / 'ok.txt'
+        f.write_text('\n'.join(str(i) for i in range(1, 201)) + '\n')
+        out = files.read_file(str(f))
+        assert 'lines 1-200 of 200' in out and '\n   200\t200' in out
+
+    def test_read_file_range_is_clipped(self, tmp_path, monkeypatch) -> None:
+        # C1: an explicit range never returns more than READ_RANGE_SPAN
+        # (800) lines, so a whole-file read of a long file is impossible.
+        self._only(monkeypatch, tmp_path)
+        big = tmp_path / 'big.txt'
+        big.write_text('\n'.join(str(i) for i in range(1, 1001)) + '\n')
+        out = files.read_file(str(big), '1-1000')
+        assert 'lines 1-800 of 1000' in out and '\n   801\t' not in out
+        assert "clipped at 800 lines; continue with lines='801-1000'" in out
+        out = files.read_file(str(big), '900-1000')
+        assert 'lines 900-1000 of 1000' in out and 'clipped' not in out
+        # A 500-line span fits in one explicit call now.
+        out = files.read_file(str(big), '1-500')
+        assert 'lines 1-500 of 1000' in out and 'clipped' not in out
 
     def test_read_file_refuses_binary(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch, tmp_path)
@@ -87,11 +128,14 @@ class TestFileTools:
             files.set_path_asker(None)
 
     def test_parse_range(self) -> None:
-        assert files._parse_range('', 500) == (1, 400)
+        assert files._parse_range('', 500) == (1, 200)
         assert files._parse_range('10-20', 500) == (10, 20)
         assert files._parse_range('bad', 10) == (None, None)
         assert files._parse_range('5-3', 10) == (None, None)
         assert files._parse_range('1-9999', 50) == (1, 50)
+        assert files._parse_range('1-9999', 5000) == (1, 800)
+        assert files.READ_OUTLINE_LINES == 200
+        assert files.READ_RANGE_SPAN == 800
 
     def test_search_code_finds_matches(self, tmp_path, monkeypatch) -> None:
         self._only(monkeypatch, tmp_path)

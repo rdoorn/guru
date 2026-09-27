@@ -13,6 +13,7 @@ Stdlib only.
 from __future__ import annotations
 
 import ast
+import copy
 import re
 from pathlib import Path
 from typing import Iterator, Optional
@@ -31,26 +32,75 @@ _DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 # --- outline -----------------------------------------------------------------
 
-def _signature(node: ast.AST) -> str:
-    """``def name(args) -> ret`` / ``class Name(Bases)`` from an AST node."""
+def _without_defaults(args: ast.arguments) -> ast.arguments:
+    """A copy of ``args`` with every default value replaced by ``...``:
+    the parameter stays visibly optional, the literal is gone."""
+    out = copy.deepcopy(args)
+    out.defaults = [ast.Constant(value=Ellipsis) for _ in out.defaults]
+    out.kw_defaults = [None if d is None else ast.Constant(value=Ellipsis)
+                       for d in out.kw_defaults]
+    return out
+
+
+def _signature(node: ast.AST, defaults: bool = True) -> str:
+    """``def name(args) -> ret`` / ``class Name(Bases)`` from an AST node.
+    ``defaults=False`` renders every default as ``...`` (the project
+    brief lands in a system prompt: no project string literal there)."""
     if isinstance(node, ast.ClassDef):
         bases = ', '.join(ast.unparse(b) for b in node.bases)
         return f"class {node.name}({bases})" if bases else f"class {node.name}"
     assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     prefix = 'async def' if isinstance(node, ast.AsyncFunctionDef) else 'def'
     ret = f" -> {ast.unparse(node.returns)}" if node.returns else ''
-    return f"{prefix} {node.name}({ast.unparse(node.args)}){ret}"
+    args = node.args if defaults else _without_defaults(node.args)
+    return f"{prefix} {node.name}({ast.unparse(args)}){ret}"
 
 
-def _entries(body: list, depth: int) -> Iterator[str]:
+def _entries(body: list, depth: int, defaults: bool = True) -> Iterator[str]:
     """Outline rows for ``body`` (a module or block body), nested defs
     indented two spaces per level."""
     for node in body:
         if isinstance(node, _DEF_NODES):
             end = getattr(node, 'end_lineno', None) or node.lineno
             yield (f"{'  ' * depth}L{node.lineno}-{end} "
-                   f"{_signature(node)}")
-            yield from _entries(node.body, depth + 1)
+                   f"{_signature(node, defaults)}")
+            yield from _entries(node.body, depth + 1, defaults)
+
+
+def outline_rows(text: str, limit: Optional[int] = None) -> Optional[list]:
+    """The outline rows of Python source ``text`` (``L<start>-<end>
+    <signature>``, nested defs indented), cut to ``limit`` rows with a
+    trailing ``… N more entries`` row; ``None`` when the source does not
+    parse. Shared by ``outline``, ``files.read_file``'s structural view of
+    a long file and the project brief."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    return tree_rows(tree, limit)
+
+
+def tree_rows(tree: ast.Module, limit: Optional[int] = None,
+              defaults: bool = True) -> list:
+    """``outline_rows`` for an already parsed module (``limit`` defaults
+    to ``_MAX_ENTRIES``; ``defaults=False`` strips default values from
+    the signatures, see ``_signature``)."""
+    limit = _MAX_ENTRIES if limit is None else limit
+    rows = list(_entries(tree.body, 0, defaults))
+    if len(rows) > limit:
+        rows = rows[:limit] + [f"… {len(rows) - limit} more entries"]
+    return rows
+
+
+def definitions(tree: ast.Module) -> Iterator[tuple[str, int, int]]:
+    """``(name, line, depth)`` for every def/class in ``tree`` (depth 0 =
+    module level) in source order; the project brief's symbol index."""
+    def walk(body: list, depth: int) -> Iterator[tuple[str, int, int]]:
+        for node in body:
+            if isinstance(node, _DEF_NODES):
+                yield (node.name, node.lineno, depth)
+                yield from walk(node.body, depth + 1)
+    return walk(tree.body, 0)
 
 
 def _clip(text: str, limit: int = _DIGEST_BYTES) -> str:
@@ -112,13 +162,10 @@ def outline(path: str) -> str:
     doc = ast.get_docstring(tree)
     if doc:
         out.append(f'"""{doc.splitlines()[0]}"""')
-    rows = list(_entries(tree.body, 0))
+    rows = tree_rows(tree)
     if not rows:
         out.append("(no def/class at any level)")
-    out.extend(rows[:_MAX_ENTRIES])
-    if len(rows) > _MAX_ENTRIES:
-        out.append(f"… {len(rows) - _MAX_ENTRIES} more entries; outline a"
-                   " narrower file or read_file a range.")
+    out.extend(rows)
     return _clip("\n".join(out))
 
 

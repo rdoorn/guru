@@ -7,9 +7,13 @@ with the case's access mode and auto-deny askers (an unattended run must
 never sit on a prompt), point the ledger at the run's ``ledger/`` dir, run
 the prompt through :class:`guru.bench.BenchRun`, then collect the answer,
 tools, sub-agents, stall nudges, the fixture diff (``git status``), the
-fixture's own pytest verdict and the cost from the ledger rows this case
-appended. Everything touched (cwd, ``config.MODE``, allow-lists, askers,
-persistence of approvals, ledger repository) is restored afterwards.
+fixture's own pytest verdict and — from the ledger rows this case
+appended — the cost, the model-agnostic metrics (``ledger.usage_metrics``:
+tokens, tool bytes shown, turns, calls) and the tool-usage smell counts
+(``ledger_report.tool_smells``: whole-file reads after an outline,
+repeated identical calls, refused calls). Everything touched (cwd,
+``config.MODE``, allow-lists, askers, persistence of approvals, ledger
+repository) is restored afterwards.
 
 Routing: :func:`run_suite` takes a :class:`RoutingSettings` (parsed from a
 ``[routing]`` file by :func:`load_routing_file`) and builds the adapter
@@ -32,15 +36,19 @@ that has an ``[expect.rubric]`` with :mod:`guru.evals.rubric` after its
 deterministic checks (:func:`grade_case`): the grade lands on the result
 (``rubric_score``, ``rubric_reason``), in the run file and as a ``labels``
 row of the run's ledger (``target_id = <run_id>:<case>``, labeller
-``rubric:<model>``). A grade never fails the case by itself; ``rubric_min``
-does (a score below it, or no grade, adds a failing ``rubric_min`` check).
+``rubric:<model>``). ``rubric_samples=N`` asks the judge N times per case
+and records the median (ties to the lower value; every sample on
+``rubric_samples`` of the result). A grade never fails the case by itself;
+``rubric_min`` does (a score below it, or no grade, adds a failing
+``rubric_min`` check).
 The grading call's own cost goes to the run's ledger, not to the case's
 ``cost_usd``. :func:`default_rubric_spec` names the routing file's
 cheapest rung for the CLI's default.
 
 Sandbox cases (``sandbox = true``): the copy is made at a stable path
 (``<tmp>/guru-eval-sandbox/<fixture>``, so the image record and tag are
-reused across runs while the lockfile is unchanged) and provisioned with
+reused across runs while the lockfile is unchanged; ``<tmp>`` is
+``$GURU_EVAL_SANDBOX_ROOT`` when set) and provisioned with
 ``provision.provision`` before the prompt runs — ``pypi.org`` and
 ``files.pythonhosted.org`` are allowed for the case (the runner's own
 build, not a model escalation), the build clock lands in
@@ -92,13 +100,15 @@ from guru.adapters import turn
 from guru.adapters.base import Adapter
 from guru.domain import conversation
 from guru.domain import decisions as decision_seam
-from guru.domain import files, gate, ledger, policy, spend, tools
+from guru.domain import files, gate, ledger, ledger_report, policy, spend
 from guru.domain import routing as routing_domain
+from guru.domain import tools
 from guru.evals import cases, checks, rubric, runs
 from guru.evals.cases import Case, GitFixture
 from guru.evals.checks import Observed
 from guru.evals.runs import CaseResult, Run
 from guru.repositories import settings as routing_settings
+from guru.repositories import briefs
 from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
 from guru.repositories.settings import DecisionsSettings, RoutingSettings
@@ -111,13 +121,22 @@ _GIT_EXCLUDE = '__pycache__/\n.pytest_cache/\n*.pyc\n'
 _GIT_IDENTITY = ['-c', 'user.name=evals', '-c', 'user.email=evals@local',
                  '-c', 'commit.gpgsign=false']
 FIXTURE_PYTEST_TIMEOUT_S = 300
+# Tests a fixture's own pytest never runs for the verdict: container tests
+# (guru's ``sandbox`` marker) build images and take minutes; a fixture
+# without that marker is unaffected by the deselection.
+FIXTURE_PYTEST_DESELECT = 'not sandbox'
 WORKER_DRAIN_S = 30.0          # how long to wait for leftover worker threads
 JUDGE_WARM_UP_S = 30.0         # model loading before the first case
 _WORKER_POLL_S = 0.2
 _PERSISTERS = ('persist_read_dir', 'persist_write_dir', 'persist_domain')
 DEFAULT_TRAJECTORY_DIR = cases.REPO_ROOT / 'evals'   # TRAJECTORY.md
 SANDBOX_UNAVAILABLE = 'sandbox unavailable'
-SANDBOX_WORKDIR = 'guru-eval-sandbox'   # under the temp dir; stable path
+SANDBOX_WORKDIR = 'guru-eval-sandbox'   # under sandbox_root(); stable path
+# Overrides the root of the stable sandbox workdir (default: the temp dir).
+# The test suite sets it per session so a test never touches the path a
+# live eval is using; the runner sets it for a fixture's own pytest.
+SANDBOX_ROOT_ENV = 'GURU_EVAL_SANDBOX_ROOT'
+COPY_LOST = 'fixture copy removed or replaced during the run'
 
 
 def _deny(question: str) -> bool:
@@ -205,18 +224,48 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
+def sandbox_root() -> Path:
+    """Where the stable sandbox workdir lives: ``$GURU_EVAL_SANDBOX_ROOT``
+    when set (the test suite, a fixture's own pytest), else the temp dir."""
+    return Path(os.environ.get(SANDBOX_ROOT_ENV) or tempfile.gettempdir())
+
+
 def _workdir(case: Case) -> Path:
     """A fresh temp dir for the case's copy. A sandbox case uses the
-    stable ``<tmp>/guru-eval-sandbox`` (emptied first): the sandbox keys
-    its image record and tag on the resolved project path, so a stable
-    path means one image per fixture, rebuilt only when the lockfile
-    changes."""
+    stable ``<sandbox_root()>/guru-eval-sandbox`` (emptied first): the
+    sandbox keys its image record and tag on the resolved project path,
+    so a stable path means one image per fixture, rebuilt only when the
+    lockfile changes. The path is shared by every eval process of the
+    user, so nothing else may use it while a case runs (see
+    :func:`_check_copy`)."""
     if not case.sandbox:
         return Path(tempfile.mkdtemp(prefix=f'guru-eval-{case.name}-'))
-    workdir = Path(tempfile.gettempdir()) / SANDBOX_WORKDIR
+    workdir = sandbox_root() / SANDBOX_WORKDIR
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
     return workdir
+
+
+def _inode(path: Path) -> int:
+    return path.stat().st_ino
+
+
+def _check_copy(copy: Path, inode: int) -> None:
+    """``RuntimeError(COPY_LOST)`` unless ``copy`` is still the directory
+    made for this case (same inode). A copy that vanished or was replaced
+    mid-run (run 94fdc1bb11a5: a concurrent guru pytest run recreated the
+    stable sandbox path) would otherwise be diffed as clean or fail the
+    checks with a bare ``Errno 2`` — and the agents' process cwd is gone
+    with it, so their turns fail too."""
+    try:
+        same = copy.is_dir() and _inode(copy) == inode
+    except OSError:
+        same = False
+    if not same:
+        raise RuntimeError(
+            f'{COPY_LOST}: {copy} (another eval, or a guru test run, '
+            f'sharing {copy.parent}? set {SANDBOX_ROOT_ENV} to separate '
+            'them)')
 
 
 def _assert_no_running_loop(what: str) -> None:
@@ -308,29 +357,69 @@ def files_changed(repo: Path) -> list[str]:
 def _fixture_env(repo: Path) -> dict:
     """The environment for the fixture's pytest: ``PYTHONPATH`` starts with
     the copy, so a copied package (a git fixture of a real project, which
-    has no venv of its own) shadows any installed one, and bytecode writing
-    is off so edits between two runs are never masked by a cached .pyc."""
+    has no venv of its own) shadows any installed one, bytecode writing
+    is off so edits between two runs are never masked by a cached .pyc,
+    and ``TMPDIR``/``GURU_EVAL_SANDBOX_ROOT`` point inside the copy."""
     env = dict(os.environ)
     prev = env.get('PYTHONPATH', '')
     env['PYTHONPATH'] = str(repo) + (os.pathsep + prev if prev else '')
     # No bytecode in the copy: a stale .pyc (same size and mtime second as
     # an edited source) would make the fixture's tests report the old code.
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    # A fixture that is guru itself (the dogfood case) runs this runner's
+    # own tests, which empty the stable sandbox workdir: give them their
+    # own temp dir and sandbox root NEXT TO the copy (inside the case's
+    # workdir, removed with it) — not inside the copy, which is a git
+    # repository: tests that build a "not a repo" directory under TMPDIR
+    # would otherwise find themselves inside one (loop-2 dogfood run
+    # fe9e21c94f43 failed two of guru's own tests that way).
+    scratch = Path(repo).parent / '.guru-eval-tmp'
+    scratch.mkdir(exist_ok=True)
+    env['TMPDIR'] = str(scratch)
+    env[SANDBOX_ROOT_ENV] = str(scratch)
+    # A private HOME as well: guru resolves ~/.guru from HOME, and the
+    # runner has just provisioned a sandbox image for this very copy, so
+    # guru-as-fixture would otherwise see itself in sandbox mode and fail
+    # its own tests that assume none (loop-3 dogfood rerun c38e907de6a2:
+    # 12 tool-registry tests). The developer's settings and adapters stay
+    # out of the fixture's tests too.
+    home = scratch / 'home'
+    home.mkdir(exist_ok=True)
+    env['HOME'] = str(home)
     return env
+
+
+FIXTURE_TAIL_LINES = 30
+
+
+def fixture_tests_result(repo: Path,
+                         timeout: float = FIXTURE_PYTEST_TIMEOUT_S
+                         ) -> tuple[bool, str]:
+    """Run the fixture's own pytest in ``repo`` (this interpreter, the copy
+    first on ``PYTHONPATH``, tests marked ``sandbox`` deselected); return
+    ``(passed, tail)`` where ``tail`` is the last ``FIXTURE_TAIL_LINES``
+    lines of its output (the failing test ids and summary line) — a bare
+    False told nobody WHY a fixture failed (loop-3 dogfood run
+    ac6c18d35849)."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
+             '--color=no', '-m', FIXTURE_PYTEST_DESELECT],
+            cwd=repo, capture_output=True, text=True, timeout=timeout,
+            env=_fixture_env(repo))
+    except subprocess.TimeoutExpired:
+        return False, f'fixture pytest timed out after {timeout:.0f}s'
+    except OSError as e:
+        return False, f'fixture pytest could not run: {e}'
+    text = (proc.stdout or '') + (proc.stderr or '')
+    tail = '\n'.join(text.strip().splitlines()[-FIXTURE_TAIL_LINES:])
+    return proc.returncode == 0, tail
 
 
 def fixture_tests_pass(repo: Path,
                        timeout: float = FIXTURE_PYTEST_TIMEOUT_S) -> bool:
-    """Run the fixture's own pytest in ``repo`` (this interpreter, the copy
-    first on ``PYTHONPATH``); True when it exits 0."""
-    try:
-        proc = subprocess.run(
-            [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider'],
-            cwd=repo, capture_output=True, text=True, timeout=timeout,
-            env=_fixture_env(repo))
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
+    """``fixture_tests_result`` without the tail."""
+    return fixture_tests_result(repo, timeout)[0]
 
 
 # --- adapter / model resolution --------------------------------------------
@@ -426,15 +515,24 @@ class _Sandbox:
     leaked: bool = False
 
 
+# The per-case brief store, next to the fixture copy in the case workdir.
+BRIEFS_DIRNAME = '.guru-briefs'
+
+
 @contextlib.contextmanager
 def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
              allow_spend: bool = False) -> Iterator[_Sandbox]:
-    """cwd, project dir, access mode, allow-lists, askers, persistence and
-    ledger for one case; all restored afterwards (askers excepted when
-    workers leaked). The spend asker denies unless ``allow_spend``; the
-    sandbox approval asker denies unless ``allow_spend``, and then grants
-    ``intended`` submits only (:func:`_grant_intended`)."""
+    """cwd, project dir, access mode, allow-lists, askers, persistence,
+    brief store and ledger for one case; all restored afterwards (askers
+    excepted when workers leaked). The spend asker denies unless
+    ``allow_spend``; the sandbox approval asker denies unless
+    ``allow_spend``, and then grants ``intended`` submits only
+    (:func:`_grant_intended`). The brief store (``GURU_BRIEFS_DIR``) is a
+    directory next to the copy, removed with the case's workdir: a fixture
+    copy is a new absolute path every case, so its briefs must not land
+    under the developer's ``~/.guru/briefs``."""
     prev_cwd = os.getcwd()
+    prev_briefs = os.environ.get(briefs.BRIEFS_DIR_ENV)
     prev_mode = config.MODE
     prev_grant = config.AUTO_GRANT
     prev_ledger = config.LEDGER_ENABLED
@@ -451,6 +549,8 @@ def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
     state = _Sandbox()
     try:                       # every mutation below is undone by finally
         os.chdir(copy)
+        os.environ[briefs.BRIEFS_DIR_ENV] = str(
+            Path(copy).resolve().parent / BRIEFS_DIRNAME)
         # "The project" is the copy: the sandbox verbs resolve it from here.
         config.PROJECT_GURU_DIR = copy.resolve() / '.guru'
         config.SANDBOX_POLICY_PATH = config.PROJECT_GURU_DIR / 'sandbox.toml'
@@ -493,6 +593,10 @@ def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
         config.LEDGER_ENABLED = prev_ledger
         config.AUTO_GRANT = prev_grant
         config.MODE = prev_mode
+        if prev_briefs is None:
+            os.environ.pop(briefs.BRIEFS_DIR_ENV, None)
+        else:
+            os.environ[briefs.BRIEFS_DIR_ENV] = prev_briefs
         os.chdir(prev_cwd)
 
 
@@ -536,8 +640,9 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
     the model run (not the fixture copy, nor the sandbox provisioning
     that a ``case.sandbox`` case does first — ``sandbox`` is its
     :func:`provision_sandbox` record, None otherwise). ``error`` is set
-    when workers were still running after the bounded drain. ``routing``
-    makes the bench route sub-agents (inert when None).
+    when workers were still running after the bounded drain, or when an
+    agent's turn raised (``BenchRun.worker_errors``). ``routing`` makes
+    the bench route sub-agents (inert when None).
     """
     registry = routing.registry if routing is not None else None
     settings = routing.settings if routing is not None else None
@@ -546,11 +651,9 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         base = _state_for(case.model, base_state, adapters)
         token = session.use(base)
         t0 = time.monotonic()
+        run = bench.BenchRun(base, registry=registry, routing=settings)
         try:
-            agents = asyncio.run(
-                bench.BenchRun(base, registry=registry,
-                               routing=settings).run(case.prompt,
-                                                     timeout=case.timeout_s))
+            agents = asyncio.run(run.run(case.prompt, timeout=case.timeout_s))
         finally:
             seconds = time.monotonic() - t0
             session.reset(token)
@@ -558,6 +661,12 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         if not _drain_workers(agents, WORKER_DRAIN_S):
             box.leaked = True
             error = 'workers still running after timeout'
+        elif run.worker_errors:
+            # A turn that raised (run 94fdc1bb11a5: the mailbox synthesis
+            # turn died on a vanished cwd) is a failed case, not a case
+            # whose answer is whatever the agent said before.
+            error = 'worker error: ' + '; '.join(
+                f'{title}: {text}' for title, text in run.worker_errors)
         return agents, seconds, error, info
 
 
@@ -575,7 +684,8 @@ def _stall_nudges(agents: list) -> int:
 def _observe(agents: list, seconds: float, timed_out: bool,
              changed: list[str], tests_pass: Optional[bool],
              error: str, gate_verdicts: Optional[list[str]] = None,
-             sandbox: Optional[dict] = None) -> Observed:
+             sandbox: Optional[dict] = None,
+             tests_tail: str = '') -> Observed:
     answer = bench._final_answer(agents[0]) if agents else ''
     skipped = error == SANDBOX_UNAVAILABLE
     if not error and not timed_out and not answer:
@@ -590,6 +700,7 @@ def _observe(agents: list, seconds: float, timed_out: bool,
                if a.state.active_role],
         stall_nudges=_stall_nudges(agents), seconds=round(seconds, 3),
         files_changed=changed, fixture_tests_pass=tests_pass,
+        fixture_tests_tail=tests_tail if tests_pass is False else '',
         timed_out=timed_out, error=error,
         gate_verdicts=list(gate_verdicts or []), sandbox=sandbox,
         skipped=skipped)
@@ -613,6 +724,15 @@ def _cost(rows: list[dict]) -> Optional[float]:
     if not rows or any(r.get('cost_usd') is None for r in rows):
         return None
     return float(sum(r['cost_usd'] for r in rows))
+
+
+def case_smells(tool_events_rows: list[dict]) -> dict[str, int]:
+    """The three tool-usage smell counts of a case over its tool events
+    (``runs.SMELL_KEYS``: whole-file ``read_file`` after an ``outline`` of
+    the same path, identical repeated calls within a task, refused calls)
+    from :func:`ledger_report.tool_smells`."""
+    smells = ledger_report.tool_smells(tool_events_rows, preactivated=[])
+    return {key: int(smells[key]['count']) for key in runs.SMELL_KEYS}
 
 
 def _routes(rows: list[dict]) -> list[str]:
@@ -655,7 +775,13 @@ def run_case(case: Case, base_state: session.SessionState,
     (:func:`provision_sandbox`; ``observed.sandbox``), its gate verdicts
     come from the ``sandbox_events`` rows it appended
     (``observed.gate_verdicts``), and without Colima it is skipped with
-    error ``sandbox unavailable`` (``observed.skipped``) and fails.
+    error ``sandbox unavailable`` (``observed.skipped``) and fails. A copy
+    that is not the same directory after the run (removed or replaced by
+    another process) fails with error ``COPY_LOST`` instead of being
+    diffed; an agent turn that raised fails with ``worker error: ...``.
+    ``metrics`` (``ledger.usage_metrics`` over the case's ``calls`` and
+    ``tool_events`` rows) and ``smells`` (:func:`case_smells`) land on the
+    result next to the cost.
     """
     _assert_no_running_loop('run_case')
     out_dir = Path(out_dir)
@@ -664,16 +790,19 @@ def run_case(case: Case, base_state: session.SessionState,
     rows_before = len(repo.rows('calls'))
     tasks_before = len(repo.rows('tasks'))
     events_before = len(repo.rows('sandbox_events'))
+    tools_before = len(repo.rows('tool_events'))
     workdir = _workdir(case)
     agents: list = []
     error = ''
     seconds = 0.0
     changed: list[str] = []
     tests_pass: Optional[bool] = None
+    tests_tail = ''
     sandbox: Optional[dict] = None
     try:
         copy = prepare_fixture(case.fixture_git or case.fixture, workdir,
                                fixtures_dir)
+        inode = _inode(copy)
         try:
             agents, seconds, error, sandbox = _execute(
                 case, copy, base_state, adapters, repo, routing,
@@ -683,9 +812,10 @@ def run_case(case: Case, base_state: session.SessionState,
         finally:
             if case.sandbox:
                 verbs.cleanup_all()      # the verbs' task copies
+        _check_copy(copy, inode)         # the checks must see THIS copy
         changed = files_changed(copy)
         if case.expect.fixture_tests_pass is not None:
-            tests_pass = fixture_tests_pass(copy)
+            tests_pass, tests_tail = fixture_tests_result(copy)
     except Exception as e:                           # noqa: BLE001
         error = error or str(e) or type(e).__name__
     finally:
@@ -693,19 +823,24 @@ def run_case(case: Case, base_state: session.SessionState,
     timed_out = bool(case.timeout_s) and seconds >= case.timeout_s
     verdicts = gate_verdicts(repo.rows('sandbox_events')[events_before:])
     obs = _observe(agents, seconds, timed_out, changed, tests_pass, error,
-                   gate_verdicts=verdicts, sandbox=sandbox)
+                   gate_verdicts=verdicts, sandbox=sandbox,
+                   tests_tail=tests_tail)
     if case.fixture_git is not None:
         obs.fixture_git = {'path': str(case.fixture_git.path),
                            'ref': case.fixture_git.ref}
     tpath = out_dir / 'transcripts' / f'{case.name}.json.gz'
     _save_transcript(agents, tpath)
     results = checks.evaluate(case.expect, obs)
+    calls = repo.rows('calls')[rows_before:]
+    tool_events = repo.rows('tool_events')[tools_before:]
     return CaseResult(
         case=case.name, passed=checks.passed(results),
         checks=[asdict(r) for r in results], observed=asdict(obs),
         rubric=case.expect.rubric, transcript_path=str(tpath),
-        cost_usd=_cost(repo.rows('calls')[rows_before:]),
-        routes=_routes(repo.rows('tasks')[tasks_before:]))
+        cost_usd=_cost(calls),
+        routes=_routes(repo.rows('tasks')[tasks_before:]),
+        metrics=ledger.usage_metrics(calls, tool_events),
+        smells=case_smells(tool_events))
 
 
 # --- rubric grading ---------------------------------------------------------
@@ -723,51 +858,83 @@ def default_rubric_spec(routing: RoutingSettings) -> str:
 
 
 def _record_grade(repo: JsonlLedger, target_id: str, labeller: str,
-                  grade: rubric.Grade) -> None:
+                  grade: rubric.SampledGrade) -> None:
     """One ``labels`` row for a grade in the run's ledger (the ledger is
-    enabled and pointed at ``repo`` for the write, then restored)."""
+    enabled and pointed at ``repo`` for the write, then restored); the
+    label is the median score, the note every sample's score and
+    reason."""
     prev_repo, prev_enabled = ledger.repository(), config.LEDGER_ENABLED
     ledger.set_repository(repo)
     config.LEDGER_ENABLED = True
     try:
         ledger.record_label(target_id, labeller, str(grade.score),
-                            note=grade.reason)
+                            note=grade.note)
         ledger.flush()
     finally:
         ledger.set_repository(prev_repo)
         config.LEDGER_ENABLED = prev_enabled
 
 
+EMPTY_ANSWER_REASON = 'empty answer'
+
+
+def empty_answer_grade(samples: int = 1) -> rubric.SampledGrade:
+    """The grade of an empty answer: 0 without a judge call, one
+    ``Grade(0, EMPTY_ANSWER_REASON)`` per sample asked for (so the cell
+    reads like a graded case; :func:`is_empty_answer_grade` tells it
+    apart, and the stability share leaves it out — nothing was
+    sampled)."""
+    return rubric.SampledGrade(
+        tuple(rubric.Grade(0, EMPTY_ANSWER_REASON)
+              for _ in range(max(1, samples))))
+
+
+def is_empty_answer_grade(grade: Optional[rubric.SampledGrade]) -> bool:
+    """Whether ``grade`` is the synthetic :func:`empty_answer_grade`
+    (every sample a 0 with ``EMPTY_ANSWER_REASON``), not a judge's."""
+    return grade is not None and all(
+        g.score == 0 and g.reason == EMPTY_ANSWER_REASON
+        for g in grade.samples)
+
+
 def grade_case(case: Case, res: CaseResult, judge: rubric.Judge,
                repo: JsonlLedger, target_id: str,
-               rubric_min: Optional[int] = None) -> None:
+               rubric_min: Optional[int] = None, samples: int = 1) -> None:
     """Grade ``res`` against the case's rubric and record it; never raises.
 
     A case without a rubric is left alone. An empty answer scores 0
-    without asking the judge. The grade goes to ``res.rubric_score`` /
-    ``res.rubric_reason`` and to a ``labels`` row in ``repo`` (target
-    ``target_id``, labeller ``rubric:<model>``); a provider error or an
-    unparsable reply leaves the score None with ``error: ...`` as the
-    reason (logged, no label). The grade does not touch ``res.passed``
-    unless ``rubric_min`` is set: then a score below it — or no grade —
-    appends a failing ``rubric_min`` check and fails the case, and a
-    sufficient one appends a passing check.
+    without asking the judge. The judge is asked ``samples`` times
+    (:func:`rubric.grade_samples`); the recorded score is the median
+    (ties to the lower value), ``res.rubric_samples`` keeps every sample
+    score when there was more than one. The grade goes to
+    ``res.rubric_score`` / ``res.rubric_reason`` and to a ``labels`` row
+    in ``repo`` (target ``target_id``, labeller ``rubric:<model>``, the
+    note listing all samples); a provider error or an unparsable reply on
+    any sample leaves the score None with ``error: ...`` as the reason
+    (logged, no label). The grade does not touch ``res.passed`` unless
+    ``rubric_min`` is set: then a score below it — or no grade — appends
+    a failing ``rubric_min`` check and fails the case, and a sufficient
+    one appends a passing check.
     """
     if not case.expect.rubric:
         return
     answer = str(res.observed.get('answer') or '')
-    grade: Optional[rubric.Grade] = None
+    grade: Optional[rubric.SampledGrade] = None
     try:
         if not answer.strip():
-            grade = rubric.Grade(0, 'empty answer')
+            grade = empty_answer_grade(samples)
         else:
-            grade = rubric.grade(case.prompt, case.expect.rubric, answer,
-                                 judge)
+            grade = rubric.grade_samples(
+                case.prompt, case.expect.rubric, answer, judge,
+                evidence_text=rubric.evidence(res.observed, res.cost_usd),
+                samples=samples)
     except Exception as e:                           # noqa: BLE001
         res.rubric_reason = f'error: {e}'
         log.warning('evals: rubric grading of %s failed: %s', case.name, e)
     if grade is not None:
-        res.rubric_score, res.rubric_reason = grade.score, grade.reason
+        res.rubric_score, res.rubric_reason = grade.score, grade.note
+        res.rubric_samples = (list(grade.scores) if len(grade.samples) > 1
+                              else [])
         _record_grade(repo, target_id, rubric.labeller(judge), grade)
     if rubric_min is None:
         return
@@ -860,7 +1027,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               routing_name: str = '', allow_spend: bool = False,
               decisions: Optional[DecisionsSettings] = None,
               rubric_spec: str = '',
-              rubric_min: Optional[int] = None) -> Run:
+              rubric_min: Optional[int] = None,
+              rubric_samples: int = 1) -> Run:
     """Run every case, save the run file and append the trajectory row.
 
     Synchronous; see :func:`run_case` for the loop and concurrency rules.
@@ -880,14 +1048,18 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     cleared afterwards. ``rubric_spec`` (``Adapter|model``, resolved
     through that registry; ``ValueError`` for an unknown adapter) grades
     every rubric case with :func:`grade_case` before ``on_result`` sees
-    it, ``rubric_min`` making a low grade fail the case; the spec lands on
-    ``Run.rubric``.
+    it, ``rubric_min`` making a low grade fail the case, ``rubric_samples``
+    (``ValueError`` below 1) asking the judge that many times per case
+    and recording the median; the spec and the count land on
+    ``Run.rubric`` / ``Run.rubric_samples``.
     """
+    if rubric_samples < 1:
+        raise ValueError('rubric_samples must be at least 1')
     _assert_no_running_loop('run_suite')
     skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
     out_root = Path(out_root)
     if adapters is None:
-        adapters = bench._build_adapters()
+        adapters = bench.build_adapters()
     if base_state is None:
         base_state, model_spec = resolve_base(model_spec, adapters, num_ctx)
     elif not model_spec or model_spec == cases.DEFAULT_MODEL:
@@ -919,7 +1091,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
                 if judge is not None:
                     grade_case(case, res, judge,
                                JsonlLedger(out_dir / 'ledger'),
-                               f'{run_id}:{case.name}', rubric_min)
+                               f'{run_id}:{case.name}', rubric_min,
+                               samples=rubric_samples)
                 results.append(res)
                 if on_result is not None:
                     on_result(res)
@@ -930,7 +1103,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               num_ctx=base_state.num_ctx or base_state.num_ctx_override,
               routing=routing_name if routing is not None else '',
               controller=bool(routing is not None and routing.controller),
-              judges=judge_names, rubric=rubric_spec if judge else '')
+              judges=judge_names, rubric=rubric_spec if judge else '',
+              rubric_samples=rubric_samples if judge else 1)
     runs.save(run, out_root)
     runs.append_trajectory(run, Path(trajectory_dir), note=note)
     return run

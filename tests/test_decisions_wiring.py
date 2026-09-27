@@ -1,9 +1,7 @@
 """The turn loop and web_fetch feed the ledger and the decision seam."""
-import threading
-
 import pytest
 
-from guru import config, session
+from guru import session
 from guru.adapters import turn
 from guru.domain import decisions, ledger, tools
 
@@ -50,128 +48,18 @@ def _loop(replies, monkeypatch, fake_repo, can_spawn=False, tool_rounds=(),
     return rec.calls, fake_repo.stream('turns')
 
 
-class TestStallShadow:
-    """Every non-empty candidate final answer is judged as a stall or not."""
+class TestStallPointRetired:
+    """The stall point no longer acts: the turn contract (a forced tool
+    call, guru.adapters.turn) replaced the preamble heuristic and its
+    nudge, so no ``stall`` question is shadowed or decided any more."""
 
-    def test_final_answer_shadows_stall_with_heuristic(
-            self, monkeypatch, fake_repo):
-        calls, _ = _loop(["Let me read the files:"], monkeypatch, fake_repo)
-        point, ids, heuristic, states = calls[0]
-        assert point == 'stall' and ids == ['stall'] and heuristic is True
-
-    def test_substantive_answer_heuristic_false(self, monkeypatch, fake_repo):
-        calls, _ = _loop(["The bug is in parse_range; end is exclusive."],
-                         monkeypatch, fake_repo)
-        assert calls[0][0] == 'stall' and calls[0][2] is False
-
-    def test_empty_answer_is_not_shadowed(self, monkeypatch, fake_repo):
-        calls, _ = _loop([""], monkeypatch, fake_repo)
-        assert calls == []
-
-
-class TestStallActive:
-    """With the stall point active, the judge's verdict drives the nudge."""
-
-    @pytest.fixture(autouse=True)
-    def _active(self, monkeypatch) -> None:
-        decisions.clear_judges()
-        decisions.reset_breakers()
-        monkeypatch.setattr(config, 'DECISIONS_MODE', 'active')
-        monkeypatch.setattr(config, 'DECISIONS_ACTIVE', {'stall': True})
-        monkeypatch.setattr(config, 'DECISIONS_THRESHOLDS', {})
-        monkeypatch.setattr(config, 'DECISIONS_TIMEOUT_MS', 500)
-        monkeypatch.setattr(session, 'task_id', '')
-        yield
-        decisions.clear_judges()
-
-    def _judge(self, *p_yes: float, gate=None, fail: bool = False):
-        """Judge answering P(yes) = ``p_yes[i]`` on its i-th call (the last
-        value repeats)."""
-        script = list(p_yes)
-
-        class Judge:
-            name = 'fake'
-
-            def ask(self, questions):
-                if gate is not None:
-                    gate.wait(5)
-                if fail:
-                    raise RuntimeError('judge exploded')
-                p = script.pop(0) if len(script) > 1 else script[0]
-                return [decisions.Answer(
-                    chosen=p >= 0.5, dist={'yes': p, 'no': 1 - p},
-                    confidence=1.0, judge='fake', ms=1) for _ in questions]
-        judge = Judge()
-        decisions.set_judge('stall', judge)
-        return judge
-
-    def _decision_rows(self, fake_repo):
-        decisions.flush()
-        ledger.flush()
-        return fake_repo.stream('decisions')
-
-    def test_judge_yes_nudges_a_substantive_looking_answer(
-            self, monkeypatch, fake_repo):
-        self._judge(0.9, 0.1)
-        _, turns = _loop(["Sure, I can do that.", "The answer is 42."],
-                         monkeypatch, fake_repo, nudge=True)
-        [row] = turns
-        assert row['struggle']['stall_nudges'] == 1
-        rows = self._decision_rows(fake_repo)
-        assert [r['used'] for r in rows] == ['judge', 'judge']
-        assert [r['chosen'] for r in rows] == [True, False]
-        assert rows[0]['heuristic'] is False and rows[0]['mode'] == 'active'
-
-    def test_judge_no_overrides_a_preamble_heuristic(
-            self, monkeypatch, fake_repo):
-        self._judge(0.1)
-        _, turns = _loop(["Let me read the files:"], monkeypatch, fake_repo,
-                         nudge=True)
+    def test_no_stall_question_on_a_text_answer(self, monkeypatch,
+                                                fake_repo):
+        calls, turns = _loop(["Let me read the files:"], monkeypatch,
+                             fake_repo, nudge=True)
+        assert all(c[0] != 'stall' for c in calls)
         [row] = turns
         assert row['struggle']['stall_nudges'] == 0
-        [r] = self._decision_rows(fake_repo)
-        assert r['heuristic'] is True and r['chosen'] is False
-
-    def test_threshold_respected(self, monkeypatch, fake_repo):
-        monkeypatch.setattr(config, 'DECISIONS_THRESHOLDS', {'stall': 0.95})
-        self._judge(0.9)
-        _, turns = _loop(["Sure, I can do that."], monkeypatch, fake_repo,
-                         nudge=True)
-        assert turns[0]['struggle']['stall_nudges'] == 0
-        [r] = self._decision_rows(fake_repo)
-        assert r['chosen'] is False and r['threshold'] == 0.95
-
-    def test_timeout_uses_heuristic(self, monkeypatch, fake_repo):
-        gate = threading.Event()
-        monkeypatch.setattr(config, 'DECISIONS_TIMEOUT_MS', 50)
-        self._judge(0.1, gate=gate)
-        try:
-            _, turns = _loop(["Let me read the files:", "Done."],
-                             monkeypatch, fake_repo, nudge=True)
-            assert turns[0]['struggle']['stall_nudges'] == 1
-            ledger.flush()
-            rows = fake_repo.stream('decisions')
-            assert rows[0]['used'] == 'heuristic'
-            assert rows[0]['fallback_reason'] == 'timeout'
-        finally:
-            gate.set()
-            decisions.flush()
-
-    def test_error_uses_heuristic(self, monkeypatch, fake_repo):
-        self._judge(0.1, fail=True)
-        _, turns = _loop(["Let me read the files:", "Done."],
-                         monkeypatch, fake_repo, nudge=True)
-        assert turns[0]['struggle']['stall_nudges'] == 1
-        rows = self._decision_rows(fake_repo)
-        assert rows[0]['used'] == 'heuristic'
-        assert rows[0]['fallback_reason'] == 'error'
-
-    def test_empty_reply_is_always_a_stall(self, monkeypatch, fake_repo):
-        self._judge(0.0)
-        _, turns = _loop(["", "Done."], monkeypatch, fake_repo, nudge=True)
-        assert turns[0]['struggle']['stall_nudges'] == 1
-        rows = self._decision_rows(fake_repo)
-        assert [r['heuristic'] for r in rows] == [False]   # only "Done."
 
     def test_panel_stays_shadow(self, monkeypatch, fake_repo):
         calls, _ = _loop(["Here is my review."], monkeypatch, fake_repo,
@@ -194,9 +82,12 @@ class TestPanelShadow:
         assert panel[0][3][0] == 'Task: review the login code'
 
     def test_panel_asked_once_even_when_nudged(self, monkeypatch, fake_repo):
-        calls, _ = _loop(["Let me read the files:", "Here is my review."],
+        """The delegation nudge sends the model round again; the panel
+        questions are still asked once per turn."""
+        monkeypatch.setattr(turn, '_should_delegate', lambda: True)
+        calls, _ = _loop(["Full assessment.", "Here is my review."],
                          monkeypatch, fake_repo, can_spawn=True, nudge=True)
-        assert [c[0] for c in calls] == ['stall', 'panel', 'stall']
+        assert [c[0] for c in calls] == ['panel']
 
     @pytest.mark.parametrize('request_text', [
         '[joined results]\n\n— agent1 · task: review x\nfindings…',
@@ -208,7 +99,7 @@ class TestPanelShadow:
         results as tasks)."""
         calls, _ = _loop(["Consolidated report."], monkeypatch, fake_repo,
                          can_spawn=True, request=request_text)
-        assert [c[0] for c in calls] == ['stall']
+        assert calls == []
 
     def test_sub_agent_does_not_shadow_panel(self, monkeypatch, fake_repo):
         calls, _ = _loop(["Here is my review."], monkeypatch, fake_repo,
@@ -252,12 +143,13 @@ class TestTurnRecord:
 
     def test_waiting_turn_still_writes_row(self, monkeypatch, fake_repo):
         """A turn ended by a join (``session.turn_waiting``) has no answer
-        but still closes with exactly one TurnRecord."""
+        but still closes with exactly one TurnRecord (a hands-on
+        delegation-capable agent; a controller delegates through plan)."""
         _quiet(monkeypatch)
         monkeypatch.setattr(session, 'messages', [
             {'role': 'user', 'content': 'review the login code'}])
         monkeypatch.setattr(session, 'can_spawn', True)
-        monkeypatch.setattr(session, 'controller', True)
+        monkeypatch.setattr(session, 'controller', False)
         steps = iter([('', [('spawn', {'task': 'x'}, None)]),
                       ('', [('join', {'targets': 'agent1'}, None)])])
 
@@ -354,14 +246,25 @@ class TestTurnStruggleAndCost:
     def _not_in_task(self, monkeypatch) -> None:
         monkeypatch.setattr(session, 'task_id', '')
 
-    def test_stall_nudge_counted_as_delta(self, monkeypatch, fake_repo):
-        session.struggle['stall_nudges'] = 3          # from earlier turns
+    def test_protocol_violation_counted_as_delta(self, monkeypatch,
+                                                 fake_repo):
+        """A forcing adapter, two text-only replies: one re-prompt, then
+        the text is the answer and this turn's delta is 1."""
+        class Forcing:
+            name = 'forcing'
+
+            def forces(self, tool):
+                return True
+        monkeypatch.setattr(session, 'adapter', Forcing())
+        session.struggle['protocol_violation'] = 3    # from earlier turns
+        session.struggle['stall_nudges'] = 2
         _, turns = _loop(["Let me look:", "Done."], monkeypatch, fake_repo,
                          nudge=True)
         [row] = turns
-        assert row['struggle']['stall_nudges'] == 1
+        assert row['struggle']['protocol_violation'] == 1
+        assert row['struggle']['stall_nudges'] == 0     # never bumped now
         assert row['struggle']['delegation_nudges'] == 0
-        assert session.struggle['stall_nudges'] == 4
+        assert session.struggle['protocol_violation'] == 4
         assert set(row['struggle']) == set(session.STRUGGLE_KEYS)
 
     def test_delegation_nudge_counted(self, monkeypatch, fake_repo):

@@ -121,6 +121,17 @@ class TestFiles:
         r = one(e, obs(files_changed=['app/session.py']))
         assert not r.passed and 'app/session.py' in r.detail
 
+    def test_files_changed_any_needs_one_of_them(self) -> None:
+        e = Expect(files_changed_any=['guru/ledger_cli.py', 'other.py'])
+        ok = evaluate(e, obs(files_changed=['guru/ledger_cli.py',
+                                            'tests/test_new.py']))
+        assert ok == [CheckResult('files_changed_any', True, '')]
+        bad = evaluate(e, obs(files_changed=['tests/test_new.py']))
+        assert bad[0].passed is False
+        assert "none of ['guru/ledger_cli.py', 'other.py']" in bad[0].detail
+        assert "['tests/test_new.py']" in bad[0].detail
+        assert evaluate(Expect(), obs(files_changed=['x'])) == []
+
     def test_files_unchanged(self) -> None:
         e = Expect(files_unchanged=['tests/test_wordcount.py'])
         assert one(e, obs(files_changed=['wordcount.py'])).passed
@@ -208,3 +219,18 @@ class TestGateVerdict:
         e = Expect(gate_verdict='unclear', gate_verdict_any=['unclear'])
         names = [r.name for r in evaluate(e, obs(gate_verdicts=['unclear']))]
         assert names == ['gate_verdict', 'gate_verdict_any']
+
+
+class TestFixtureTestsTail:
+    def test_failing_check_names_the_failing_tests(self) -> None:
+        e = Expect(fixture_tests_pass=True)
+        o = obs(fixture_tests_pass=False,
+                fixture_tests_tail='x\nFAILED tests/test_a.py::test_b - '
+                                   'boom\n1 failed, 3 passed in 0.1s')
+        r = one(e, o)
+        assert not r.passed
+        assert 'FAILED tests/test_a.py::test_b' in r.detail
+        assert '1 failed, 3 passed' in r.detail
+
+    def test_tail_defaults_empty(self) -> None:
+        assert obs().fixture_tests_tail == ''

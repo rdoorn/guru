@@ -8,13 +8,26 @@ command of :func:`run`, whose ``argv[0]`` must be in
 as ``1000:1000``, all capabilities dropped, ``no-new-privileges``, a
 read-only root, a tmpfs ``/tmp``, pid/memory/cpu limits and the working
 copy bind-mounted at ``/work`` — the only writable path, and a copy: the
-real tree is never mounted. A run that outlives its timeout is
-``docker kill``\\ ed by the ``--name`` guru generated, because killing the
-docker CLI's process group does not stop the container the daemon owns.
+real tree is never mounted — and ``HOME``/``XDG_CACHE_HOME`` pointed at
+the tmpfs (``CONTAINER_ENV``), the rest of the environment scrubbed. The
+copy's ``.git`` is mounted read-only on top of it (``/work/.git:ro``):
+the baseline commit :func:`diff` and
+:func:`show_baseline` read is what the gate compares against, so the
+code under review must not be able to rewrite it. A run that outlives
+its timeout is ``docker kill``\\ ed by the ``--name`` guru generated,
+because killing the docker CLI's process group does not stop the
+container the daemon owns.
 
 Working copies (:func:`prepare_copy`) are ``git init``\\ ed and committed so
-:func:`diff` can return the sandbox's changes as a unified diff; they live
+:func:`diff` can return the sandbox's changes as a unified diff and
+:func:`show_baseline` the pre-change content of one file; they live
 under ``~/.guru/sandbox/<name>/work/``, a path Colima mounts into its VM.
+The baseline commit's sha is recorded in the copy's ``COPY_MARKER``;
+the caller keeps it (``guru.sandbox.verbs`` reads it the moment the copy
+is made) and both readers compare it — or, for a caller without one, the
+marker's — with ``git rev-parse HEAD`` first: a copy whose baseline moved
+raises :class:`BaselineChanged` (the second belt behind the read-only
+mount) and is no longer read.
 When the project is a git repository the copy is the *positive* list
 ``git ls-files --cached --others --exclude-standard`` — tracked and
 untracked-but-not-ignored files only, so a gitignored ``secrets.yaml`` or
@@ -59,7 +72,14 @@ DIFF_OUT_KB = 2048
 # which only the classic builder (DOCKER_BUILDKIT=0) can attach to.
 BUILDKIT_NETWORKS = frozenset(('none', 'default', 'host'))
 # Marker file prepare_copy writes; remove_copy refuses a tree without it.
+# Its second line is ``baseline: <sha>`` — the copy's baseline commit.
 COPY_MARKER = '.guru-sandbox-copy'
+# Name prefix of the per-task copies ``guru.sandbox.verbs`` makes under the
+# work root (``task-<task>-<hex>``); ``remove_copy`` accepts such a
+# directory under the work root even when its marker is gone.
+TASK_COPY_PREFIX = 'task-'
+_MARKER_TEXT = 'working copy made by guru; safe to delete\n'
+_BASELINE_PREFIX = 'baseline: '
 # Prefix of the scripts ``sandbox_python`` drops into a copy (removed after
 # the run; git-excluded so a leftover never reaches a diff).
 SCRIPT_PREFIX = '.guru-sandbox-'
@@ -78,8 +98,20 @@ _DOCKER_PASSTHROUGH = ('DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY',
                        'DOCKER_CERT_PATH')
 
 _ARG_NAME_RX = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_SHA_RX = re.compile(r'[0-9a-f]{40,64}')
+# The container's fixed environment: uid 1000 has no home and the root is
+# read-only, so tools that write under HOME (pytest plugins, uv, mypy and
+# ruff caches, guru's own tests) get the tmpfs; nothing persists.
+CONTAINER_ENV: tuple[tuple[str, str], ...] = (
+    ('HOME', '/tmp'), ('XDG_CACHE_HOME', '/tmp/.cache'))
 
 _available: Optional[bool] = None
+
+
+class BaselineChanged(RuntimeError):
+    """A working copy's ``HEAD`` no longer matches the baseline sha its
+    marker records: the copy's history was rewritten, so its diff and
+    baseline files cannot be trusted."""
 
 
 @dataclass
@@ -222,17 +254,26 @@ def container_name() -> str:
 
 def docker_run_argv(spec: SandboxSpec, argv: list[str], copy: Path,
                     name: str, network: str = 'none',
-                    env: Optional[dict[str, str]] = None) -> list[str]:
+                    env: Optional[dict[str, str]] = None,
+                    git_ro: bool = False) -> list[str]:
     """The exact ``docker run`` argv for a sandbox run (pure). ``network``
     is ``none`` for the execution phase; provisioning passes the internal
     network and ``env`` (``-e K=V`` pairs: the proxy variables). Keys must
-    be identifiers (``ValueError``)."""
+    be identifiers (``ValueError``). With ``git_ro`` the copy's ``.git``
+    is bind-mounted read-only on top of the copy mount
+    (``-v <copy>/.git:/work/.git:ro``) so the container cannot rewrite
+    the baseline :func:`diff` compares against. ``CONTAINER_ENV``
+    (``HOME=/tmp``, ``XDG_CACHE_HOME=/tmp/.cache``) precedes the caller's
+    ``env``."""
     extra: list[str] = []
     variables = env or {}
     for key in variables:
         if not isinstance(key, str) or not _ARG_NAME_RX.fullmatch(key):
             raise ValueError(f'env name {key!r} is not an identifier')
         extra += ['-e', f'{key}={variables[key]}']
+    mounts = ['-v', f'{copy}:{WORKDIR}']
+    if git_ro:
+        mounts += ['-v', f'{copy}/.git:{WORKDIR}/.git:ro']
     return [DOCKER, 'run', '--rm', '--name', name,
             '--stop-timeout', str(STOP_TIMEOUT_S),
             '--network', str(network), '--user', '1000:1000',
@@ -241,8 +282,9 @@ def docker_run_argv(spec: SandboxSpec, argv: list[str], copy: Path,
             '--pids-limit', str(int(spec.pids)),
             '--memory', f'{int(spec.memory_mb)}m',
             '--cpus', str(spec.cpus),
-            '-v', f'{copy}:{WORKDIR}', '-w', WORKDIR, *extra,
-            spec.image_tag, *argv]
+            *mounts, '-w', WORKDIR,
+            *(f for k, v in CONTAINER_ENV for f in ('-e', f'{k}={v}')),
+            *extra, spec.image_tag, *argv]
 
 
 def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path,
@@ -255,7 +297,9 @@ def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path,
     (``returncode -1``, ``denied`` set) and nothing starts. ``network`` and
     ``env`` default to no network and no variables (the execution phase);
     provisioning (``uv add``) passes the internal network and the proxy
-    variables. The wall clock is ``spec.timeout_s``; on expiry the CLI's
+    variables. When the copy has a ``.git`` (every :func:`prepare_copy`
+    copy does) it is mounted read-only over the rw copy mount. The wall
+    clock is ``spec.timeout_s``; on expiry the CLI's
     process group is killed and the container is ``docker kill``\\ ed by
     name (``killed``). Every run lands in ``sandbox_events``. Never raises
     for a failing container.
@@ -266,8 +310,9 @@ def run(spec: SandboxSpec, argv: list[str], workdir_copy: Path,
         return RunResult(list(argv) if isinstance(argv, list) else [],
                          -1, '', '', 0.0, denied=denial)
     name = container_name()
-    full = docker_run_argv(spec, argv, Path(workdir_copy), name,
-                           network=network, env=env)
+    copy = Path(workdir_copy)
+    full = docker_run_argv(spec, argv, copy, name, network=network, env=env,
+                           git_ro=(copy / '.git').is_dir())
     res = procs.run(full, spec.project,
                     cli_limits(spec.timeout_s, RUN_OUT_KB),
                     env_extra=docker_env())
@@ -409,53 +454,146 @@ def prepare_copy(project: Path, dest: Path, excludes: list[str]) -> Path:
         dst.mkdir()
         n = _copy_listed(src, dst, listed, excludes)
         how = f'git ls-files ({n} files)'
-    (dst / COPY_MARKER).write_text('working copy made by guru; safe to '
-                                   'delete\n', encoding='utf-8')
+    (dst / COPY_MARKER).write_text(_MARKER_TEXT, encoding='utf-8')
     for args in (['init', '-q'], ['add', '-A'],
-                 ['commit', '-q', '--allow-empty', '-m', 'sandbox copy']):
+                 ['commit', '-q', '--allow-empty', '-m', 'sandbox copy'],
+                 ['rev-parse', 'HEAD']):
         if args[0] == 'add':
             exclude = dst / '.git' / 'info' / 'exclude'
             exclude.parent.mkdir(parents=True, exist_ok=True)
             exclude.write_text(_GIT_EXCLUDE, encoding='utf-8')
-        res = _git(args, dst, src)
-        if res.returncode != 0:
+        res = _git(args, dst, src, out_kb=4)
+        if res.returncode != 0 or res.denied:
             shutil.rmtree(dst, ignore_errors=True)
             raise RuntimeError(f'git {args[0]} failed in {dst}: '
                                f'{res.denied or res.stderr.strip()}')
+    sha = res.stdout.strip()
+    if not _SHA_RX.fullmatch(sha):
+        shutil.rmtree(dst, ignore_errors=True)
+        raise RuntimeError(f'git rev-parse HEAD in {dst} returned {sha!r}')
+    (dst / COPY_MARKER).write_text(
+        f'{_MARKER_TEXT}{_BASELINE_PREFIX}{sha}\n', encoding='utf-8')
     images.record_sandbox_event('copy', ['copy', str(src), str(dst)],
                                 time.monotonic() - started, True,
-                                f'{how}; {len(excludes)} excludes')
+                                f'{how}; {len(excludes)} excludes; '
+                                f'baseline {sha[:12]}')
     return dst
 
 
-def diff(copy: Path, project: Optional[Path] = None) -> str:
+def baseline_sha(copy: Path) -> str:
+    """The baseline commit sha :func:`prepare_copy` recorded in ``copy``'s
+    marker, or ``''`` when the marker is missing or carries none."""
+    try:
+        text = (Path(copy) / COPY_MARKER).read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return ''
+    for line in text.splitlines():
+        if line.startswith(_BASELINE_PREFIX):
+            sha = line[len(_BASELINE_PREFIX):].strip()
+            return sha if _SHA_RX.fullmatch(sha) else ''
+    return ''
+
+
+def check_baseline(copy: Path, cwd: Path, expected: str = '') -> str:
+    """``git rev-parse HEAD`` of ``copy``, verified against ``expected``
+    — the sha the caller kept when it made the copy — or, without one,
+    against the sha the copy's marker records; returns the sha. Raises
+    :class:`BaselineChanged` when they differ, ``RuntimeError`` when
+    there is no sha to compare with (a marker-less copy guru did not make
+    this way is not read) or git fails. A caller that holds the sha does
+    not depend on the marker: code running in the copy can delete or
+    rewrite that file, and the check must not soften when it does."""
+    repo = Path(copy)
+    want = expected or baseline_sha(repo)
+    if not want:
+        raise RuntimeError(f'{repo} records no baseline sha in {COPY_MARKER}')
+    res = _git(['rev-parse', 'HEAD'], repo, cwd, out_kb=4)
+    if res.returncode != 0 or res.denied:
+        raise RuntimeError(f'git rev-parse HEAD failed in {repo}: '
+                           f'{res.denied or res.stderr.strip()}')
+    have = res.stdout.strip()
+    if have != want:
+        raise BaselineChanged(f'sandbox copy baseline changed: {repo} is '
+                              f'at {have[:12]}, recorded {want[:12]}')
+    return have
+
+
+# ``git diff`` flags: ``--text`` treats every file as text, so a
+# ``.gitattributes`` the sandbox writes (``* -diff`` or ``binary``) cannot
+# turn the diff the gate reads into ``Binary files differ``.
+DIFF_ARGS = ('diff', 'HEAD', '--no-color', '--no-ext-diff', '--text')
+
+
+def diff(copy: Path, project: Optional[Path] = None,
+         expected: str = '') -> str:
     """The unified diff of ``copy``'s working tree against its baseline
-    commit (``git diff HEAD``): edits, deletions and — via ``git add -N``
-    — new files; caches excluded; ``''`` when unchanged. The git CLI
-    runs from ``project`` (default the current directory)."""
+    commit (``git diff HEAD --text``): edits, deletions and — via ``git
+    add -N`` — new files; caches excluded; ``''`` when unchanged. The git
+    CLI runs from ``project`` (default the current directory). The copy's
+    ``HEAD`` is checked against the baseline first (:func:`check_baseline`
+    with ``expected``: ``BaselineChanged``)."""
     repo = Path(copy)
     cwd = Path(project) if project is not None else Path.cwd()
+    check_baseline(repo, cwd, expected)
     add = _git(['add', '-A', '-N'], repo, cwd)
     if add.returncode != 0:
         raise RuntimeError(f'git add -N failed in {repo}: '
                            f'{add.denied or add.stderr.strip()}')
-    res = _git(['diff', 'HEAD', '--no-color', '--no-ext-diff'], repo,
-               cwd, out_kb=DIFF_OUT_KB)
+    res = _git(list(DIFF_ARGS), repo, cwd, out_kb=DIFF_OUT_KB)
     if res.returncode != 0:
         raise RuntimeError(f'git diff failed in {repo}: '
                            f'{res.denied or res.stderr.strip()}')
     return res.stdout + ('\n[diff truncated]\n' if res.truncated else '')
 
 
-def remove_copy(copy: Path) -> None:
+def show_baseline(copy: Path, path: str,
+                  project: Optional[Path] = None,
+                  expected: str = '') -> Optional[str]:
+    """The baseline (``HEAD``) content of the copy-relative ``path`` in a
+    working copy (``git show HEAD:<path>``), or None when the baseline
+    has no such file (a file the sandbox created), the path is not a
+    plain relative one, the content exceeds ``DIFF_OUT_KB`` or git fails.
+    Read-only; the git CLI runs from ``project`` (default the current
+    directory). Raises ``BaselineChanged`` when the copy's ``HEAD`` moved
+    from the baseline (:func:`check_baseline` with ``expected``)."""
+    rel = Path(path)
+    if not path or rel.is_absolute() or '..' in rel.parts:
+        return None
+    repo = Path(copy)
+    cwd = Path(project) if project is not None else Path.cwd()
+    check_baseline(repo, cwd, expected)
+    res = _git(['show', f'HEAD:{rel.as_posix()}'], repo, cwd,
+               out_kb=DIFF_OUT_KB)
+    if res.returncode != 0 or res.denied or res.truncated:
+        return None
+    return res.stdout
+
+
+def remove_copy(copy: Path, work_root: Optional[Path] = None) -> None:
     """Delete a working copy :func:`prepare_copy` made. Refuses
     (``ValueError``) a directory without the ``COPY_MARKER`` file so a
-    mistaken path can never delete a real tree."""
+    mistaken path can never delete a real tree — unless ``work_root`` is
+    given and the directory sits right under it with a
+    ``TASK_COPY_PREFIX`` name: a task copy whose marker the code running
+    in it deleted is still guru's to remove, or it would leak."""
     target = Path(copy)
-    if not (target / COPY_MARKER).is_file():
+    if not (target / COPY_MARKER).is_file() \
+            and not _is_task_copy(target, work_root):
         raise ValueError(f'{target} is not a guru sandbox copy '
                          f'(no {COPY_MARKER}); refusing to delete')
     shutil.rmtree(target, ignore_errors=True)
+
+
+def _is_task_copy(target: Path, work_root: Optional[Path]) -> bool:
+    """Whether ``target`` is a ``TASK_COPY_PREFIX`` directory directly
+    under ``work_root`` (paths compared resolved, no symlink games)."""
+    if work_root is None or not target.name.startswith(TASK_COPY_PREFIX):
+        return False
+    try:
+        return (target.is_dir() and not target.is_symlink()
+                and target.resolve().parent == Path(work_root).resolve())
+    except OSError:
+        return False
 
 
 def reset_cache() -> None:

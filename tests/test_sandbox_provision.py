@@ -66,6 +66,9 @@ def sbhome(tmp_path, monkeypatch):
 @pytest.fixture
 def fake_run(monkeypatch):
     fake = FakeRun()
+    # every faked git call answers with a sha, so prepare_copy's
+    # ``rev-parse HEAD`` records a baseline (init/add/commit ignore stdout)
+    fake.answers['git'] = (0, 'f' * 40 + '\n')
     monkeypatch.setattr(procs, 'run', fake)
     colima.reset_cache()
     yield fake
@@ -464,7 +467,7 @@ class TestRunNetworkAndEnv:
                               'UV_OFFLINE': '0'})
         argv = fake_run.calls[0]['argv']
         assert argv[argv.index('--network') + 1] == 'guru-provision-pkg'
-        i = argv.index('-w') + 2
+        i = argv.index('-w') + 2 + 2 * len(colima.CONTAINER_ENV)
         assert argv[i:i + 4] == ['-e', 'HTTPS_PROXY=http://p:8888',
                                  '-e', 'UV_OFFLINE=0']
         assert argv[argv.index(spec.image_tag) + 1:] == ['uv', 'add', 'six']
@@ -477,7 +480,10 @@ class TestRunNetworkAndEnv:
         colima.run(spec, ['pytest'], tmp_path)
         argv = fake_run.calls[0]['argv']
         assert argv[argv.index('--network') + 1] == 'none'
-        assert '-e' not in argv
+        # only the fixed container env (HOME, XDG_CACHE_HOME), no proxy vars
+        assert argv.count('-e') == len(colima.CONTAINER_ENV)
+        assert not any(a.startswith(('HTTPS_PROXY=', 'HTTP_PROXY='))
+                       for a in argv)
 
 
 # --- pending requests store --------------------------------------------------
@@ -642,6 +648,14 @@ class TestProvision:
         fake_run.answers['image'] = (0, 'sha256:new\n')
         assert provision.provision(root, _settings(), force=True).digest == (
             'sha256:new')
+
+    def test_disabled_project_is_refused_before_docker(
+            self, allowed, fake_run) -> None:
+        settings = _settings()
+        settings.enabled = False
+        with pytest.raises(provision.ProvisionError, match='enabled = false'):
+            provision.provision(_project(allowed), settings)
+        assert fake_run.calls == []
 
     def test_domain_denied_means_no_network_at_all(self, allowed, fake_run,
                                                    monkeypatch) -> None:

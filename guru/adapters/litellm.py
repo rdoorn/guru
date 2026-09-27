@@ -15,10 +15,22 @@ Config (adapters.toml):
     # models = ["azure/gpt-4.1", "anthropic/claude-..."]  # optional allowlist
     # cache = true                            # prompt-cache markers (default)
 
+History: a tool round guru ran on this adapter (or the Anthropic one)
+keeps the provider's call ids in the neutral messages (``id`` on each
+``tool_calls`` entry, ``tool_call_id`` on the tool message), so at the
+start of the next turn it is rebuilt in the native ``tool_calls`` / ``tool``
+shape the previous request already carried: the request prefix is
+byte-identical across turns and the prompt cache reads it back. A round
+without ids (an Ollama history, an older transcript) is flattened to text.
+
 Prompt caching: with ``cache`` on, system messages are sent as content
 parts and the last part and the last tool definition carry
 ``cache_control: {type: ephemeral}`` — the OpenAI-compatible shape a LiteLLM
-proxy forwards to Anthropic and Bedrock. Cache usage comes back either as
+proxy forwards to Anthropic and Bedrock. A third marker sits on the last
+message of the conversation (the user's text or the last tool result, each
+turned into a one-part content list) so the growing history is cached up
+to that point and the next round reads it back; three of Anthropic's four
+breakpoints per request are used. Cache usage comes back either as
 Anthropic-style ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
 on ``usage`` or as ``prompt_tokens_details.cached_tokens``; both are read.
 """
@@ -31,12 +43,19 @@ import requests
 
 from guru import log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo
+from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
+                                dump_request, is_tool_choice_error)
+from guru.adapters.base import openai_tool_defs as _openai_tool_defs
 from guru.domain import ledger, pricing, tools
 
 _MAX_TOKENS = 16384   # proxies may enforce a thinking budget above 8k
 _DEFAULT_CONTEXT = 128000
 CACHE_CONTROL = {'type': 'ephemeral'}
+# Tool forcing (the turn contract, guru.adapters.turn): ``tool_choice
+# required`` makes the model answer with a tool call; every round is
+# forced. A proxy that rejects it (a model with server-side thinking on)
+# gets one retry without it and forcing is turned off for this adapter.
+TOOL_CHOICE_REQUIRED = 'required'
 # LiteLLM `mode` values that are not chat models — hidden from /models.
 _NON_CHAT_MODES = {
     'audio_transcription', 'audio_speech', 'embedding',
@@ -49,12 +68,22 @@ _NON_CHAT_MODES = {
 def to_openai_messages(messages: list) -> list:
     """Translate neutral messages to OpenAI chat messages.
 
-    Historical tool calls/results are flattened to text — precise
-    tool_call_id linking is only needed for the in-flight turn, which the
-    adapter builds natively.
+    A tool round whose assistant call ids are answered by the tool messages
+    that follow it (``tool_call_id``) is rebuilt natively, byte-for-byte
+    the shape the in-flight turn appends (see :func:`native_round`);
+    anything else — a round without ids, a tool result whose call is
+    missing — is flattened to text, so history from another provider
+    stays translatable without fabricated ids.
     """
     out: list = []
-    for m in messages:
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        rebuilt = native_round(messages, i)
+        if rebuilt is not None:
+            native, i = rebuilt
+            out.extend(native)
+            continue
         role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', '')
         content = (
             m.get('content') if isinstance(m, dict)
@@ -76,55 +105,121 @@ def to_openai_messages(messages: list) -> list:
             out.append({'role': 'assistant', 'content': text})
         else:
             out.append({'role': 'user', 'content': content})
+        i += 1
     return out
 
 
-def openai_tool_defs(specs: list) -> list:
-    """Translate provider-neutral tool specs to OpenAI function-calling."""
-    defs = []
-    for spec in specs:
-        params = spec.get('parameters', {})
-        properties = {
-            name: {'type': 'string', 'description': desc}
-            for name, desc in params.items()
-        }
-        defs.append({
-            'type': 'function',
-            'function': {
-                'name': spec['name'],
-                'description': spec['description'],
-                'parameters': {
-                    'type': 'object',
-                    'properties': properties,
-                    'required': [
-                        k for k in params
-                        if k not in spec.get('optional', ())],
-                },
-            },
-        })
-    return defs
+def _round_at(messages: list, i: int):
+    """``(assistant, tool_messages, next_index)`` when ``messages[i]`` is
+    an assistant dict whose ``tool_calls`` all carry an ``id`` and the tool
+    messages right after it answer exactly those ids; None otherwise."""
+    m = messages[i]
+    if not isinstance(m, dict) or m.get('role') != 'assistant':
+        return None
+    calls = m.get('tool_calls') or []
+    ids = [c.get('id') for c in calls if isinstance(c, dict)]
+    if not calls or len(ids) != len(calls) or not all(ids):
+        return None
+    j = i + 1
+    results: list = []
+    while j < len(messages):
+        t = messages[j]
+        if not isinstance(t, dict) or t.get('role') != 'tool' \
+                or not t.get('tool_call_id'):
+            break
+        results.append(t)
+        j += 1
+    if [t['tool_call_id'] for t in results] != ids:
+        return None
+    return m, results, j
+
+
+def native_round(messages: list, i: int):
+    """The OpenAI-native messages for the tool round starting at
+    ``messages[i]`` — the assistant message with its ``tool_calls`` (the
+    raw ``arguments`` string the model sent when kept, else the arguments
+    re-serialised) and one ``tool`` message per result — with the index
+    after the round; None when :func:`_round_at` finds no complete round.
+    """
+    found = _round_at(messages, i)
+    if found is None:
+        return None
+    m, results, j = found
+    assistant: dict = {'role': 'assistant',
+                       'content': (m.get('content') or '') or None}
+    assistant['tool_calls'] = [
+        {'id': c['id'], 'type': 'function',
+         'function': {'name': c['function']['name'],
+                      'arguments': _arguments_text(c)}}
+        for c in m['tool_calls']]
+    native = [assistant] + [
+        {'role': 'tool', 'tool_call_id': t['tool_call_id'],
+         'content': t.get('content') or ''} for t in results]
+    return native, j
+
+
+def _arguments_text(call: dict) -> str:
+    """A tool call's arguments as the JSON string the API wants: the raw
+    text the model produced (``raw_arguments``) when kept, else the stored
+    arguments serialised."""
+    raw = call.get('raw_arguments')
+    if isinstance(raw, str):
+        return raw
+    args = call.get('function', {}).get('arguments')
+    if isinstance(args, str):
+        return args
+    return json.dumps(args or {}, ensure_ascii=False)
+
+
+# Translate provider-neutral tool specs to OpenAI function-calling
+# (shared with the Ollama adapter; see guru.adapters.base).
+openai_tool_defs = _openai_tool_defs
+
+
+# Roles whose message may carry the conversation breakpoint: the user's
+# text and a tool result (a LiteLLM proxy forwards a marked text part of
+# either to Anthropic's ``tool_result`` / text block; probed 2026-09-25).
+_BREAKPOINT_ROLES = ('user', 'tool')
 
 
 def cached_messages(messages: list, cache: bool) -> list:
     """``messages`` with every system message's text as one content part
-    and the cache marker on the last system message (copies); unchanged
-    when ``cache`` is off or there is no system message."""
+    and the cache marker on the last system message, plus the conversation
+    breakpoint: the last message, when it is a user or tool message with
+    text content, becomes a one-part content list carrying the marker.
+    Copies throughout; ``messages`` unchanged when ``cache`` is off or
+    nothing is markable."""
     if not cache:
         return messages
-    last = max((i for i, m in enumerate(messages)
-                if m.get('role') == 'system'), default=-1)
-    if last < 0:
+    last_system = max((i for i, m in enumerate(messages)
+                       if m.get('role') == 'system'), default=-1)
+    tail = len(messages) - 1
+    if last_system < 0 and not _markable(messages, tail):
         return messages
     out = []
     for i, m in enumerate(messages):
-        if m.get('role') != 'system' or not isinstance(m.get('content'), str):
+        if m.get('role') == 'system' and isinstance(m.get('content'), str):
+            part: dict = {'type': 'text', 'text': m['content']}
+            if i == last_system:
+                part['cache_control'] = dict(CACHE_CONTROL)
+            out.append({**m, 'content': [part]})
+        elif i == tail and _markable(messages, i):
+            out.append({**m, 'content': [
+                {'type': 'text', 'text': m['content'],
+                 'cache_control': dict(CACHE_CONTROL)}]})
+        else:
             out.append(m)
-            continue
-        part: dict = {'type': 'text', 'text': m['content']}
-        if i == last:
-            part['cache_control'] = dict(CACHE_CONTROL)
-        out.append({**m, 'content': [part]})
     return out
+
+
+def _markable(messages: list, i: int) -> bool:
+    """True when ``messages[i]`` exists, is a user or tool message and has
+    non-empty string content (the shape the breakpoint is put on)."""
+    if i < 0 or i >= len(messages):
+        return False
+    m = messages[i]
+    return (isinstance(m, dict) and m.get('role') in _BREAKPOINT_ROLES
+            and isinstance(m.get('content'), str) and bool(m['content']))
 
 
 def cached_tools(defs, cache: bool):
@@ -172,13 +267,22 @@ def usage_from(usage) -> pricing.Usage:
 
 
 def neutral_assistant(text: str, tool_calls: list) -> dict:
-    """Build a neutral assistant message from text + [(name, input), ...]."""
+    """Build a neutral assistant message from text + tool calls, each
+    ``(name, args)`` or ``(name, args, call_id, raw_arguments)``: the id and
+    the model's raw arguments string, when given, let the next turn
+    rebuild the round natively (:func:`native_round`)."""
     msg: dict = {'role': 'assistant', 'content': text}
     if tool_calls:
-        msg['tool_calls'] = [
-            {'function': {'name': name, 'arguments': args}}
-            for name, args in tool_calls
-        ]
+        entries = []
+        for call in tool_calls:
+            name, args = call[0], call[1]
+            entry: dict = {'function': {'name': name, 'arguments': args}}
+            if len(call) > 2 and call[2]:
+                entry['id'] = call[2]
+            if len(call) > 3 and isinstance(call[3], str):
+                entry['raw_arguments'] = call[3]
+            entries.append(entry)
+        msg['tool_calls'] = entries
     return msg
 
 
@@ -197,6 +301,10 @@ class LiteLLMAdapter(Adapter):
         self.static_models = models or []
         self.cache = bool(cache)
         self._context_by_model: dict = {}
+        self._force_ok = True         # cleared after a tool_choice error
+
+    def forces(self, tool: str) -> bool:
+        return self._force_ok
 
     def _key(self) -> str:
         """Resolve the key: env var → inline api_key → OPENAI_API_KEY."""
@@ -289,18 +397,37 @@ class LiteLLMAdapter(Adapter):
         oa_tools = cached_tools(openai_tool_defs(tools.active_specs()),
                                 self.cache)
 
+        def request(force: bool) -> dict:
+            kwargs: dict = {
+                'model': session.model,
+                'messages': cached_messages(native, self.cache),
+                'tools': oa_tools or None,
+                'max_tokens': _MAX_TOKENS,
+            }
+            if force and oa_tools:
+                kwargs['tool_choice'] = TOOL_CHOICE_REQUIRED
+            return kwargs
+
         def step():
             """One chat-completions round; returns (text, [(name, args, id)])
-            or None on error (printed) — the shared loop handles cancel."""
+            or None on error (printed) — the shared loop handles cancel.
+            A forced round (``TOOL_CHOICE_REQUIRED``) the proxy rejects for
+            its ``tool_choice`` is retried once unforced."""
+            forced = turn.forced_tool()
+            force = forced is not None and self.forces(forced)
             t0 = time.perf_counter()
             try:
-                resp, cost = _complete(
-                    client,
-                    model=session.model,
-                    messages=cached_messages(native, self.cache),
-                    tools=oa_tools or None,
-                    max_tokens=_MAX_TOKENS,
-                )
+                try:
+                    resp, cost = _complete(client, dump_as=self.name,
+                                           **request(force))
+                except Exception as e:
+                    if not (force and is_tool_choice_error(e)):
+                        raise
+                    log.warning('%s rejected tool_choice (%s); forcing off',
+                                self.name, str(e)[:120])
+                    self._force_ok = False
+                    resp, cost = _complete(client, dump_as=self.name,
+                                           **request(False))
             except Exception as e:
                 _note_error(e)
                 ui.console.print(f"[red]LiteLLM error: {e}[/red]")
@@ -347,8 +474,9 @@ class LiteLLMAdapter(Adapter):
                 except json.JSONDecodeError:
                     args = {}
                 calls.append((tc.function.name, args, tc.id))
-            session.messages.append(neutral_assistant(
-                text, [(name, args) for name, args, _ in calls]))
+            session.messages.append(neutral_assistant(text, [
+                (name, args, call_id, tc.function.arguments)
+                for (name, args, call_id), tc in zip(calls, tool_calls)]))
             return (text, calls)
 
         def run_tools(pending):
@@ -356,8 +484,7 @@ class LiteLLMAdapter(Adapter):
                 if duplicate:
                     ui.console.print(
                         f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = (f"Already called {name} with these arguments."
-                               " Use the previous result.")
+                    content = turn.DUPLICATE_RESULT.format(name=name)
                 else:
                     content = tools.execute_tool(name, args)
                 native.append({
@@ -365,7 +492,7 @@ class LiteLLMAdapter(Adapter):
                     'content': content})
                 session.messages.append({
                     'role': 'tool', 'tool_name': name, 'tool_args': args,
-                    'content': content})
+                    'tool_call_id': call_id, 'content': content})
 
         def add_user(text):
             native.append({'role': 'user', 'content': text})
@@ -379,7 +506,7 @@ class LiteLLMAdapter(Adapter):
         try:
             t0 = time.perf_counter()
             resp, cost = _complete(
-                self._client(),
+                self._client(), dump_as=self.name,
                 model=session.model,
                 max_tokens=1024,
                 messages=[
@@ -412,7 +539,7 @@ class LiteLLMAdapter(Adapter):
         # the request always carries the adapter's ceiling. The model stops
         # at its own answer length; the cap is not a spend.
         resp, cost = _complete(
-            self._client(), model=model or session.model,
+            self._client(), dump_as=self.name, model=model or session.model,
             max_tokens=max(int(max_tokens), _MAX_TOKENS),
             messages=[{'role': 'system', 'content': JSON_ONLY},
                       {'role': 'user', 'content': prompt}])
@@ -424,15 +551,17 @@ class LiteLLMAdapter(Adapter):
 _COST_HEADER = 'x-litellm-response-cost'
 
 
-def _complete(client, **kwargs) -> tuple:
+def _complete(client, *, dump_as: str = '', **kwargs) -> tuple:
     """Run one chat completion; return ``(response, cost_or_None)``.
 
     Goes through ``with_raw_response`` so the proxy's HTTP headers are
     visible: a LiteLLM proxy reports the per-call price in
     ``x-litellm-response-cost``. The ``openai`` client never populates the
     litellm SDK's ``_hidden_params``, so the header is the only source.
-    Exceptions from the call propagate to the caller unchanged.
+    Exceptions from the call propagate to the caller unchanged. ``dump_as``
+    names the adapter for :func:`guru.adapters.base.dump_request`.
     """
+    dump_request(dump_as, kwargs)
     raw = client.chat.completions.with_raw_response.create(**kwargs)
     return raw.parse(), _header_cost(getattr(raw, 'headers', None))
 

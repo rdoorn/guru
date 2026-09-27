@@ -11,7 +11,7 @@ sibling table)::
     mode = "local-and-remote"   # local-only | local-and-remote | remote-only
     controller = true           # default: on when any ladder rung is set
     complexity_router = true
-    type_router = false
+    type_router = true          # default: on when a per-kind ladder is set
     spend_confirm = "ask"            # ask | auto | never
     secret_scan = true
 
@@ -42,8 +42,11 @@ route a task to the wrong model.
 ladder without a controller is the over-reading configuration of triage
 2026-09-24: the main agent inspects dozens of files itself before it
 delegates); write ``controller = false`` next to a ladder to keep the main
-agent hands-on. Without a ladder the default is off.
-``RoutingSettings.controller`` is always the effective boolean.
+agent hands-on. Without a ladder the default is off. ``type_router``
+defaults the same way, to *on when any per-kind ladder is configured*: a
+``[[routing.ladders.review]]`` table is meant to be used, so it is, unless
+``type_router = false`` says otherwise. Both fields of
+``RoutingSettings`` are always the effective booleans.
 
 ``[decisions]`` (:func:`load_decisions`) carries the judge setup an eval
 experiment installs for its run — ``mode`` plus the ``points``, ``active``
@@ -68,14 +71,15 @@ file, unknown keys, an unknown runner or a mistyped limit raise
 tool disabled).
 
 ``[sandbox]`` (:func:`load_sandbox`) configures sandboxed execution. The
-global table in ``settings.toml`` sets the defaults; a project's
-``.guru/sandbox.toml`` carries the same table and wins key by key, and is
-the *only* place ``enabled`` may be set (a sandbox is a per-project
-opt-in)::
+sandbox is on for every project with a provisioned image (``/sandbox
+provision``); no file is needed. The global table in ``settings.toml``
+sets the defaults; a project's ``.guru/sandbox.toml`` carries the same
+table and wins key by key, and is the *only* place ``enabled`` may be
+set — ``enabled = false`` is the per-project off switch (the verbs are
+hidden and provisioning refuses)::
 
     [sandbox]
-    enabled = true                       # project file only
-    runtime = "docker"
+    enabled = false                      # project file only; default true
     base_image = "python:3.12-slim@sha256:…"   # digest-pinned, always
     cpus = 2.0
     memory_mb = 2048
@@ -100,8 +104,8 @@ from guru.repositories.adapters import AdapterRegistry
 __all__ = ['DecisionsSettings', 'RoutingSettings', 'RungSpec',
            'SandboxSettings', 'ToolsPolicy', 'default_routing_toml',
            'ensure_default_routing', 'ladders_from_settings',
-           'load_decisions', 'load_routing', 'load_sandbox',
-           'load_tools_policy', 'switch_routing']
+           'cheapest_remote_spec', 'load_decisions', 'load_routing',
+           'load_sandbox', 'load_tools_policy', 'switch_routing']
 
 MODE_OFF = 'off'
 
@@ -129,7 +133,9 @@ class RoutingSettings:
 
     ``controller`` may be given as None (the key was not set): it then
     resolves to True when any ladder has a rung, else False, so after
-    construction it is always the effective boolean.
+    construction it is always the effective boolean. ``type_router`` is
+    resolved the same way by :func:`load_routing` (on when a per-kind
+    ladder is configured); constructed directly it is the plain default.
     """
     mode: str = 'local-and-remote'
     controller: Optional[bool] = None
@@ -320,11 +326,15 @@ def load_routing(section: Optional[dict] = None, *,
                     f'[routing] ladders.{kind}: unknown kind; expected one '
                     'of ' + ', '.join(routing.KINDS))
             ladders[str(kind)] = _ladder(raw, f'routing.ladders.{kind}')
+    type_router = _flag(section, 'type_router', None)
+    if type_router is None:
+        type_router = any(bool(specs) for kind, specs in ladders.items()
+                          if kind != routing.DEFAULT_LADDER)
     parsed = RoutingSettings(
         mode=_enum(section, 'mode', routing.MODES, 'local-and-remote'),
         controller=_flag(section, 'controller', None),
         complexity_router=bool(_flag(section, 'complexity_router', True)),
-        type_router=bool(_flag(section, 'type_router', False)),
+        type_router=type_router,
         spend_confirm=_enum(section, 'spend_confirm', SPEND_CONFIRM, 'ask'),
         secret_scan=bool(_flag(section, 'secret_scan', True)),
         ladders=ladders,
@@ -406,12 +416,12 @@ injection = "injection"     # shadow: fetched pages checked for injection
 
 [decisions.active]
 {note}labels = {flag}
-panel = {flag}
+panel = false               # shadow until labelled rows say otherwise
 """
 _JUDGE_EXTRA_NOTE = """\
 # The encoder judges need the judge extra (uv sync --extra judge);
-# until it is installed labels and panel stay shadow (verdicts are
-# logged, nothing changes). Set both to true afterwards.
+# until it is installed labels stays shadow (verdicts are logged,
+# nothing changes). Set it to true afterwards.
 """
 
 
@@ -448,12 +458,14 @@ def default_routing_toml(adapter_name: str, adapter_kind: str, *,
     Ladder: Haiku for trivial, Sonnet (default rung) for standard, Opus
     for hard; a ``review`` ladder starting at Sonnet (``type_router`` on
     so review-kind tasks take it). Judges: the ``labels`` tie-breaker
-    (margin 0.15) and the ``panel`` point active on the encoder judge,
-    ``injection`` shadow — active only when ``judges_available`` (default:
-    probe the ``judge`` extra); otherwise both are written ``false`` with a
-    note. ``decisions=False`` omits the ``[decisions]`` table (the file
-    already has one). Raises ``ValueError`` for an unknown kind or a name
-    that cannot sit in a TOML basic string.
+    (margin 0.15) active on the encoder judge — only when
+    ``judges_available`` (default: probe the ``judge`` extra), otherwise
+    written ``false`` with a note; ``panel`` (``needs_security``) and
+    ``injection`` shadow: the panel point stays shadow until labelled rows
+    show its question calibrated (triage 2026-09-25: it answered no on
+    every review request). ``decisions=False`` omits the ``[decisions]``
+    table (the file already has one). Raises ``ValueError`` for an unknown
+    kind or a name that cannot sit in a TOML basic string.
     """
     if adapter_kind not in DEFAULT_TIER_MODELS:
         raise ValueError(
@@ -499,6 +511,21 @@ def _remote_adapter(adapters: list) -> Optional[tuple[str, str]]:
                 and name):
             return name, kind
     return None
+
+
+def cheapest_remote_spec(adapters: Optional[list] = None) -> str:
+    """``'Adapter|model'`` of the cheapest Claude tier
+    (:data:`DEFAULT_TIER_MODELS`) on the first enabled remote adapter of
+    ``adapters`` (default ``config.load_adapter_configs()``); ``''`` when
+    no remote adapter is configured. The eval CLI's rubric judge when a
+    run may spend but no routing file names a rung."""
+    if adapters is None:
+        adapters = config.load_adapter_configs()
+    remote = _remote_adapter(adapters)
+    if remote is None:
+        return ''
+    name, kind = remote
+    return f'{name}|{DEFAULT_TIER_MODELS[kind][0]}'
 
 
 def ensure_default_routing(adapters: Optional[list] = None,
@@ -706,7 +733,6 @@ def load_tools_policy(path: Optional[Path] = None) -> ToolsPolicy:
 
 # --- [sandbox] / .guru/sandbox.toml -----------------------------------------
 
-SANDBOX_RUNTIMES = ('docker',)
 # docker.io/library/python:3.12-slim, multi-arch index digest as served on
 # 2026-09-24 (``docker buildx imagetools inspect python:3.12-slim``).
 DEFAULT_BASE_IMAGE = ('python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a'
@@ -722,17 +748,17 @@ DEFAULT_BASE_IMAGE = ('python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a'
 # image index). Repin the same way when bumping.
 DEFAULT_PROXY_IMAGE = ('docker.io/kalaksi/tinyproxy:latest@sha256:fafafc7079c'
                        'a29c6704564de1353f61d038f2166f09b01d4e460e8e499bf6b57')
-_SANDBOX_KEYS = frozenset(('enabled', 'runtime', 'base_image', 'cpus',
-                           'memory_mb', 'pids', 'timeout_s', 'proxy_image'))
+_SANDBOX_KEYS = frozenset(('enabled', 'base_image', 'cpus', 'memory_mb',
+                           'pids', 'timeout_s', 'proxy_image'))
 _SANDBOX_INTS = ('memory_mb', 'pids', 'timeout_s')
 
 
 @dataclass
 class SandboxSettings:
     """The validated, merged ``[sandbox]`` table (global defaults, project
-    overrides). ``enabled`` is False unless the project file sets it."""
-    enabled: bool = False
-    runtime: str = 'docker'
+    overrides). ``enabled`` is True unless the project file turns it
+    off; the runtime is docker (Colima), not a setting."""
+    enabled: bool = True
     base_image: str = DEFAULT_BASE_IMAGE
     cpus: float = 2.0
     memory_mb: int = 2048
@@ -765,12 +791,6 @@ def _apply_sandbox(out: SandboxSettings, table: dict, where: str,
             raise ValueError(f'{where}: [sandbox] enabled = '
                              f'{table["enabled"]!r}; expected a boolean')
         out.enabled = table['enabled']
-    if 'runtime' in table:
-        if table['runtime'] not in SANDBOX_RUNTIMES:
-            raise ValueError(f'{where}: [sandbox] runtime = '
-                             f'{table["runtime"]!r}; expected one of '
-                             + ', '.join(SANDBOX_RUNTIMES))
-        out.runtime = str(table['runtime'])
     for key in ('base_image', 'proxy_image'):
         if key in table:
             setattr(out, key, _pinned(table[key], key, where))
@@ -823,7 +843,8 @@ def load_sandbox(section: Optional[dict] = None,
     ``config.settings_section('sandbox')``); ``path`` the project file
     (default ``config.SANDBOX_POLICY_PATH``), whose ``[sandbox]`` table
     overrides the global key by key. ``enabled`` is accepted from the
-    project file only. An absent project file leaves ``enabled`` False.
+    project file only; without a project file (or with one that does not
+    set it) the sandbox stays enabled.
     Raises ``ValueError`` naming the offender on an unknown key, an
     unpinned image, a bad number or a broken project file.
     """

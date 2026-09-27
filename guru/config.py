@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from guru import log
-from guru.domain import routing as _routing
+
 
 # Global config lives in ~/.guru; project-specific state lives in a .guru/
 # folder inside the current project so it travels with the project.
@@ -35,10 +35,12 @@ SCAN_ALLOW_PATH = PROJECT_GURU_DIR / 'scan_allow.txt'
 # registry tools a project enables/disables, its test runner and any
 # subprocess-limit overrides. Missing file = everything enabled.
 TOOLS_POLICY_PATH = PROJECT_GURU_DIR / 'tools.toml'
-# Sandbox (guru/repositories/settings.py load_sandbox): a project opts in
-# to sandboxed execution with .guru/sandbox.toml; image records, generated
-# Dockerfiles and the working copies live under ~/.guru/sandbox/<project>/
-# (a path Colima mounts into its VM — a macOS temp dir is not).
+# Sandbox (guru/repositories/settings.py load_sandbox): on for every
+# project with a provisioned image (/sandbox provision); .guru/sandbox.toml
+# is optional — it tweaks limits or turns the sandbox off (enabled = false).
+# Image records, generated Dockerfiles and the working copies live under
+# ~/.guru/sandbox/<project>/ (a path Colima mounts into its VM — a macOS
+# temp dir is not).
 SANDBOX_POLICY_PATH = PROJECT_GURU_DIR / 'sandbox.toml'
 SANDBOX_HOME = GURU_HOME / 'sandbox'
 
@@ -279,10 +281,8 @@ the results show. If a needed detail (a name, a location) is missing, ask.
 Before concluding code or a feature is missing, grep for its definition and
 read the file that defines it; when reviewing a file, follow its local
 imports. Never infer that something is absent from a single file.
-Prefer outline (a file's def/class map with line ranges) and find_symbol
-(where a name is defined and used) over read_file on a whole file; then
-read_file only the line range you need. After editing a .py file, verify with
-check_syntax and run_tests before you report the change.
+After editing a .py file, verify with check_syntax and run_tests before you
+report the change.
 
 To create, change, or delete a file you MUST call write_file, edit_file, or
 delete_file in this turn and wait for it to return success — never state that
@@ -326,46 +326,62 @@ DELEGATION_HINT = (
     " skill='code-review')\n"
     "then join both and write one consolidated report. Add an architect"
     " (design) or SRE (reliability) sub-agent when those concerns apply."
-    " Use check to poll and join to be resumed when a group finishes."
     " Prefer delegating a domain panel over reading many files yourself."
-    " Prefer outline and find_symbol over read_file on whole files, and"
-    " verify edits with check_syntax/run_tests before reporting them."
+    " Verify edits with check_syntax/run_tests before reporting them."
 )
 
 # Appended instead of DELEGATION_HINT when [routing] controller = true: the
 # main agent only converses and coordinates; every task runs in a routed
-# sub-agent (design doc §2).
+# sub-agent (design doc §2). The controller's one tool is ``plan``
+# (guru.domain.plan): what the plan must contain is enforced there, not
+# asked for here — this hint carries only what code cannot check (which
+# project a request means, what a task text must say).
 CONTROLLER_HINT = (
-    "You are a CONTROLLER. You converse with the user, ask clarifying"
-    " questions when the request is ambiguous, and DECOMPOSE every piece of"
-    " actual work into sub-agent tasks — you never execute a task yourself."
-    " Your only tools are spawn, check, join and use_skill; never call file,"
-    " code or web tools (you do not have them).\n"
+    "You are a CONTROLLER. You converse with the user and coordinate work;"
+    " you never execute a task yourself and have no file, code or web"
+    " tools. Every reply is one call of the plan tool: outcome answer for"
+    " greetings, questions about yourself, clarifications and follow-ups"
+    " on delivered results (your text is the reply, no worker runs), or"
+    " outcome delegate for actual work (guru runs every task in parallel"
+    " on a routed worker and resumes you with their results; then answer"
+    " with plan again, synthesising them).\n"
     "The working directory in the [project] block of the active context"
     " (name, absolute path, git branch) is the current project; the user's"
     " requests refer to it unless they say otherwise. 'This repository',"
     " 'the codebase', 'the tests', 'the README' all mean that project."
     " Never ask which repository, path or codebase is meant: delegate"
-    " immediately with a self-contained task that names the project path,"
-    " and let the sub-agent look around (it has the file tools you lack).\n"
-    "For each task call spawn(task, kind, complexity, role, skill): write a"
-    " clear, self-contained task; label kind as one of debug, build,"
-    " refactor, review, explain, docs, ops, other and complexity as one of"
-    " trivial, standard, hard (the labels pick the model that runs it);"
-    " add the role (persona) and skill (method) from the catalog that fit."
-    " Every task that edits code must say: verify with run_tests/"
-    "check_syntax before reporting; tell workers to prefer outline/"
-    "find_symbol over reading whole files."
-    " Complexity: " + '; '.join(
-        f'{tier} = {desc}'
-        for tier, desc in _routing.COMPLEXITY_DESCRIPTIONS.items())
-    + ". Use all three tiers — a task that a"
-    " small model can do on trivial, one that needs care on hard.\n"
-    "Spawn independent tasks in parallel, use check to poll and join to be"
-    " resumed when a group finishes, then SYNTHESISE the results into one"
-    " answer for the user. Reply directly, briefly, for greetings, questions"
-    " about yourself, or clarifications that need no work."
+    " immediately with a self-contained task goal that names the project"
+    " path, and let the worker look around.\n"
+    "Every task that edits code must say: verify with run_tests/"
+    "check_syntax before reporting."
 )
+
+# The plan tool's description (guru.domain.tools._PLAN_SPEC); the field
+# semantics live in the schema (guru.domain.plan.SCHEMA).
+# The controller's contract, stated where the controller reads it: in the
+# plan tool's own description (the tool is all it has; the prose hint that
+# used to say so is gone). Eval sandbox-dependency-request 689aecc6283a:
+# the controller answered "I need to search for the sandbox tool ..."
+# instead of delegating.
+PLAN_CONTRACT_SENTENCE = (
+    'You have no other tools. Anything that needs a file, a command, a'
+    ' package, a test or the sandbox must be delegated; answer is for'
+    ' replies that need no work.')
+
+PLAN_TOOL_DESCRIPTION = (
+    'Your one reply per turn. ' + PLAN_CONTRACT_SENTENCE
+    + ' outcome answer: reply to the user with'
+    ' answer (no worker runs; a simple question has no task). outcome'
+    ' delegate: guru runs every task in tasks on a routed worker in'
+    ' parallel, joins them and resumes you with their results; when a'
+    ' request names several concerns (correctness, security, performance,'
+    ' reliability, design, tests, docs) give each its own task.')
+
+# The final_answer tool's description (guru.domain.tools._FINAL_ANSWER_SPEC).
+FINAL_ANSWER_DESCRIPTION = (
+    'Deliver your complete final answer to the user and end the turn.'
+    ' Call it once, when the task is done; until then call the tools you'
+    ' need.')
 
 # Deterministic code-review panel (the /review command) and the target of the
 # delegation steering: each entry is (role, skill, focus) — one specialist
@@ -386,12 +402,11 @@ REVIEW_PANEL = [
 DELEGATION_NUDGE_MIN_READS = 3
 DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree',
                          'outline', 'find_symbol'}
-# Over-read guard (turn._drive): a delegation-capable MAIN agent that reads
-# this many DISTINCT paths in one turn without spawning is nudged to
-# delegate right away, mid-turn, once per turn (triage 2026-09-24: plain
-# Sonnet read 87 files before delegating). Never for a controller (it has
-# no read tools). Set 0 to disable.
-OVER_READ_LIMIT = 8
+# The former over-read guard (OVER_READ_LIMIT, a mid-turn nudge after 8
+# distinct reads) is gone: read_file is structural now (a large file
+# returns its outline unless a line range is given), so whole-file reading
+# is impossible instead of discouraged. The ``over_read`` struggle key
+# stays so old ledger rows read.
 
 
 def review_tasks(area: str = 'the repository') -> list:

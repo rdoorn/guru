@@ -19,6 +19,7 @@ into its VM; a macOS temp dir would not be visible to the daemon.
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -32,21 +33,43 @@ from guru.sandbox import colima
 
 pytestmark = pytest.mark.sandbox
 
+# The fixture depends on one tiny pure-Python wheel so that the image
+# build's ``uv sync --frozen`` has something to download through the
+# provisioning proxy. Without it the only network layer is
+# ``pip install uv``, which Docker serves from its layer cache whenever
+# another image from the same base (the real guru project's sandbox image)
+# exists — a build with no network calls at all, and no ``net_events``.
 _LOCK = '''version = 1
 revision = 3
 requires-python = ">=3.12"
 
 [[package]]
+name = "iniconfig"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/4b/cbd8e699e64a6f16ca3a8220661b5f83792b3017d0f79807cb8708d33913/iniconfig-2.0.0.tar.gz", hash = "sha256:2d91e135bf72d31a410b17c16da610a82cb55f6b0477d1a902134b24a455b8b3", size = 4646, upload-time = "2023-01-07T11:08:11.254Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/a6/62565a6e1cf69e10f5727360368e451d4b7f58beeac6173dc9db836a5b46/iniconfig-2.0.0-py3-none-any.whl", hash = "sha256:b6a85871a79d2e3b22d2d1b94ac2824226a63c6b741c88f7ae975f18b6778374", size = 5892, upload-time = "2023-01-07T11:08:09.864Z" },
+]
+
+[[package]]
 name = "sbfixture"
 version = "0.1.0"
 source = { virtual = "." }
-'''
+dependencies = [
+    { name = "iniconfig" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "iniconfig", specifier = "==2.0.0" }]
+'''  # noqa: E501
 _PYPROJECT = '''[project]
 name = "sbfixture"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["iniconfig==2.0.0"]
 '''
+PROXY_HOSTS = {'pypi.org', 'files.pythonhosted.org'}
 
 
 @pytest.fixture(scope='module')
@@ -74,7 +97,12 @@ def allowed(tmp_path, monkeypatch):
 def project(allowed):
     root = allowed / 'sbfixture'
     root.mkdir()
-    (root / 'pyproject.toml').write_text(_PYPROJECT, encoding='utf-8')
+    # A per-run comment in pyproject.toml gives the ``COPY pyproject.toml
+    # uv.lock`` layer a fresh checksum, so ``uv sync`` really runs (and
+    # downloads iniconfig through the proxy) instead of being served from
+    # the layer cache of a leftover fixture image.
+    (root / 'pyproject.toml').write_text(
+        _PYPROJECT + f'# build {uuid.uuid4().hex}\n', encoding='utf-8')
     (root / 'uv.lock').write_text(_LOCK, encoding='utf-8')
     (root / 'hello.py').write_text('print("ok")\n', encoding='utf-8')
     (root / '.env').write_text('SECRET=1\n', encoding='utf-8')
@@ -147,6 +175,44 @@ def test_run_no_network_no_persistence_and_diff(built, project) -> None:
 
     denied = colima.run(spec, ['sh', '-c', 'id'], copy)
     assert denied.denied and denied.returncode == -1
+
+
+def test_git_dir_is_read_only_in_the_container(built, project) -> None:
+    """The copy is rw, its ``.git`` is not: a write to ``.git/HEAD`` or a
+    ``rmtree('.git')`` fails inside the container, a normal file write
+    works (as does one under ``HOME``, the tmpfs), and the host's ``git
+    diff`` (baseline verified against the recorded sha) still sees it."""
+    spec, copy = built
+    sha = colima.baseline_sha(copy)
+    assert len(sha) == 40
+    head = colima.run(spec, ['python', '-c',
+                             "open('.git/HEAD', 'a').write('x')"], copy)
+    assert head.returncode != 0, '.git/HEAD was writable in the container'
+    assert 'Read-only file system' in head.stderr or 'Permission' in \
+        head.stderr, head.stderr
+    assert f'{copy}/.git:/work/.git:ro' in head.docker_argv
+    wipe = colima.run(spec, ['python', '-c',
+                             "import shutil; shutil.rmtree('.git')"], copy)
+    assert wipe.returncode != 0, '.git was removable in the container'
+    assert (copy / '.git' / 'HEAD').is_file()
+    wrote = colima.run(spec, ['python', '-c',
+                              "open('note.txt', 'w').write('hi\\n')"], copy)
+    assert wrote.returncode == 0, wrote.stderr
+    # HOME is the tmpfs: writable for tool caches, gone with the container
+    home = colima.run(spec, ['python', '-c',
+                             "import os, pathlib; pathlib.Path(os.environ["
+                             "'HOME'], 'x').write_text('1'); "
+                             "print(os.environ['HOME'])"], copy)
+    assert home.returncode == 0, home.stderr
+    assert home.stdout.strip() == '/tmp'
+    assert 'HOME=/tmp' in home.docker_argv
+    assert not (copy / 'x').exists()
+    assert colima.check_baseline(copy, project) == sha
+    text = colima.diff(copy, project=project)
+    assert 'b/note.txt' in text and '+hi' in text
+    assert colima.show_baseline(copy, 'hello.py', project) == \
+        'print("ok")\n'
+    assert not (project / 'note.txt').exists()
 
 
 def test_timeout_kills_the_container(built) -> None:
@@ -288,7 +354,11 @@ def test_provision_and_uv_add_through_the_proxy(runtime_ok, project,
         ledger.flush()
         net_rows = ledger_repo.stream('net_events')
         hosts = {r['host'] for r in net_rows if r['allowed']}
-        assert hosts == {'pypi.org', 'files.pythonhosted.org'}
+        # The wheel download is the deterministic part; the pypi.org index
+        # hit belongs to the ``pip install uv`` layer, which Docker serves
+        # from cache when another image shares it (see ``_LOCK``).
+        assert 'files.pythonhosted.org' in hosts, net_rows
+        assert hosts <= PROXY_HOSTS, net_rows
         assert all(r['phase'] == 'build' for r in net_rows)
         assert not any(r['host'] not in hosts for r in net_rows), net_rows
         # Proxy build args are Docker-predefined: not in the image history.
@@ -330,7 +400,8 @@ def test_provision_and_uv_add_through_the_proxy(runtime_ok, project,
         copy = colima.prepare_copy(project, images.work_root(new_spec) / 'd',
                                    sb.copy_excludes(project))
         res = colima.run(new_spec, ['python', '-c',
-                                    'import six; print(six.__version__)'],
+                                    'import iniconfig, six; '
+                                    'print(six.__version__)'],
                          copy)
         assert res.returncode == 0 and res.stdout.strip() == '1.16.0', (
             res.stderr)

@@ -64,48 +64,6 @@ class TestResolveContextWindow:
         assert ceiling == 0
 
 
-class TestActNudge:
-    """Nudge weak models that announce an action but call no tool."""
-
-    def test_looks_like_preamble(self) -> None:
-        from guru.adapters.ollama import _looks_like_preamble as p
-        assert p("Let me read the files.") is True
-        assert p("I'll inspect the code next.") is True
-        assert p("Here is my plan:") is True
-        assert p("The code is clean and well tested.") is False
-        assert p("Let me " + "x" * 700) is False   # too long -> real answer
-
-    def test_run_turn_nudges_then_answers(self, monkeypatch) -> None:
-        import ollama
-        from guru.adapters.ollama import OllamaAdapter
-        a = OllamaAdapter()
-        msgs = [{'role': 'system', 'content': 's'},
-                {'role': 'user', 'content': 'inspect the code'}]
-        monkeypatch.setattr(session, 'messages', msgs)
-        monkeypatch.setattr(session, 'cancel_requested', False)
-        monkeypatch.setattr(a, '_fit_after_load', lambda: None)
-        monkeypatch.setattr(ui, 'status_draw', lambda: None)
-        seq = [
-            ollama.Message(role='assistant',
-                           content='Let me read the files.', tool_calls=None),
-            ollama.Message(role='assistant',
-                           content='The code is well structured overall.',
-                           tool_calls=None),
-        ]
-        calls = {'n': 0}
-
-        def fake_collect():
-            m = seq[calls['n']]
-            calls['n'] += 1
-            return m
-        monkeypatch.setattr(a, '_collect_response', fake_collect)
-        a.run_turn()
-        assert calls['n'] == 2      # looped again after the nudge
-        assert any(m.get('role') == 'user'
-                   and 'do it now' in (m.get('content') or '').lower()
-                   for m in session.messages)
-
-
 class TestStreamingCancel:
     """The streamed turn accumulates chunks and aborts on cancel_requested."""
 
@@ -158,8 +116,10 @@ class TestStreamingCancel:
 class TestTurnLoop:
     """The shared, provider-agnostic tool-calling loop (guru.adapters.turn).
 
-    Every adapter drives its turn through run_loop, so these lock the nudge,
-    duplicate-suppression, and cancel behaviour that all providers now share.
+    Every adapter drives its turn through run_loop, so these lock the
+    delegation nudge, duplicate-suppression, and cancel behaviour that all
+    providers share (the turn contract has its own tests in
+    tests/test_turn_contract.py).
     """
 
     def _quiet(self, monkeypatch) -> None:
@@ -170,16 +130,20 @@ class TestTurnLoop:
         monkeypatch.setattr(session, 'messages', [])
         monkeypatch.setattr(session, 'cancel_requested', False)
 
-    def test_nudges_stalled_then_answers(self, monkeypatch) -> None:
+    def test_text_reply_is_the_answer_without_forcing(self, monkeypatch):
+        """No adapter that forces tool calls is bound: a text reply is the
+        answer at once (no act nudge, no re-prompt)."""
         from guru.adapters import turn
         self._quiet(monkeypatch)
-        seq = iter([("Let me look into it.", []),
-                    ("It is well tested.", [])])
+        monkeypatch.setattr(session, 'adapter', None)
+        seq = iter([("Let me look into it.", [])])
         nudges: list = []
         turn.run_loop(step=lambda: next(seq),
                       run_tools=lambda p: None,
                       add_user=lambda t: nudges.append(t))
-        assert len(nudges) == 1 and 'do it now' in nudges[0].lower()
+        assert nudges == []
+        assert session.messages[-1] == {
+            'role': 'assistant', 'content': 'Let me look into it.'}
 
     def test_runs_tools_then_answers(self, monkeypatch) -> None:
         from guru.adapters import turn
@@ -356,146 +320,6 @@ class TestTurnLoop:
         turn.run_loop(step=lambda: next(seq), run_tools=lambda p: None,
                       add_user=lambda t: nudges.append(t))
         assert nudges == []
-
-
-class TestOverReadGuard:
-    """turn._drive: a delegation-capable non-controller that reads
-    ``config.OVER_READ_LIMIT`` distinct paths in one turn without spawning
-    is nudged to delegate at once (once per turn), and the struggle
-    counter ``over_read`` records it."""
-
-    def _quiet(self, monkeypatch, messages=None, *, can_spawn=True,
-               controller=False, limit=8) -> None:
-        from guru.adapters import turn
-        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
-        monkeypatch.setattr(ui, 'status_draw', lambda: None)
-        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
-        monkeypatch.setattr(ui.console, 'print', lambda *a, **k: None)
-        monkeypatch.setattr(session, 'messages', messages if messages
-                            is not None else [
-                                {'role': 'user',
-                                 'content': 'review the whole service'}])
-        monkeypatch.setattr(session, 'cancel_requested', False)
-        monkeypatch.setattr(session, 'can_spawn', can_spawn)
-        monkeypatch.setattr(session, 'controller', controller)
-        monkeypatch.setattr(session, 'struggle', {'over_read': 0})
-        monkeypatch.setattr(config, 'OVER_READ_LIMIT', limit)
-        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 0)
-
-    def _run(self, rounds: list) -> list:
-        """Drive scripted ``rounds`` (each a list of read paths, or a
-        ``'spawn'`` marker); every tool round threads tool messages into
-        ``session.messages`` as an adapter would. Returns the nudges."""
-        from guru.adapters import turn
-        seq = iter(rounds + [("Done.", [])])
-
-        def step():
-            item = next(seq)
-            if isinstance(item, tuple):
-                return item
-            calls = []
-            for i, path in enumerate(item):
-                if path == 'spawn':
-                    calls.append(('spawn', {'task': 't'}, f'r{i}'))
-                else:
-                    calls.append(('read_file', {'path': path}, f'r{i}'))
-            return ("", calls)
-
-        def run_tools(pending):
-            for name, args, _ref, _dup in pending:
-                session.messages.append(
-                    {'role': 'tool', 'tool_name': name, 'content': 'x',
-                     'tool_args': dict(args)})
-        nudges: list = []
-        turn.run_loop(step=step, run_tools=run_tools,
-                      add_user=lambda t: nudges.append(t))
-        return nudges
-
-    def _paths(self, n, start=0):
-        return [f'app/m{i}.py' for i in range(start, start + n)]
-
-    def test_nudges_at_the_limit_and_continues(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        nudges = self._run([self._paths(5), self._paths(3, 5),
-                            self._paths(2, 8)])
-        assert len(nudges) == 1
-        assert nudges[0].startswith(
-            'You have read 8 files without delegating. ')
-        assert 'decompose' in nudges[0].lower()
-        assert session.struggle['over_read'] == 1
-
-    def test_under_the_limit_is_silent(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        assert self._run([self._paths(7)]) == []
-        assert session.struggle['over_read'] == 0
-
-    def test_only_once_per_turn(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        nudges = self._run([self._paths(8), self._paths(8, 8),
-                            self._paths(8, 16)])
-        assert len(nudges) == 1
-
-    def test_same_path_counts_once(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        assert self._run([['a.py'] * 5, ['a.py', 'b.py'] * 4]) == []
-
-    def test_controller_and_subagent_are_never_nudged(self, monkeypatch):
-        self._quiet(monkeypatch, controller=True)
-        assert self._run([self._paths(9)]) == []
-        self._quiet(monkeypatch, can_spawn=False)
-        assert self._run([self._paths(9)]) == []
-
-    def test_spawn_in_the_turn_disarms_it(self, monkeypatch) -> None:
-        self._quiet(monkeypatch)
-        assert self._run([['spawn'], self._paths(9)]) == []
-
-    def test_reads_from_earlier_turns_do_not_count(self, monkeypatch):
-        earlier = [{'role': 'user', 'content': 'first question'}] + [
-            {'role': 'tool', 'tool_name': 'read_file', 'content': 'x',
-             'tool_args': {'path': p}} for p in self._paths(6, 100)] + [
-            {'role': 'assistant', 'content': 'answered'},
-            {'role': 'user', 'content': 'review the whole service'}]
-        self._quiet(monkeypatch, messages=list(earlier))
-        assert self._run([self._paths(5)]) == []         # 11 overall
-        # a new turn: the 5 (and the 6) above are history
-        session.messages += [
-            {'role': 'assistant', 'content': 'answered again'},
-            {'role': 'user', 'content': 'and the tests?'}]
-        assert self._run([self._paths(3, 5)]) == []      # 14 overall, 3 now
-        session.messages += [
-            {'role': 'assistant', 'content': 'answered once more'},
-            {'role': 'user', 'content': 'review it all'}]
-        assert len(self._run([self._paths(8, 200)])) == 1
-
-    def test_zero_limit_disables(self, monkeypatch) -> None:
-        self._quiet(monkeypatch, limit=0)
-        assert self._run([self._paths(12)]) == []
-
-    def test_nudge_is_not_mistaken_for_the_request(self, monkeypatch):
-        from guru.adapters import turn
-        self._quiet(monkeypatch)
-        seen: list = []
-        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
-        orig_add = seen.append
-
-        def add_user(t):
-            session.messages.append({'role': 'user', 'content': t})
-            orig_add(t)
-        seq = iter([("", [('read_file', {'path': p}, p)
-                          for p in self._paths(8)]), ("Done.", [])])
-
-        def run_tools(pending):
-            for name, args, _ref, _dup in pending:
-                session.messages.append(
-                    {'role': 'tool', 'tool_name': name, 'content': 'x',
-                     'tool_args': dict(args)})
-        turn.run_loop(step=lambda: next(seq), run_tools=run_tools,
-                      add_user=add_user)
-        assert len(seen) == 1
-        assert turn._turn_request() == 'review the whole service'
-
-    def test_over_read_is_a_struggle_key(self) -> None:
-        assert 'over_read' in session.STRUGGLE_KEYS
 
 
 class TestAdapterConfigRoundTrip:
@@ -897,8 +721,9 @@ class TestCallRecords:
 
 
 class TestPromptCaching:
-    """cache_control markers (system prompt + last tool) on both remote
-    adapters, the ``cache`` switch, and LiteLLM cache-usage parsing."""
+    """cache_control markers (system prompt, last tool, last message of the
+    conversation) on both remote adapters, the ``cache`` switch, and
+    LiteLLM cache-usage parsing."""
 
     SPECS = [{'name': 'a', 'description': 'A', 'parameters': {'x': 'X'}},
              {'name': 'b', 'description': 'B', 'parameters': {}}]
@@ -921,6 +746,74 @@ class TestPromptCaching:
         assert anth.cached_tools(defs, False) is defs
         assert anth.cached_tools([], True) == []
 
+    def test_anthropic_cached_messages_marks_last_user_text(self) -> None:
+        msgs = [{'role': 'user', 'content': 'q1'},
+                {'role': 'assistant', 'content': 'a1'},
+                {'role': 'user', 'content': 'q2'}]
+        out = anth.cached_messages(msgs, True)
+        assert out[:2] == msgs[:2]
+        assert out[2] == {'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q2',
+             'cache_control': {'type': 'ephemeral'}}]}
+        assert msgs[2]['content'] == 'q2'                # untouched
+        assert anth.cached_messages(msgs, False) is msgs
+        assert anth.cached_messages([], True) == []
+
+    def test_anthropic_cached_messages_marks_last_tool_result(self) -> None:
+        results = [{'type': 'tool_result', 'tool_use_id': 'a', 'content': 'x'},
+                   {'type': 'tool_result', 'tool_use_id': 'b', 'content': 'y'}]
+        msgs = [{'role': 'user', 'content': 'q'},
+                {'role': 'assistant', 'content': []},
+                {'role': 'user', 'content': results}]
+        out = anth.cached_messages(msgs, True)
+        assert 'cache_control' not in out[2]['content'][0]
+        assert out[2]['content'][1] == {
+            'type': 'tool_result', 'tool_use_id': 'b', 'content': 'y',
+            'cache_control': {'type': 'ephemeral'}}
+        assert 'cache_control' not in results[1]         # copy, not in place
+
+    def test_anthropic_cached_messages_skips_unmarkable_tail(self) -> None:
+        ends_assistant = [{'role': 'user', 'content': 'q'},
+                          {'role': 'assistant', 'content': 'a'}]
+        assert anth.cached_messages(ends_assistant, True) is ends_assistant
+        empty_text = [{'role': 'user', 'content': ''}]
+        assert anth.cached_messages(empty_text, True) is empty_text
+        empty_blocks = [{'role': 'user', 'content': []}]
+        assert anth.cached_messages(empty_blocks, True) is empty_blocks
+
+    def test_anthropic_cached_messages_never_marks_an_empty_block(self):
+        # The API rejects cache_control on an empty block: an empty tail
+        # (text '' or a tool_result with no content) is skipped and the
+        # block before it carries the marker instead.
+        results = [{'type': 'tool_result', 'tool_use_id': 'a', 'content': 'x'},
+                   {'type': 'tool_result', 'tool_use_id': 'b', 'content': ''}]
+        msgs = [{'role': 'user', 'content': results}]
+        out = anth.cached_messages(msgs, True)
+        assert out[0]['content'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert out[0]['content'][1] == results[1]      # untouched, unmarked
+        assert 'cache_control' not in results[0]       # copy, not in place
+        tail_text = [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q'}, {'type': 'text', 'text': ''}]}]
+        out = anth.cached_messages(tail_text, True)
+        assert out[0]['content'][0] == {
+            'type': 'text', 'text': 'q',
+            'cache_control': {'type': 'ephemeral'}}
+        assert 'cache_control' not in out[0]['content'][1]
+        # tool_result content may be a block list: [] is empty too, and a
+        # missing content key is empty; a non-text block (image) counts.
+        mixed = [{'role': 'user', 'content': [
+            {'type': 'image', 'source': {}},
+            {'type': 'tool_result', 'tool_use_id': 'c', 'content': []},
+            {'type': 'tool_result', 'tool_use_id': 'd'}]}]
+        out = anth.cached_messages(mixed, True)
+        assert out[0]['content'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert all('cache_control' not in b for b in out[0]['content'][1:])
+        # Nothing with content: nothing is marked, the list is unchanged.
+        all_empty = [{'role': 'user', 'content': [
+            {'type': 'text', 'text': ''},
+            {'type': 'tool_result', 'tool_use_id': 'e', 'content': ''}]}]
+        assert anth.cached_messages(all_empty, True) is all_empty
+
     # --- pure helpers: litellm ----------------------------------------------
 
     def test_litellm_cached_messages_marks_last_system_part(self) -> None:
@@ -932,11 +825,38 @@ class TestPromptCaching:
         assert out[1]['content'] == [{
             'type': 'text', 'text': 'SUMMARY',
             'cache_control': {'type': 'ephemeral'}}]
-        assert out[2] == {'role': 'user', 'content': 'q'}
+        assert out[2] == {'role': 'user', 'content': [{
+            'type': 'text', 'text': 'q',
+            'cache_control': {'type': 'ephemeral'}}]}
         assert msgs[1]['content'] == 'SUMMARY'          # untouched
+        assert msgs[2]['content'] == 'q'
         assert lite.cached_messages(msgs, False) is msgs
-        no_system = [{'role': 'user', 'content': 'q'}]
-        assert lite.cached_messages(no_system, True) is no_system
+        no_marks = [{'role': 'user', 'content': 'q'},
+                    {'role': 'assistant', 'content': 'a'}]
+        assert lite.cached_messages(no_marks, True) is no_marks
+
+    def test_litellm_cached_messages_marks_last_tool_result(self) -> None:
+        # What the SBP proxy forwards to Anthropic as a marked tool_result
+        # (probe 2026-09-25: cache reads on the whole history).
+        msgs = [{'role': 'user', 'content': 'q'},
+                {'role': 'assistant', 'content': None, 'tool_calls': [
+                    {'id': 'c1', 'type': 'function',
+                     'function': {'name': 'a', 'arguments': '{}'}}]},
+                {'role': 'tool', 'tool_call_id': 'c1', 'content': 'result'}]
+        out = lite.cached_messages(msgs, True)
+        assert out[0] == msgs[0] and out[1] is msgs[1]
+        assert out[2] == {'role': 'tool', 'tool_call_id': 'c1', 'content': [
+            {'type': 'text', 'text': 'result',
+             'cache_control': {'type': 'ephemeral'}}]}
+        assert msgs[2]['content'] == 'result'
+        # Only the last message carries the breakpoint; an empty tail or a
+        # non-string content is left alone (the system marker still goes on).
+        tail_empty = [{'role': 'system', 'content': 'S'},
+                      {'role': 'tool', 'tool_call_id': 'c1', 'content': ''}]
+        out = lite.cached_messages(tail_empty, True)
+        assert out[0]['content'][0]['cache_control'] == {'type': 'ephemeral'}
+        assert out[1] is tail_empty[1]
+        assert lite.cached_messages([], True) == []
 
     def test_litellm_cached_tools_marks_last_only(self) -> None:
         defs = lite.openai_tool_defs(self.SPECS)
@@ -1013,12 +933,16 @@ class TestPromptCaching:
         assert kw['system'][0]['text'] == 'SYS'
         assert kw['tools'][-1]['cache_control'] == {'type': 'ephemeral'}
         assert 'cache_control' not in kw['tools'][0]
-        assert all('cache_control' not in str(m) for m in kw['messages'])
+        assert kw['messages'] == [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q',
+             'cache_control': {'type': 'ephemeral'}}]}]
 
     def test_anthropic_cache_off(self, monkeypatch) -> None:
         kw = self._anthropic_kwargs(monkeypatch, cache=False)
         assert kw['system'] == 'SYS'
         assert 'cache_control' not in str(kw['tools'])
+        # The native list itself (no copy); the reply was appended after.
+        assert kw['messages'][0] == {'role': 'user', 'content': 'q'}
 
     def _litellm_kwargs(self, monkeypatch, cache: bool, fake_repo) -> tuple:
         self._arm(monkeypatch)
@@ -1046,7 +970,9 @@ class TestPromptCaching:
         assert system['content'][0]['cache_control'] == {'type': 'ephemeral'}
         assert kw['tools'][-1]['cache_control'] == {'type': 'ephemeral'}
         assert 'cache_control' not in kw['tools'][0]
-        assert kw['messages'][1] == {'role': 'user', 'content': 'q'}
+        assert kw['messages'][1] == {'role': 'user', 'content': [
+            {'type': 'text', 'text': 'q',
+             'cache_control': {'type': 'ephemeral'}}]}
         [row] = rows
         assert row['tokens_in'] == 360 and row['cache_read'] == 6386
         assert row['cache_write'] == 0 and row['tokens_out'] == 47
@@ -1054,6 +980,7 @@ class TestPromptCaching:
     def test_litellm_cache_off(self, monkeypatch, fake_repo) -> None:
         kw, _ = self._litellm_kwargs(monkeypatch, False, fake_repo)
         assert kw['messages'][0] == {'role': 'system', 'content': 'SYS'}
+        assert kw['messages'][1] == {'role': 'user', 'content': 'q'}
         assert 'cache_control' not in str(kw['tools'])
 
     def test_cache_defaults_on_and_config_switch(self) -> None:
@@ -1208,13 +1135,50 @@ class TestControllerExecuted:
         row = self._run(monkeypatch, fake_repo, [("x" * 601, [])])
         assert row['controller_executed'] is True
 
-    def test_long_answer_after_spawn_is_fine(self, monkeypatch, fake_repo):
+    def test_spawn_is_a_foreign_tool_for_a_controller(
+            self, monkeypatch, fake_repo):
+        """A controller has ``plan`` only; calling spawn/join is doing the
+        coordination by hand and flips the flag."""
         row = self._run(monkeypatch, fake_repo, [
             ("", [("spawn", {"task": "t"}, "r1")]),
             ("", [("join", {"targets": "agent1"}, "r2")]),
-            ("x" * 601, [])])
+            ("short.", [])])
+        assert row['controller_executed'] is True
+
+    def test_delegating_plan_counts_tasks_and_is_fine(self, monkeypatch,
+                                                      fake_repo):
+        from guru.adapters import turn
+        from guru.domain import plan
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'review auth for security'}])
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'task_id', '')
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', True)
+        args = {'outcome': 'delegate', 'tasks': [
+            {'goal': 'review auth', 'kind': 'review',
+             'complexity': 'standard'},
+            {'goal': 'review tests', 'kind': 'review',
+             'complexity': 'trivial'}]}
+        it = iter([("", [("plan", args, "r1")])])
+
+        def run_tools(pending):
+            session.messages.append({
+                'role': 'tool', 'tool_name': 'plan',
+                'content': plan.delegated_text(
+                    ['agent1', 'agent2'], plan.parse(args)[0].tasks)})
+            session.turn_waiting = True
+        turn.run_loop(step=lambda: next(it), run_tools=run_tools,
+                      add_user=lambda t: None)
+        from guru.domain import ledger
+        ledger.flush()
+        [row] = fake_repo.stream('turns')
         assert row['controller_executed'] is False
-        assert row['tasks_spawned'] == 1
+        assert row['tasks_spawned'] == 2
+        assert row['tools_used'] == ['plan']
 
     def test_short_conversational_answer_is_fine(self, monkeypatch,
                                                  fake_repo):
@@ -1245,6 +1209,35 @@ class TestControllerExecuted:
             row = fake_repo.stream('turns')[-1]
             assert row['controller_executed'] is False, prefix
 
+    def test_mailbox_turn_records_the_human_request(self, monkeypatch,
+                                                    fake_repo) -> None:
+        """A synthesis turn is still recognised as one (never flips) when
+        a human request precedes the delivery, and the TurnRecord names
+        that request, not the delivery."""
+        from guru.adapters import turn
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'user', 'content': 'review auth for security'},
+            {'role': 'assistant', 'content': 'spawned'},
+            {'role': 'user', 'content': '[joined results]\n- agent1: A1'}])
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'task_id', '')
+        monkeypatch.setattr(session, 'can_spawn', True)
+        monkeypatch.setattr(session, 'controller', True)
+        monkeypatch.setattr(config, 'DELEGATION_NUDGE_MIN_READS', 0)
+        assert turn._mailbox_turn() is True
+        assert turn.turn_request() == 'review auth for security'
+        it = iter([("x" * 601, [])])
+        turn.run_loop(step=lambda: next(it), run_tools=lambda p: None,
+                      add_user=lambda t: None)
+        from guru.domain import ledger
+        ledger.flush()
+        row = fake_repo.stream('turns')[-1]
+        assert row['controller_executed'] is False
+        assert row['request'] == 'review auth for security'
+        assert turn.request_in is conversation.request_in
+
     def test_turn_start_clears_last_error(self, monkeypatch, fake_repo):
         monkeypatch.setattr(session, 'last_error', 'old failure')
         self._run(monkeypatch, fake_repo, [("ok.", [])])
@@ -1255,3 +1248,468 @@ class TestControllerExecuted:
             ("", [("read_file", {"path": "x"}, "r1")]), ("x" * 601, [])],
             controller=False)
         assert row['controller_executed'] is False
+
+
+class TestRequestDump:
+    """``GURU_DUMP_REQUESTS=<dir>`` writes each outgoing request's kwargs
+    as ``<ts>-<adapter>-<n>.json``; the API key lives in the SDK client and
+    is never part of them."""
+
+    def test_unset_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        from guru.adapters import base
+        monkeypatch.delenv(base.DUMP_ENV, raising=False)
+        assert base.dump_request('X', {'model': 'm'}) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_writes_kwargs_as_json(self, tmp_path, monkeypatch) -> None:
+        import json
+        import re
+        from guru.adapters import base
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path / 'dumps'))
+        kwargs = {'model': 'm', 'messages': [{'role': 'user', 'content': 'q'}],
+                  'tools': None}
+        path = base.dump_request('SBP Litellm', kwargs)
+        assert path is not None and path.parent == tmp_path / 'dumps'
+        assert re.fullmatch(r'\d{8}T\d{9}Z-SBP_Litellm-\d+\.json', path.name)
+        assert json.loads(path.read_text(encoding='utf-8')) == kwargs
+        second = base.dump_request('SBP Litellm', kwargs)
+        assert second is not None and second != path
+        n1 = int(path.stem.rsplit('-', 1)[1])
+        n2 = int(second.stem.rsplit('-', 1)[1])
+        assert n2 == n1 + 1                           # the request sequence
+
+    def test_sdk_objects_are_serialised(self, tmp_path, monkeypatch):
+        import json
+        from guru.adapters import base
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path))
+
+        class Block:
+            def model_dump(self):
+                return {'type': 'text', 'text': 'hi'}
+        path = base.dump_request('Anthropic', {'messages': [
+            {'role': 'assistant', 'content': [Block()]}]})
+        assert path is not None
+        data = json.loads(path.read_text(encoding='utf-8'))
+        assert data['messages'][0]['content'] == [
+            {'type': 'text', 'text': 'hi'}]
+
+    def test_write_failure_is_swallowed(self, tmp_path, monkeypatch) -> None:
+        from guru.adapters import base
+        blocker = tmp_path / 'file'
+        blocker.write_text('x', encoding='utf-8')
+        monkeypatch.setenv(base.DUMP_ENV, str(blocker / 'sub'))
+        assert base.dump_request('X', {'model': 'm'}) is None
+
+    def _quiet(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'session_in', 0)
+        monkeypatch.setattr(session, 'session_out', 0)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'system', 'content': 'SYS'},
+            {'role': 'user', 'content': 'q'}])
+        monkeypatch.setattr('guru.domain.tools.active_specs', lambda: [])
+
+    def test_litellm_turn_dumps_without_the_key(
+            self, tmp_path, monkeypatch) -> None:
+        import json
+        from guru.adapters import base
+        self._quiet(monkeypatch)
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path))
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='ok', tool_calls=None),
+                finish_reason='stop')])
+        a = lite.LiteLLMAdapter(name='SBP Litellm', base_url='http://p',
+                                api_key='sk-very-secret-key')
+        monkeypatch.setattr(a, '_client', lambda: _fake_openai_client(resp))
+        a.run_turn()
+        [path] = list(tmp_path.iterdir())
+        assert '-SBP_Litellm-' in path.name
+        text = path.read_text(encoding='utf-8')
+        assert 'sk-very-secret-key' not in text
+        data = json.loads(text)
+        assert data['model'] == 'm' and data['messages'][-1]['content'] == [
+            {'type': 'text', 'text': 'q',
+             'cache_control': {'type': 'ephemeral'}}]
+
+    def test_anthropic_turn_dumps_without_the_key(
+            self, tmp_path, monkeypatch) -> None:
+        import json
+        from guru.adapters import base
+        self._quiet(monkeypatch)
+        monkeypatch.setenv(base.DUMP_ENV, str(tmp_path))
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            stop_reason='end_turn',
+            content=[SimpleNamespace(type='text', text='ok')])
+        a = anth.AnthropicAdapter(name='Claude Code', thinking=False,
+                                  api_key='sk-ant-very-secret')
+        client = SimpleNamespace(
+            messages=SimpleNamespace(create=lambda **kw: resp))
+        monkeypatch.setattr(a, '_client', lambda: client)
+        a.run_turn()
+        [path] = list(tmp_path.iterdir())
+        assert '-Claude_Code-' in path.name
+        text = path.read_text(encoding='utf-8')
+        assert 'sk-ant-very-secret' not in text
+        assert json.loads(text)['system'][0]['text'] == 'SYS'
+
+
+class TestNativeRoundRebuild:
+    """A past tool round with provider ids is sent in the native shape the
+    in-flight turn used, so the request prefix is byte-identical across
+    turns (the cache-miss the loop-1 triage saw on every controller
+    mailbox turn: the flattened '(used tools)' / '[tool X result]' text
+    differed from the previous request's tool_calls / tool messages)."""
+
+    ROUND = [
+        {'role': 'system', 'content': 'SYS'},
+        {'role': 'user', 'content': 'q'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'call_1', 'raw_arguments': '{"path":"a.py"}',
+             'function': {'name': 'read_file',
+                          'arguments': {'path': 'a.py'}}},
+            {'id': 'call_2',
+             'function': {'name': 'list_dir', 'arguments': {'path': '.'}}}]},
+        {'role': 'tool', 'tool_name': 'read_file', 'tool_call_id': 'call_1',
+         'tool_args': {'path': 'a.py'}, 'content': 'A'},
+        {'role': 'tool', 'tool_name': 'list_dir', 'tool_call_id': 'call_2',
+         'tool_args': {'path': '.'}, 'content': 'B'},
+        {'role': 'user', 'content': 'next'},
+    ]
+
+    def test_openai_round_rebuilt_natively(self) -> None:
+        out = lite.to_openai_messages(self.ROUND)
+        assert out[2] == {'role': 'assistant', 'content': None, 'tool_calls': [
+            {'id': 'call_1', 'type': 'function',
+             'function': {'name': 'read_file',
+                          'arguments': '{"path":"a.py"}'}},   # raw text kept
+            {'id': 'call_2', 'type': 'function',
+             'function': {'name': 'list_dir',
+                          'arguments': '{"path": "."}'}}]}     # re-serialised
+        assert out[3] == {'role': 'tool', 'tool_call_id': 'call_1',
+                          'content': 'A'}
+        assert out[4] == {'role': 'tool', 'tool_call_id': 'call_2',
+                          'content': 'B'}
+        assert out[5] == {'role': 'user', 'content': 'next'}
+        assert len(out) == 6
+
+    def test_openai_text_with_calls_keeps_the_text(self) -> None:
+        head = dict(self.ROUND[2], content='Let me look.')
+        msgs = [head] + self.ROUND[3:5]
+        out = lite.to_openai_messages(msgs)
+        assert out[0]['content'] == 'Let me look.'
+        assert [t['id'] for t in out[0]['tool_calls']] == ['call_1', 'call_2']
+
+    def test_openai_round_without_matching_results_flattens(self) -> None:
+        # a result missing (or answering another id) — no native round,
+        # the API would reject an unanswered tool call.
+        msgs = self.ROUND[:4] + [self.ROUND[5]]
+        out = lite.to_openai_messages(msgs)
+        assert out[2] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[3]['role'] == 'user' and out[3]['content'].startswith(
+            '[tool read_file result]')
+        swapped = self.ROUND[:3] + [self.ROUND[4], self.ROUND[3]]
+        out = lite.to_openai_messages(swapped)
+        assert out[2]['content'] == '(used tools)'
+
+    def test_openai_round_without_ids_flattens(self) -> None:
+        # an Ollama history / an older transcript: no ids anywhere.
+        msgs = [
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'function': {'name': 'read_file',
+                              'arguments': {'path': 'a.py'}}}]},
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'A'}]
+        out = lite.to_openai_messages(msgs)
+        assert out[0] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[1]['role'] == 'user'
+
+    def test_anthropic_round_rebuilt_natively(self) -> None:
+        system, out = anth.to_anthropic_messages(self.ROUND)
+        assert system == 'SYS'
+        assert out[1] == {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': 'call_1', 'name': 'read_file',
+             'input': {'path': 'a.py'}},
+            {'type': 'tool_use', 'id': 'call_2', 'name': 'list_dir',
+             'input': {'path': '.'}}]}
+        assert out[2] == {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'call_1', 'content': 'A'},
+            {'type': 'tool_result', 'tool_use_id': 'call_2', 'content': 'B'}]}
+        assert out[3] == {'role': 'user', 'content': 'next'}
+        with_text = [dict(self.ROUND[2], content='Looking.')] + self.ROUND[3:5]
+        _, out = anth.to_anthropic_messages(with_text)
+        assert out[0]['content'][0] == {'type': 'text', 'text': 'Looking.'}
+        assert out[0]['content'][1]['type'] == 'tool_use'
+
+    def test_anthropic_round_without_ids_flattens(self) -> None:
+        msgs = [self.ROUND[1], {**self.ROUND[2], 'tool_calls': [
+            {'function': {'name': 'read_file',
+                          'arguments': {'path': 'a.py'}}}]},
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'A'}]
+        _, out = anth.to_anthropic_messages(msgs)
+        assert out[1] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[2]['content'].startswith('[tool read_file result]')
+
+    def test_neutral_assistant_keeps_ids(self) -> None:
+        msg = lite.neutral_assistant('', [
+            ('read_file', {'path': 'a'}, 'call_1', '{"path":"a"}'),
+            ('list_dir', {'path': '.'})])
+        assert msg['tool_calls'][0] == {
+            'id': 'call_1', 'raw_arguments': '{"path":"a"}',
+            'function': {'name': 'read_file', 'arguments': {'path': 'a'}}}
+        assert msg['tool_calls'][1] == {
+            'function': {'name': 'list_dir', 'arguments': {'path': '.'}}}
+        msg = anth.neutral_assistant('', [('read_file', {'path': 'a'}, 'tu1')])
+        assert msg['tool_calls'][0]['id'] == 'tu1'
+
+    # --- a whole turn, then the next turn's translation ----------------------
+
+    def _arm(self, monkeypatch) -> None:
+        from guru.adapters import turn
+        from guru.domain import tools
+        monkeypatch.setattr(ui, 'note_thinking', lambda: None)
+        monkeypatch.setattr(ui, 'status_draw', lambda: None)
+        monkeypatch.setattr(turn, '_render_answer', lambda c: None)
+        monkeypatch.setattr(session, 'model', 'm')
+        monkeypatch.setattr(session, 'cancel_requested', False)
+        monkeypatch.setattr(session, 'session_in', 0)
+        monkeypatch.setattr(session, 'session_out', 0)
+        monkeypatch.setattr(session, 'messages', [
+            {'role': 'system', 'content': 'SYS'},
+            {'role': 'user', 'content': 'q'}])
+        monkeypatch.setattr(tools, 'active_specs', lambda: [
+            {'name': 'spawn', 'description': 'd',
+             'parameters': {'task': 't'}}])
+        monkeypatch.setattr(tools, 'execute_tool',
+                            lambda name, args: f'ran {name}')
+
+    @staticmethod
+    def _plain(m: dict) -> dict:
+        """A message with a one-text-part content list read as its text
+        (the cache marker's shape, equivalent for the API)."""
+        c = m.get('content')
+        if isinstance(c, list) and len(c) == 1 and c[0].get('type') == 'text':
+            return {**m, 'content': c[0]['text']}
+        return m
+
+    def test_litellm_next_turn_prefix_matches_the_last_request(
+            self, monkeypatch) -> None:
+        self._arm(monkeypatch)
+        seen: list = []
+        tool_call = SimpleNamespace(
+            id='tooluse_1', function=SimpleNamespace(
+                name='spawn', arguments='{"task":"look at  x"}'))
+        responses = iter([
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content=None,
+                                            tool_calls=[tool_call]),
+                    finish_reason='tool_calls')]),
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content='done', tool_calls=None),
+                    finish_reason='stop')])])
+
+        def _create(**kw):
+            seen.append(kw)
+            return SimpleNamespace(parse=lambda: next(responses), headers={})
+        client = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(with_raw_response=SimpleNamespace(
+                create=_create))))
+        a = lite.LiteLLMAdapter(base_url='http://p')
+        monkeypatch.setattr(a, '_client', lambda: client)
+        a.run_turn()
+        assert len(seen) == 2
+        tool_msg = session.messages[3]
+        assert tool_msg['role'] == 'tool' and tool_msg['tool_call_id'] == \
+            'tooluse_1' and tool_msg['tool_args'] == {'task': 'look at  x'}
+        assert session.messages[2]['tool_calls'][0]['id'] == 'tooluse_1'
+        assert session.messages[2]['tool_calls'][0]['raw_arguments'] == \
+            '{"task":"look at  x"}'
+        # Next turn: the user speaks again; what the adapter would send.
+        session.messages.append({'role': 'user', 'content': 'and then?'})
+        again = lite.cached_messages(
+            lite.to_openai_messages(session.messages), True)
+        last = seen[-1]['messages']
+        assert [self._plain(m) for m in again[:len(last)]] == \
+            [self._plain(m) for m in last]
+        assert again[-1]['content'][0]['cache_control'] == {
+            'type': 'ephemeral'}
+
+    def test_anthropic_next_turn_prefix_matches_the_last_request(
+            self, monkeypatch) -> None:
+        self._arm(monkeypatch)
+        seen: list = []
+        use = SimpleNamespace(type='tool_use', id='tu_1', name='spawn',
+                              input={'task': 'x'})
+        responses = iter([
+            SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                stop_reason='tool_use', content=[use]),
+            SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                stop_reason='end_turn',
+                content=[SimpleNamespace(type='text', text='done')])])
+
+        def _create(**kw):
+            seen.append(kw)
+            return next(responses)
+        a = anth.AnthropicAdapter(thinking=False)
+        monkeypatch.setattr(a, '_client', lambda: SimpleNamespace(
+            messages=SimpleNamespace(create=_create)))
+        a.run_turn()
+        assert session.messages[3]['tool_call_id'] == 'tu_1'
+        assert session.messages[2]['tool_calls'][0]['id'] == 'tu_1'
+        session.messages.append({'role': 'user', 'content': 'and then?'})
+        _, again = anth.to_anthropic_messages(session.messages)
+        # The in-flight native history held the SDK's block objects; the
+        # rebuilt round is the same blocks as dicts.
+        last = seen[-1]['messages']
+        assert again[1]['content'] == [
+            {'type': 'tool_use', 'id': 'tu_1', 'name': 'spawn',
+             'input': {'task': 'x'}}]
+        assert last[1]['content'] == [use]
+        assert [self._plain(m) for m in again[2:3]] == [
+            {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 'tu_1',
+                 'content': 'ran spawn'}]}]
+        assert [self._plain(m) for m in last[2:3]] == [
+            {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 'tu_1',
+                 'content': 'ran spawn',
+                 'cache_control': {'type': 'ephemeral'}}]}]
+        assert again[3] == {'role': 'assistant', 'content': 'done'}
+        assert again[4] == {'role': 'user', 'content': 'and then?'}
+
+
+class TestRequestIn:
+    """``turn.request_in`` finds the turn's request in any agent's
+    history (the orchestrator reads a parent's for the panel judge)."""
+
+    def test_skips_nudges_and_non_user_messages(self) -> None:
+        from guru.adapters import turn
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'review the auth service'},
+                {'role': 'assistant', 'content': 'Let me…'},
+                {'role': 'user', 'content': turn._NUDGE_TEXT},
+                {'role': 'tool', 'tool_name': 'spawn', 'content': 'ok'}]
+        assert turn.request_in(msgs) == 'review the auth service'
+        assert turn.request_in([{'role': 'system', 'content': 's'}]) == ''
+        assert turn.request_in([]) == ''
+
+
+class TestThinkingLastRound:
+    """With extended thinking on, the Anthropic API requires the *last*
+    assistant message to start with a thinking block when it carries
+    ``tool_use``; previous turns' thinking is not kept, so the rebuilt
+    round that would be that last message is flattened to text instead,
+    and every earlier round is still rebuilt from its ids."""
+
+    ROUND = [
+        {'role': 'user', 'content': 'q'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'toolu_1',
+             'function': {'name': 'join', 'arguments': {'targets': 'a'}}}]},
+        {'role': 'tool', 'tool_name': 'join', 'tool_call_id': 'toolu_1',
+         'content': 'Waiting for agent1'},
+    ]
+    DELIVERY = {'role': 'user', 'content': '[joined results]\nA1'}
+
+    def test_last_round_flattened_with_thinking(self) -> None:
+        # a turn that ended on a join, resumed by the mailbox delivery
+        msgs = self.ROUND + [self.DELIVERY]
+        _, out = anth.to_anthropic_messages(msgs, thinking=True)
+        assert out[1] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[2] == {'role': 'user',
+                          'content': '[tool join result]\nWaiting for agent1'}
+        assert out[3] == self.DELIVERY
+        assert anth.native_round(msgs, 1, thinking=True) is None
+
+    def test_last_round_rebuilt_without_thinking(self) -> None:
+        msgs = self.ROUND + [self.DELIVERY]
+        _, out = anth.to_anthropic_messages(msgs)
+        assert out[1]['content'] == [
+            {'type': 'tool_use', 'id': 'toolu_1', 'name': 'join',
+             'input': {'targets': 'a'}}]
+        assert out[2]['content'][0]['type'] == 'tool_result'
+        assert anth.native_round(msgs, 1, thinking=False) is not None
+        assert anth.native_round(msgs, 1) is not None       # the default
+
+    def test_earlier_round_rebuilt_with_thinking(self) -> None:
+        # an assistant text follows the round: it is not the last assistant
+        # message, so the API accepts it without its thinking blocks
+        msgs = self.ROUND + [
+            {'role': 'assistant', 'content': 'done'},
+            {'role': 'user', 'content': 'and then?'}]
+        _, out = anth.to_anthropic_messages(msgs, thinking=True)
+        assert out[1]['content'][0]['type'] == 'tool_use'
+        assert out[2]['content'][0]['type'] == 'tool_result'
+        assert out[3] == {'role': 'assistant', 'content': 'done'}
+        # two rounds, the second last: the first rebuilt, the second flat
+        second = [
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': 'toolu_2',
+                 'function': {'name': 'check', 'arguments': {}}}]},
+            {'role': 'tool', 'tool_name': 'check', 'tool_call_id': 'toolu_2',
+             'content': 'running'}]
+        msgs = self.ROUND + second + [self.DELIVERY]
+        _, out = anth.to_anthropic_messages(msgs, thinking=True)
+        assert out[1]['content'][0]['type'] == 'tool_use'
+        assert out[3] == {'role': 'assistant', 'content': '(used tools)'}
+        assert out[4]['content'].startswith('[tool check result]')
+
+    def test_run_turn_passes_the_adapter_thinking_flag(self, monkeypatch):
+        seen: list = []
+        monkeypatch.setattr(anth, 'to_anthropic_messages',
+                            lambda msgs, thinking=False: seen.append(
+                                thinking) or ('', []))
+        monkeypatch.setattr(anth.tools, 'active_specs', lambda: [])
+        monkeypatch.setattr(anth.turn, 'run_loop', lambda **kw: None)
+        for flag in (True, False):
+            a = anth.AnthropicAdapter(thinking=flag)
+            monkeypatch.setattr(a, '_client', lambda: object())
+            a.run_turn()
+        assert seen == [True, False]
+
+    def test_mixed_provider_ids_rebuild_on_either_side(self) -> None:
+        """Ids are opaque: an Anthropic ``toolu_`` round replays through
+        the LiteLLM translation and an OpenAI ``call_`` round through the
+        Anthropic one, both rebuilt (not crashed, not flattened)."""
+        anthropic_history = self.ROUND + [
+            {'role': 'assistant', 'content': 'done'},
+            {'role': 'user', 'content': 'more'}]
+        out = lite.to_openai_messages(anthropic_history)
+        assert out[1]['tool_calls'][0]['id'] == 'toolu_1'
+        assert out[2] == {'role': 'tool', 'tool_call_id': 'toolu_1',
+                          'content': 'Waiting for agent1'}
+        native = lite.native_round(anthropic_history, 1)
+        assert native is not None and native[1] == 3
+        openai_history = [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [
+                {'id': 'call_abc', 'raw_arguments': '{"path": "a.py"}',
+                 'function': {'name': 'read_file',
+                              'arguments': {'path': 'a.py'}}}]},
+            {'role': 'tool', 'tool_name': 'read_file',
+             'tool_call_id': 'call_abc', 'content': 'A'},
+            {'role': 'assistant', 'content': 'done'},
+            {'role': 'user', 'content': 'more'}]
+        for thinking in (False, True):
+            _, out = anth.to_anthropic_messages(openai_history,
+                                                thinking=thinking)
+            assert out[1]['content'] == [
+                {'type': 'tool_use', 'id': 'call_abc', 'name': 'read_file',
+                 'input': {'path': 'a.py'}}]
+            assert out[2]['content'] == [
+                {'type': 'tool_result', 'tool_use_id': 'call_abc',
+                 'content': 'A'}]
+            assert out[3:] == [{'role': 'assistant', 'content': 'done'},
+                               {'role': 'user', 'content': 'more'}]

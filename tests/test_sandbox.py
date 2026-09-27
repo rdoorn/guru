@@ -449,6 +449,7 @@ class TestRun:
             '--read-only', '--tmpfs', '/tmp',
             '--pids-limit', '256', '--memory', '2048m', '--cpus', '2.0',
             '-v', f'{copy}:/work', '-w', '/work',
+            '-e', 'HOME=/tmp', '-e', 'XDG_CACHE_HOME=/tmp/.cache',
             spec.image_tag, 'pytest', '-q', 'tests']
         assert res.docker_argv == call['argv']
         assert call['cwd'] == spec.project
@@ -694,7 +695,13 @@ class TestSandboxStatusCommand:
         images.record_built(spec, text, 'sha256:cafe')
         cli._sandbox_command('')
         out = capsys.readouterr().out
-        assert 'unavailable' in out and 'enabled: no' in out
+        assert 'unavailable' in out
+        assert 'absent; enabled: yes' in out          # on without a file
+        (project / '.guru' / 'sandbox.toml').write_text(
+            '[sandbox]\nenabled = false\n', encoding='utf-8')
+        cli._sandbox_command('')
+        out = capsys.readouterr().out
+        assert 'present; enabled: no' in out
         assert 'sha256:cafe' in out and 'needs build: no' in out
 
     def test_no_lockfile_and_bad_settings(self, project, monkeypatch,

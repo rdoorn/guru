@@ -1,0 +1,61 @@
+# Hand rubric grades: the reference the rubric judges are scored against.
+#
+#   .venv/bin/python -m guru.evals grade RUN_ID --rubric 'Adapter|model' [--rubric ...]
+#
+# prints one column per judge next to the `hand` column from this file and
+# the agreement per judge. One [[label]] table per grade:
+#
+#   case  = the case name (evals/cases/<name>.toml)
+#   run   = a run id, or "*" for any run of that case (a run-specific grade
+#           wins over the "*" one)
+#   score = 0 | 1 | 2, exactly as the rubric judge scores (see evals/README.md,
+#           "Rubric grading")
+#   note  = where the grade comes from (triage note, date)
+#
+# Add a grade after triage:
+#
+#   .venv/bin/python -m guru.evals grade RUN_ID --show
+#
+# prints prompt, rubric, evidence and answer per case with a [[label]]
+# stub; grade on the judge's scale (2 = the intent of every rubric point
+# is met, equivalents count, what the evidence confirms counts; 1 = one
+# substantive point missing or wrong; 0 = wrong, unsupported or
+# contradicted by the evidence), paste the stub here. Grade the answer,
+# not the judge; a disagreement with the judge is the point. See
+# evals/README.md, "Grading by hand".
+
+[[label]]
+case = "guru-add-version-flag"
+run = "*"
+score = 2
+note = "hand grade 2026-09-24, controller runs 6/6 (evals/triage/2026-09-24-real-cases.md): --version added, test in tests/test_misc.py, suite run"
+
+[[label]]
+case = "guru-explain-gpu-fit"
+run = "*"
+score = 2
+note = "hand grade 2026-09-24, controller runs 6/6 (evals/triage/2026-09-24-real-cases.md): both probe loads, KV-per-token estimate and model_ctx.json named"
+
+[[label]]
+case = "guru-review-adapters"
+run = "*"
+score = 2
+note = "hand grade 2026-09-24, controller runs 6/6 (evals/triage/2026-09-24-real-cases.md): shared _note_error/_record_call pattern vs ollama.py, concrete divergence and risk named"
+
+[[label]]
+case = "explain-readme"
+run = "644b68facb64"
+score = 2
+note = "hand grade 2026-09-25 (fast cases; grade 644b68facb64 --show): both points met — 'redeploy the previous release tag' and 'Do not roll back the database' (expand/contract migrations named); the third bullet is extra material, not a miss"
+
+[[label]]
+case = "logic-bug"
+run = "644b68facb64"
+score = 2
+note = "hand grade 2026-09-25 (fast cases): quotes the inverted 'now < token[expires_at]', states it is True for valid tokens and False for expired ones, and gives the 'now >= expires_at' fix — every rubric point met"
+
+[[label]]
+case = "security-only"
+run = "644b68facb64"
+score = 2
+note = "hand grade 2026-09-25 (fast cases): says yes, names os.path.join(base_dir, user_path) in app/upload.py with no containment check, proposes realpath + commonpath prefix check and rejecting '..' / leading '/' — every rubric point met; the login note is extra"

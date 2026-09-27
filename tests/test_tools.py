@@ -67,7 +67,8 @@ class TestActiveSpecs:
     def test_search_tools_always_present(self, monkeypatch) -> None:
         monkeypatch.setattr(session, 'active_tool_names', set())
         specs = tools.active_specs()
-        assert [s['name'] for s in specs] == ['search_tools', 'use_skill']
+        assert [s['name'] for s in specs] == [
+            'search_tools', 'use_skill', 'final_answer']
 
     def test_activated_tool_included(self, monkeypatch) -> None:
         monkeypatch.setattr(session, 'active_tool_names', {'web_fetch'})
@@ -80,7 +81,7 @@ class TestSpecsFor:
 
     def test_search_tools_always(self) -> None:
         assert [s['name'] for s in tools.specs_for(set(), False)] == [
-            'search_tools', 'use_skill']
+            'search_tools', 'use_skill', 'final_answer']
 
     def test_can_spawn_and_activated(self) -> None:
         names = {s['name'] for s in tools.specs_for({'web_fetch'}, True)}
@@ -329,14 +330,32 @@ class TestDomainAutoGrant:
 
 
 class TestControllerTools:
-    """Controller mode (Task 4.5): only spawn/check/join/use_skill."""
+    """Controller mode: the ``plan`` tool alone (guru.domain.plan); every
+    other agent has ``final_answer`` (the turn contract)."""
 
     def test_initial_tools_controller(self, monkeypatch) -> None:
         monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
         base, names = tools.initial_tools(can_spawn=True, controller=True)
-        assert base == [tools.spawn, tools.check, tools.join,
-                        tools.use_skill]
+        assert base == [tools.plan]
         assert names == set()
+        assert tools.CONTROLLER_TOOLS == {'plan'}
+
+    def test_workers_get_final_answer(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
+        base, _ = tools.initial_tools(can_spawn=False)
+        assert tools.final_answer in base and tools.plan not in base
+        names = [s['name'] for s in tools.specs_for(set(), False)]
+        assert 'final_answer' in names and 'plan' not in names
+
+    def test_plan_spec_carries_the_full_schema(self) -> None:
+        from guru.domain import plan
+        spec = tools._PLAN_SPEC
+        assert spec['schema'] is plan.SCHEMA
+        assert spec['description'] == config.PLAN_TOOL_DESCRIPTION
+        assert set(spec['parameters']) == {'outcome', 'answer', 'tasks'}
+        assert set(spec['optional']) == {'answer', 'tasks'}
+        assert tools._FINAL_ANSWER_SPEC['parameters'] == {
+            'text': 'Your complete answer to the user'}
 
     def test_initial_tools_non_controller_unchanged(self, monkeypatch):
         monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
@@ -347,14 +366,14 @@ class TestControllerTools:
         names = [s['name'] for s in
                  tools.specs_for({'read_file', 'web_fetch'}, True,
                                  controller=True)]
-        assert names == ['spawn', 'check', 'join', 'use_skill']
+        assert names == ['plan']
 
     def test_active_specs_honours_session_controller(self, monkeypatch):
         monkeypatch.setattr(session, 'active_tool_names', {'read_file'})
         monkeypatch.setattr(session, 'can_spawn', True)
         monkeypatch.setattr(session, 'controller', True)
         names = [s['name'] for s in tools.active_specs()]
-        assert names == ['spawn', 'check', 'join', 'use_skill']
+        assert names == ['plan']
         monkeypatch.setattr(session, 'controller', False)
         names = [s['name'] for s in tools.active_specs()]
         assert 'search_tools' in names and 'read_file' in names
@@ -365,8 +384,7 @@ class TestControllerTools:
         monkeypatch.setattr(session, 'can_spawn', True)
         monkeypatch.setattr(session, 'controller', True)
         tools.reset_active_tools()
-        assert session.active_tools == [tools.spawn, tools.check, tools.join,
-                                        tools.use_skill]
+        assert session.active_tools == [tools.plan]
         assert session.active_tool_names == set()
 
     def test_execute_tool_hides_other_tools_from_a_controller(
@@ -379,9 +397,38 @@ class TestControllerTools:
             'Unknown tool: read_file'
         assert tools.execute_tool('search_tools', {'query': 'web'}) == \
             'Unknown tool: search_tools'
+        assert tools.execute_tool('spawn', {'task': 't'}) == \
+            'Unknown tool: spawn'
+        assert tools.execute_tool('use_skill', {'name': 's'}) == \
+            'Unknown tool: use_skill'
         assert session.active_tool_names == set()       # nothing activated
-        monkeypatch.setattr(tools, 'use_skill', lambda name: f'ok:{name}')
-        assert tools.execute_tool('use_skill', {'name': 's'}) == 'ok:s'
+        seen: list = []
+        tools.set_plan_handler(lambda args: seen.append(args) or 'ok')
+        try:
+            assert tools.execute_tool(
+                'plan', {'outcome': 'answer', 'answer': 'hi'}) == 'ok'
+        finally:
+            tools.set_plan_handler(None)
+        assert seen == [{'outcome': 'answer', 'answer': 'hi'}]
+
+    def test_plan_without_a_handler_says_so(self, monkeypatch) -> None:
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        tools.set_plan_handler(None)
+        out = tools.execute_tool('plan', {'outcome': 'answer', 'answer': 'x'})
+        assert 'not available' in out
+        # The callable form (Ollama introspects it) routes the same way.
+        assert tools.plan('answer', answer='x') == out
+
+    def test_final_answer_tool_acknowledges(self, monkeypatch) -> None:
+        from guru.domain import plan
+        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
+        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
+        monkeypatch.setattr(session, 'controller', False)
+        assert tools.execute_tool('final_answer', {'text': 'done'}) == \
+            plan.ANSWER_ACK
+        assert tools.execute_tool('final_answer', {'answer': 'done'}) == \
+            plan.ANSWER_ACK                     # a misnamed field still runs
 
     def test_spawn_spec_has_optional_labels(self) -> None:
         spec = tools._SPAWN_SPEC
@@ -697,11 +744,13 @@ class TestCodeVerbRegistry:
         assert 'begin with a\nsingle tool' not in config.SYSTEM_PROMPT
 
     def test_prompts_mention_the_verbs(self) -> None:
+        """The verify rule stays prose (code cannot check it); the
+        outline/find_symbol preference is gone (read_file is structural)."""
         assert 'run_tests' in config.CONTROLLER_HINT
         assert 'check_syntax' in config.CONTROLLER_HINT
         for text in (config.SYSTEM_PROMPT, config.DELEGATION_HINT):
-            assert 'outline' in text and 'find_symbol' in text
-            assert 'run_tests' in text
+            assert 'run_tests' in text and 'check_syntax' in text
+            assert 'outline' not in text and 'find_symbol' not in text
 
 
 class TestDisabledToolsNotAdvertised:
@@ -769,8 +818,8 @@ class TestDisabledToolsNotAdvertised:
         assert tools._match_tools('read a file') == ['search_code']
         names = [s['name'] for s in tools.specs_for(
             set(tools.TOOL_REGISTRY), can_spawn=True)]
-        assert set(names) == {'search_tools', 'use_skill', 'spawn',
-                              'check', 'join', 'search_code'}
+        assert set(names) == {'search_tools', 'use_skill', 'final_answer',
+                              'spawn', 'check', 'join', 'search_code'}
 
 
 class TestRunnerDenialIsMode:

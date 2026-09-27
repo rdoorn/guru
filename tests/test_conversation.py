@@ -7,6 +7,31 @@ from guru import config, session, skills
 from guru.domain import conversation, files, tools
 
 
+class TestRequestCap:
+    def test_request_in_cap_none_is_the_full_text(self) -> None:
+        long = 'x' * (conversation.REQUEST_CHARS + 50)
+        msgs = [{'role': 'user', 'content': long}]
+        assert len(conversation.request_in(msgs)) == \
+            conversation.REQUEST_CHARS
+        assert conversation.request_in(msgs, cap=None) == long
+        assert conversation.request_in(msgs, cap=5) == 'xxxxx'
+
+    def test_request_start_skips_deliveries_and_nudges(self) -> None:
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'first request'},
+                {'role': 'assistant', 'content': ''},
+                {'role': 'user', 'content': 'second request'},
+                {'role': 'assistant', 'content': ''},
+                {'role': 'user', 'content': '[joined results]\n— a1: ok'},
+                {'role': 'assistant', 'content': ''},
+                {'role': 'user', 'content': conversation.DELEGATION_TEXT}]
+        assert conversation.request_start(msgs) == 3
+        assert conversation.turn_start(msgs) == 5         # the delivery
+        assert conversation.request_start([]) == 0
+        assert conversation.request_start(
+            [{'role': 'user', 'content': '[joined results]\nx'}]) == 0
+
+
 class TestMessageToDict:
     """Tests for conversation.message_to_dict normalisation."""
 
@@ -618,3 +643,93 @@ class TestOutlineCode:
             self._read_output('/tmp/b.py', src))
         # regex fallback keeps def/import lines even when AST fails
         assert 'import sys' in out or 'def broken' in out
+
+
+class TestRetentionKeepsToolCallSteps:
+    """A text-less assistant step that carries tool calls survives
+    retention (the remote adapters rebuild the round from it, and dropping
+    it changed the request prefix every turn); an empty step without calls
+    is still dropped."""
+
+    def test_tool_call_step_kept_empty_step_dropped(self) -> None:
+        msgs = [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': 'c1', 'function': {'name': 'search_code',
+                                          'arguments': {'q': 'x'}}}]},
+            {'role': 'tool', 'tool_name': 'search_code', 'tool_call_id': 'c1',
+             'content': 'a.py:1: hit'},
+            {'role': 'assistant', 'content': ''},          # empty: dropped
+            {'role': 'assistant', 'content': 'the answer'},
+        ]
+        conversation.apply_retention(msgs)
+        assert [m.get('role') for m in msgs] == [
+            'user', 'assistant', 'tool', 'assistant']
+        assert msgs[1]['tool_calls'][0]['id'] == 'c1'
+
+    def test_object_message_with_tool_calls_kept(self) -> None:
+        class Msg:
+            role = 'assistant'
+            content = ''
+            tool_calls = [{'function': {'name': 'x', 'arguments': {}}}]
+        msgs = [Msg(), {'role': 'assistant', 'content': 'ok'}]
+        conversation.apply_retention(msgs)
+        assert len(msgs) == 2
+
+    def test_message_to_dict_keeps_tool_call_id(self) -> None:
+        msg = {'role': 'tool', 'tool_name': 'read_file', 'tool_call_id': 'c1',
+               'tool_args': {'path': 'x'}, 'content': 'x'}
+        out = conversation.message_to_dict(msg)
+        assert out['tool_call_id'] == 'c1' and 'tool_args' not in out
+        assert 'tool_call_id' not in conversation.message_to_dict(
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'x'})
+
+
+class TestRequestIn:
+    """``conversation.request_in``: the human request behind a history,
+    skipping the loop's nudges and the mailbox deliveries, capped."""
+
+    def test_skips_mailbox_deliveries_back_to_the_human_request(self):
+        msgs = [{'role': 'system', 'content': 's'},
+                {'role': 'user', 'content': 'review auth for security'},
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'function': {'name': 'spawn', 'arguments': {}}}]},
+                {'role': 'tool', 'tool_name': 'spawn', 'content': 'ok'},
+                {'role': 'user', 'content': '[result from agent1 · task: t]'
+                                            '\nfindings…'},
+                {'role': 'assistant', 'content': 'spawning another'},
+                {'role': 'user', 'content': '[joined results]\n- a: b'}]
+        assert conversation.request_in(msgs) == 'review auth for security'
+        for prefix in conversation.MAILBOX_PREFIXES:
+            assert conversation.is_mailbox(prefix + ' x')
+        assert not conversation.is_mailbox('review [joined results]')
+
+    def test_only_deliveries_fall_back_to_the_latest_one(self) -> None:
+        msgs = [{'role': 'user', 'content': '[joined results]\nfirst'},
+                {'role': 'assistant', 'content': 'ok'},
+                {'role': 'user', 'content': '[joined results]\nsecond'}]
+        assert conversation.request_in(msgs) == '[joined results]\nsecond'
+
+    def test_skips_nudges_and_caps_the_text(self) -> None:
+        long = 'x' * (conversation.REQUEST_CHARS + 500)
+        msgs = [{'role': 'user', 'content': long},
+                {'role': 'assistant', 'content': 'Let me…'},
+                {'role': 'user', 'content': conversation.NUDGE_TEXT},
+                {'role': 'user', 'content': 'You have read 9 files without '
+                                            'delegating. '
+                                            + conversation.DELEGATION_TEXT}]
+        out = conversation.request_in(msgs)
+        assert out == 'x' * conversation.REQUEST_CHARS
+        assert conversation.REQUEST_CHARS == 1000
+        long_delivery = '[joined results]\n' + 'y' * 2000
+        assert len(conversation.request_in(
+            [{'role': 'user', 'content': long_delivery}])) == 1000
+
+    def test_empty_cases(self) -> None:
+        assert conversation.request_in([]) == ''
+        assert conversation.request_in(
+            [{'role': 'system', 'content': 's'},
+             {'role': 'user', 'content': '   '}]) == ''
+        # provider objects, not only dicts
+        assert conversation.request_in(
+            [SimpleNamespace(role='user', content='hi')]) == 'hi'

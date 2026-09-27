@@ -49,10 +49,17 @@ def sort_models(models: list) -> list:
 
 
 def _final_answer(agent) -> str:
+    """The agent's answer to its latest request: the last assistant text,
+    unless a later user message (a mailbox delivery such as ``[joined
+    results]``, or the prompt itself) went unanswered — then ``''``. A
+    stall line said before a ``join`` is not the answer to the results
+    that arrived after it (run 94fdc1bb11a5)."""
     for m in reversed(agent.state.messages):
-        if conversation.msg_role(m) == 'assistant' \
-                and conversation.msg_content(m).strip():
+        role = conversation.msg_role(m)
+        if role == 'assistant' and conversation.msg_content(m).strip():
             return conversation.msg_content(m).strip()
+        if role == 'user':
+            return ''
     return ''
 
 
@@ -133,6 +140,17 @@ class BenchRun(Orchestrator):
         super().__init__(registry=registry, routing=routing)
         self.base = base
         self.controller = bool(routing is not None and routing.controller)
+        # (agent title, 'ExcType: text') per turn that raised; the eval
+        # runner reports them as the case error.
+        self.worker_errors: list = []
+
+    def on_worker_error(self, agent, exc: Exception) -> None:
+        """Keep a raised turn on the run (headless: the default only logs,
+        and the eval runner never sets the logger up) so the case fails
+        with the reason instead of the agent's last words."""
+        super().on_worker_error(agent, exc)
+        self.worker_errors.append(
+            (agent.title, f'{type(exc).__name__}: {exc}'))
 
     async def _abort(self, grace: float = 30.0) -> None:
         """Cooperatively stop a stalled run: flag cancel on every agent (the
@@ -190,8 +208,11 @@ _ADAPTER_CLASS = {
 }
 
 
-def _build_adapters() -> list:
-    """The configured adapter instances (reuses guru's own construction)."""
+def build_adapters() -> list:
+    """The configured adapter instances from ``~/.guru/adapters.toml``,
+    each carrying its ``enabled`` flag (reuses guru's own construction in
+    ``guru.cli``). The one builder the bench, the eval runner and offline
+    re-grading share, so all three see the same adapters as the TUI."""
     from guru import cli
     return cli._build_adapters()
 
@@ -223,7 +244,7 @@ def run_benchmark(models, out_dir=BENCH_DIR):
     answer was empty). Both are rewritten after every model, so a Ctrl+C
     mid-run keeps what was gathered. Returns the results file path."""
     skills.ensure_loaded()       # spawn(role=, skill=) needs the catalog
-    built = _build_adapters()
+    built = build_adapters()
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     path = out_dir / f'results-{stamp}.json'

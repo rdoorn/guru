@@ -27,6 +27,9 @@ class Observed:
     fixture_tests_pass: Optional[bool]
     timed_out: bool
     error: str = ''
+    # Last lines of the fixture's pytest output when it FAILED (failing
+    # test ids and the summary line); '' otherwise.
+    fixture_tests_tail: str = ''
     # ``{'path', 'ref'}`` of a ``[fixture_git]`` case (traceability);
     # None for a directory fixture.
     fixture_git: Optional[dict] = None
@@ -142,6 +145,17 @@ def _files_changed(e: Expect, o: Observed) -> CheckResult:
     return CheckResult('files_changed', False, '; '.join(parts))
 
 
+def _files_changed_any(e: Expect, o: Observed) -> CheckResult:
+    """Passes when at least one of the listed paths changed (the mirror of
+    ``tools_used_any``: a task whose other edits are legitimately open, a
+    new test file with a name the model chooses, is pinned on the file
+    that must change)."""
+    hit = [f for f in e.files_changed_any if f in o.files_changed]
+    return CheckResult('files_changed_any', bool(hit),
+                       '' if hit else f'none of {_fmt(e.files_changed_any)} '
+                       f'in {_fmt(o.files_changed)}')
+
+
 def _files_unchanged(e: Expect, o: Observed) -> CheckResult:
     bad = [f for f in e.files_unchanged if f in o.files_changed]
     return CheckResult('files_unchanged', not bad,
@@ -155,8 +169,13 @@ def _fixture_tests_pass(e: Expect, o: Observed) -> CheckResult:
     ok = o.fixture_tests_pass is e.fixture_tests_pass
     got = 'passed' if o.fixture_tests_pass else 'failed'
     want = 'pass' if e.fixture_tests_pass else 'fail'
-    return CheckResult('fixture_tests_pass', ok, '' if ok else
-                       f'fixture tests {got}, expected {want}')
+    detail = f'fixture tests {got}, expected {want}'
+    if not ok and o.fixture_tests_tail:
+        failing = [ln for ln in o.fixture_tests_tail.splitlines()
+                   if ln.startswith(('FAILED', 'ERROR')) or ' failed' in ln]
+        detail += ': ' + ' | '.join(failing[-6:] or
+                                    o.fixture_tests_tail.splitlines()[-3:])
+    return CheckResult('fixture_tests_pass', ok, '' if ok else detail)
 
 
 def _last_verdict(o: Observed) -> str:
@@ -204,6 +223,8 @@ _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
      _answer_not_contains),
     ('answer_regex', lambda e: bool(e.answer_regex), _answer_regex),
     ('files_changed', lambda e: e.files_changed is not None, _files_changed),
+    ('files_changed_any', lambda e: bool(e.files_changed_any),
+     _files_changed_any),
     ('files_unchanged', lambda e: bool(e.files_unchanged), _files_unchanged),
     ('fixture_tests_pass', lambda e: e.fixture_tests_pass is not None,
      _fixture_tests_pass),

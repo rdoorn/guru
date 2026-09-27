@@ -25,7 +25,13 @@ Routing (design doc §2, §4, §5): ``spawn`` carries ``kind``/``complexity``
 labels; ``_make_child`` scans the task text, resolves a ``Route`` over the
 configured ladders, asks the once-per-run spend question when a remote pick
 needs it, and configures the child with the route's adapter/model from the
-registry. Without a registry routing is inert (the child keeps the parent's
+registry. A controller never calls ``spawn``: its every reply is one
+``plan`` tool call (``guru.domain.plan``) and ``do_plan`` — installed as the
+plan handler — validates it and, for ``delegate``, spawns the plan's tasks
+itself through ``spawn_panel`` (kind/complexity per task, so a ``review``
+task takes the review ladder), opens the join barrier and ends the turn;
+the joined results resume the controller, which answers with ``plan``
+again. Without a registry routing is inert (the child keeps the parent's
 adapter and model). A remote child that fails without an answer is respawned
 once on the best local rung (``retry_of``); the original row is
 ``fell_back``.
@@ -33,7 +39,9 @@ once on the best local rung (``retry_of``); the original row is
 Panel judge (item 6 of ``docs/plans/2026-09-25-top10-remaining.md``): when
 the ``panel`` decision point is *active* and a controller spawns a
 ``review``-kind task without a security reviewer, the judge's
-``needs_security`` verdict over the task text adds one ``security-engineer``
+``needs_security`` verdict over the user's request and the task text (the
+request first, so a controller that drops "security" from the task it
+writes still triggers it) adds one ``security-engineer``
 worker on the same task (once per parent turn; the row says
 ``origin = "panel"`` and its ``reason`` starts with ``origin:panel``).
 Shadow mode changes nothing (the turn loop already shadows the panel
@@ -41,7 +49,9 @@ questions).
 """
 import asyncio
 import io
+import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -49,8 +59,11 @@ from rich.console import Console
 
 from guru import config, log, session, ui
 from guru.agents import Agent, AgentManager
-from guru.domain import (conversation, decisions, ledger, policy, routing,
-                         spend, tools)
+from guru.domain import brief as _brief
+from guru.domain import (conversation, decisions, ledger, plan, policy,
+                         routing, spend, tools)
+from guru.domain.brief import Brief
+from guru.repositories import briefs
 from guru.repositories import settings as routing_settings
 from guru.repositories.settings import RoutingSettings
 
@@ -85,6 +98,18 @@ _SECURITY_SPAWNED = (
     " judge found it needs a security review; join it as well.")
 
 
+def panel_text(messages: list, task: str) -> str:
+    """What the panel judge reads for a spawned ``task``: the parent's
+    request (:func:`guru.domain.conversation.request_in` over
+    ``messages`` — the human request behind a mailbox delivery, capped)
+    and then the task text, blank-line separated; the task alone when the
+    request is empty or already the task."""
+    request = conversation.request_in(messages)
+    if not request or request == task:
+        return task
+    return request + "\n\n" + task
+
+
 @dataclass
 class _Plan:
     """Everything ``_make_child`` decided before building the agent: the
@@ -100,6 +125,35 @@ class _Plan:
     @property
     def refused(self) -> bool:
         return self.route is not None and self.route.refused
+
+
+def _brief_block(task: str, project: Optional[Brief]) -> str:
+    """The project brief slice for ``task`` as a system-context block
+    (``brief.slice`` over ``project``: map, test command, the modules and
+    symbols the task names), so a worker starts informed instead of
+    exploring. Empty without a brief or on any failure (logged) — the
+    brief is a saving, never a dependency."""
+    if project is None:
+        return ''
+    try:
+        text = _brief.slice(project, task)
+    except Exception:                                    # noqa: BLE001
+        log.exc('brief slice failed')
+        return ''
+    return f"\n\n[project brief]\n{text}" if text.strip() else ''
+
+
+def _map_block(project: Optional[Brief]) -> str:
+    """The controller's block: the map alone (``brief.render_map``) — what
+    it needs to plan, not the outlines. Empty without a brief."""
+    if project is None:
+        return ''
+    try:
+        text = _brief.render_map(project)
+    except Exception:                                    # noqa: BLE001
+        log.exc('brief map failed')
+        return ''
+    return f"\n\n[project map]\n{text}" if text.strip() else ''
 
 
 class Orchestrator:
@@ -120,6 +174,35 @@ class Orchestrator:
         self._security_turns: set = set()
         self.barriers: dict = {}
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        # Children ``spawn``/``spawn_panel`` made but whose registration on
+        # the loop thread (``_start``: append to the agent list, launch) has
+        # not run yet, by parent. Filled synchronously in the spawning
+        # thread, drained by ``_start``, so a ``join``/``check`` in the same
+        # tool round as the ``spawn`` (headless front-ends run it inline on
+        # the worker thread) already sees the child as a running sub-agent
+        # instead of "None of those are your sub-agents".
+        self._pending: dict = {}
+        self._pending_lock = threading.Lock()
+        # The project brief by (root, HEAD): one build or load per HEAD,
+        # not one per child (a five-worker plan reads the ~400 KB JSON once;
+        # the controller's map comes from the same object).
+        self._briefs: dict = {}
+
+    def project_brief(self) -> Optional[Brief]:
+        """The brief of the project in the current working directory at
+        its checked-out HEAD (``brief.current`` over the JSON store),
+        cached on this orchestrator per (root, HEAD); None when it cannot
+        be built (logged) — the brief is a saving, never a dependency."""
+        try:
+            root = Path.cwd().resolve()
+            head = _brief.head_sha(root)
+            key = (str(root), head)
+            if key not in self._briefs:
+                self._briefs[key] = _brief.current(root, briefs, head=head)
+            return self._briefs[key]
+        except Exception:                                # noqa: BLE001
+            log.exc('project brief unavailable')
+            return None
 
     # --- routing -------------------------------------------------------------
 
@@ -263,6 +346,34 @@ class Orchestrator:
     def agent_for_state(self, st):
         return next((a for a in self.manager.agents if a.state is st), None)
 
+    def _register_pending(self, parent, children: list) -> None:
+        """Record ``children`` as ``parent``'s sub-agents ahead of their
+        registration on the loop thread; each counts as running (``busy``)
+        from now on — ``launch`` sets the flag again when it runs."""
+        for c in children:
+            c.busy = True
+        with self._pending_lock:
+            self._pending.setdefault(parent, []).extend(children)
+
+    def _drain_pending(self, parent, children: list) -> None:
+        """Forget ``children`` once ``_start`` has appended them."""
+        with self._pending_lock:
+            left = [c for c in self._pending.get(parent, ())
+                    if not any(c is done for done in children)]
+            if left:
+                self._pending[parent] = left
+            else:
+                self._pending.pop(parent, None)
+
+    def children_of(self, parent) -> list:
+        """``parent``'s sub-agents: the registered ones (agent-list order)
+        followed by the pending ones not yet on the list."""
+        out = [a for a in self.manager.agents if a.parent is parent]
+        with self._pending_lock:
+            pending = list(self._pending.get(parent, ()))
+        out.extend(c for c in pending if not any(c is a for a in out))
+        return out
+
     def final_answer(self, agent) -> str:
         for m in reversed(agent.state.messages):
             if conversation.msg_role(m) == 'assistant' \
@@ -271,22 +382,25 @@ class Orchestrator:
         return _NO_ANSWER
 
     def configure(self, agent, base, can_spawn: bool,
-                  role=None, skill=None, controller: bool = False) -> None:
+                  role=None, skill=None, controller: bool = False,
+                  kind: str = '') -> None:
         """Set up ``agent``'s fresh conversation + tools, inheriting the model
         and context from ``base``. Delegation-capable agents get the panel
         hint; a controller (``[routing] controller``; implies ``can_spawn``)
-        gets the controller hint and only spawn/check/join/use_skill;
-        sub-agents get a role/skill overlay."""
+        gets the controller hint and the ``plan`` tool alone; sub-agents
+        get a role/skill overlay."""
         st = agent.state
         controller = bool(controller and can_spawn)
         st.messages = [
             {'role': 'system', 'content': config.build_system_prompt()}]
         if controller:
             st.messages[0]['content'] += "\n\n" + config.CONTROLLER_HINT
+            st.messages[0]['content'] += _map_block(self.project_brief())
         elif can_spawn:
             st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
         st.active_tools, st.active_tool_names = tools.initial_tools(
-            can_spawn, controller)
+            can_spawn, controller, kind=kind or None)
+        st.task_kind = kind or ''      # toolpolicy.for_kind at execute time
         st.controller = controller
         st.active_role = role or None
         st.active_skill = skill or None
@@ -335,6 +449,19 @@ class Orchestrator:
         agent.started = time.monotonic()
         assert self.loop is not None
         self.loop.run_in_executor(None, self.work, agent)
+
+    def _launch_all(self, children: list) -> None:
+        """``launch`` each child; one whose launch raises is left on the
+        list idle in ``error`` (logged through ``on_worker_error``) so
+        the parent's ``join`` resolves with its (empty) answer instead of
+        waiting forever on a phantom, and the others still start."""
+        for c in children:
+            try:
+                self.launch(c)
+            except Exception as exc:                     # noqa: BLE001
+                c.busy = False
+                c.status = 'error'
+                self.on_worker_error(c, exc)
 
     def submit(self, agent, text: str) -> None:
         """Queue a user message for ``agent`` and start it if idle."""
@@ -460,6 +587,10 @@ class Orchestrator:
         after a provider error is an ``error``, not ``done`` (or
         ``fell_back`` when the caller respawns it locally).
         """
+        if agent.parent is not None:
+            # Whatever happened to its registration, a finished child is
+            # not pending any more.
+            self._drain_pending(agent.parent, [agent])
         if agent.task_rec is None:
             return
         st = agent.state
@@ -602,8 +733,14 @@ class Orchestrator:
             return None
         title = f"agent{len(self.manager.agents) + index}"
         child = Agent(id=title, title=title)
+        # The task's kind reaches the tool layer: toolpolicy.for_kind hides
+        # the write tools for a review task (configure sets task_kind on
+        # the child's own state and filters its initial tool list).
         self.configure(child, parent.state, can_spawn=False, role=role,
-                       skill=skill)
+                       skill=skill, kind=kind)
+        block = _brief_block(task, self.project_brief())
+        if block:
+            child.state.messages[0]['content'] += block
         self._apply_route(child, route, reason)
         child.task = task
         child.parent = parent
@@ -650,14 +787,19 @@ class Orchestrator:
         children = [child] if extra is None else [child, extra]
 
         # Append to the agent list on the loop thread — never mutate it from a
-        # worker thread while the loop may be iterating it.
+        # worker thread while the loop may be iterating it. Until then the
+        # children are pending (a join/check in this tool round sees them).
         def _start() -> None:
-            for c in children:
-                self.manager.agents.append(c)
-                self.launch(c)
-            self.invalidate()
+            try:
+                for c in children:
+                    self.manager.agents.append(c)
+                self._launch_all(children)
+            finally:
+                self._drain_pending(parent, children)
+                self.invalidate()
 
         assert self.loop is not None
+        self._register_pending(parent, children)
         self.loop.call_soon_threadsafe(_start)
         reply = (
             f"Spawned {title} to work on this task in parallel. Its result"
@@ -678,8 +820,9 @@ class Orchestrator:
         Only with the ``panel`` point active, for a ``review``-kind task,
         when neither ``child`` nor any earlier child of ``parent`` in this
         turn is a security reviewer, and when the judge answers yes to
-        ``needs_security`` over the task text (heuristic: no; a timeout or
-        error adds nothing). The worker takes the same task with the
+        ``needs_security`` over the user's request and the task text
+        (:func:`panel_text`; heuristic: no; a timeout or error adds
+        nothing). The worker takes the same task with the
         security focus of the /review panel, kind ``review`` at the
         child's complexity; its row carries ``origin = 'panel'`` and a
         ``reason`` opening with ``PANEL_ORIGIN``. At most one per parent
@@ -697,7 +840,8 @@ class Orchestrator:
                 or self._security_seen(parent)):
             return None
         needed = decisions.decide(
-            'panel', decisions.security_question(child.task),
+            'panel', decisions.security_question(
+                panel_text(parent.state.messages, child.task)),
             heuristic=False)
         if not needed:
             return None
@@ -725,19 +869,33 @@ class Orchestrator:
                 return True
         return False
 
-    def spawn_panel(self, parent, tasks, synthesis: str = '') -> list:
-        """Deterministically spawn a fixed panel of sub-agents parented to
-        ``parent`` and open a join barrier, so guru itself runs the multi-agent
-        path even for a model that would never delegate. ``tasks`` is a list of
-        ``(task, role, skill)``; when all finish, their combined findings (with
-        an optional ``synthesis`` lead-in) are delivered back to ``parent``.
-        Returns the child titles."""
+    def spawn_panel(self, parent, tasks, synthesis: str = '',
+                    refusal: Optional[list] = None) -> list:
+        """Deterministically spawn a group of sub-agents parented to
+        ``parent`` and open a join barrier, so guru itself runs the
+        multi-agent path: the ``/review`` panel, and every ``delegate``
+        plan of a controller. ``tasks`` items are ``(task, role, skill)``
+        triples (kind ``review``, default complexity) or
+        :class:`guru.domain.plan.Task` objects (their own kind/complexity,
+        the text from :func:`plan.task_text`). When all finish, their
+        combined findings (with an optional ``synthesis`` lead-in) are
+        delivered back to ``parent``. A task routing refuses is skipped,
+        its reasons appended to ``refusal`` when given. Returns the child
+        titles."""
         env = ledger.environment()      # one snapshot for the whole panel
         children: list = []
-        for task, role, skill in tasks:
-            child = self._make_child(parent, task, role=role, skill=skill,
-                                     index=len(children), env=env,
-                                     kind='review')
+        for item in tasks:
+            if isinstance(item, plan.Task):
+                child = self._make_child(
+                    parent, plan.task_text(item), role=item.role,
+                    skill=item.skill, index=len(children), env=env,
+                    kind=item.kind, complexity=item.complexity,
+                    refusal=refusal)
+            else:
+                task, role, skill = item
+                child = self._make_child(parent, task, role=role, skill=skill,
+                                         index=len(children), env=env,
+                                         kind='review', refusal=refusal)
             if child is not None:
                 children.append(child)
         titles = [c.title for c in children]
@@ -745,18 +903,21 @@ class Orchestrator:
             return titles
 
         def _start() -> None:
-            for c in children:
-                self.manager.agents.append(c)
-            # Open the barrier BEFORE launching, so a fast child can't report
-            # into a not-yet-existing barrier.
-            self.barriers[parent] = {
-                'remaining': set(titles), 'results': {},
-                'synthesis': synthesis}
-            for c in children:
-                self.launch(c)
-            self.invalidate()
+            try:
+                for c in children:
+                    self.manager.agents.append(c)
+                # Open the barrier BEFORE launching, so a fast child can't
+                # report into a not-yet-existing barrier.
+                self.barriers[parent] = {
+                    'remaining': set(titles), 'results': {},
+                    'synthesis': synthesis}
+                self._launch_all(children)
+            finally:
+                self._drain_pending(parent, children)
+                self.invalidate()
 
         assert self.loop is not None
+        self._register_pending(parent, children)
         self.loop.call_soon_threadsafe(_start)
         return titles
 
@@ -770,7 +931,7 @@ class Orchestrator:
         ``CHECK_POLL_LIMIT``). Any done sub-agent resets the count.
         """
         caller = self.agent_for_state(caller_state)
-        children = [a for a in self.manager.agents if a.parent is caller]
+        children = self.children_of(caller)
         if not children:
             return "You have no sub-agents."
         target = (target or 'all').strip()
@@ -817,8 +978,7 @@ class Orchestrator:
 
     def do_join(self, caller_state, titles: list) -> str:
         caller = self.agent_for_state(caller_state)
-        children = {a.title: a for a in self.manager.agents
-                    if a.parent is caller}
+        children = {a.title: a for a in self.children_of(caller)}
         targets = [children[t] for t in titles if t in children]
         if not targets:
             have = ', '.join(children) or 'none'
@@ -843,6 +1003,61 @@ class Orchestrator:
                      self._format_join(results))
         return "Those sub-agents already finished; resuming with results now."
 
+    def do_plan(self, caller_state, args: dict) -> str:
+        """The controller's ``plan`` tool (``guru.domain.plan``).
+
+        Validates ``args`` against the turn's request (``evaluate``; on a
+        mailbox turn the request was planned already, so concern coverage
+        is not re-checked). A malformed plan, or one that leaves a named
+        concern uncovered on its first try, gets the re-ask text back (the
+        turn loop allows one; coverage gaps are accepted on the second
+        plan, malformed plans are not). ``answer`` acknowledges: the loop
+        takes the text. ``delegate`` spawns every task through
+        :meth:`spawn_panel` (its kind/complexity route it), opens the
+        join barrier and ends the caller's turn (``turn_waiting``, join
+        semantics); when routing refuses them all the refusal is returned
+        and the turn goes on. A ``delegate`` after
+        ``plan.MAX_DELEGATE_ROUNDS`` delegations for the same request
+        (counted in the history, ``plan.delegations_in``) is refused with
+        a text that says to answer from the results. A second ``plan`` in
+        one round is ignored.
+        """
+        if caller_state.turn_waiting:
+            return 'Already delegated this turn; the extra plan is ignored.'
+        messages = caller_state.messages
+        followup = conversation.mailbox_turn(messages)
+        # The full request (no REQUEST_CHARS cap): a concern named late in
+        # a long request counts for coverage too.
+        request = conversation.request_in(messages, cap=None)
+        verdict = plan.evaluate(request, args, followup=followup)
+        reasks = plan.reasks_in(
+            messages[conversation.turn_start(messages):])
+        if verdict.errors or verdict.plan is None \
+                or (verdict.soft and reasks == 0):
+            return plan.reask_text(verdict.messages)
+        if verdict.soft:
+            log.info('plan: running with coverage problem(s) %s after one'
+                     ' re-ask', ', '.join(verdict.missing
+                                          + verdict.undersplit))
+        if verdict.plan.outcome == 'answer':
+            return plan.ANSWER_ACK
+        rounds = plan.delegations_in(
+            messages[conversation.request_start(messages):])
+        if rounds >= plan.MAX_DELEGATE_ROUNDS:
+            log.info('plan: delegate refused after %d rounds for one'
+                     ' request', rounds)
+            return plan.delegate_cap_text(rounds)
+        caller = self.agent_for_state(caller_state)
+        refusal: list = []
+        titles = self.spawn_panel(caller, verdict.plan.tasks, refusal=refusal)
+        if not titles:
+            return plan.refused_text(refusal)
+        caller_state.turn_waiting = True
+        return plan.delegated_text(titles, verdict.plan.tasks)
+
+    def plan(self, args: dict) -> str:
+        return self.do_plan(session.current(), args)
+
     def check(self, target: str) -> str:
         st = session.current()
         return self.run_on_loop(lambda: self.do_check(st, target))
@@ -853,12 +1068,15 @@ class Orchestrator:
         return self.run_on_loop(lambda: self.do_join(st, titles))
 
     def install_handlers(self) -> None:
-        """Wire spawn/check/join so the tool layer routes to this instance."""
+        """Wire spawn/check/join/plan so the tool layer routes to this
+        instance."""
         tools.set_spawn_handler(self.spawn)
         tools.set_check_handler(self.check)
         tools.set_join_handler(self.join)
+        tools.set_plan_handler(self.plan)
 
     def clear_handlers(self) -> None:
         tools.set_spawn_handler(None)
         tools.set_check_handler(None)
         tools.set_join_handler(None)
+        tools.set_plan_handler(None)

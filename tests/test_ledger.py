@@ -198,7 +198,7 @@ class TestAccumulators:
         assert set(session.STRUGGLE_KEYS) == {
             'stall_nudges', 'delegation_nudges', 'over_read', 'compactions',
             'tool_errors', 'sha_mismatches', 'provider_errors', 'refusals',
-            'redactions'}
+            'redactions', 'protocol_violation'}
 
     def test_record_call_counts_and_adds_known_cost(self) -> None:
         ledger.record_call(adapter='Anthropic', model='claude-sonnet-5',
@@ -788,3 +788,39 @@ class TestTurnSummary:
         assert ledger.format_turn_line(no_cost) == \
             'turn: 2 calls · m · cache 50%'
         assert ledger.format_turn_line(ledger.TurnSummary()) == ''
+
+
+class TestUsageMetrics:
+    """``ledger.usage_metrics``: the model-agnostic cost of some rows."""
+
+    def test_sums_tokens_tool_bytes_turns_and_calls(self) -> None:
+        calls = [
+            {'tokens_in': 100, 'tokens_out': 20, 'cache_read': 400,
+             'cache_write': 50, 'phase': 'step'},
+            {'tokens_in': 10, 'tokens_out': 5, 'cache_read': 0,
+             'cache_write': 0, 'phase': 'step'},
+            {'tokens_in': 30, 'tokens_out': 3, 'phase': 'summarise'},
+            {'tokens_in': 40, 'tokens_out': 4, 'phase': 'complete'},
+        ]
+        events = [{'shown_bytes': 1200}, {'shown_bytes': 300},
+                  {'produced_bytes': 9}]
+        m = ledger.usage_metrics(calls, events)
+        assert m == {'tokens_in': 180, 'tokens_out': 32, 'cache_read': 400,
+                     'cache_write': 50, 'tokens': 662, 'tool_bytes': 1500,
+                     'turns': 2, 'calls': 4}
+        assert tuple(m) == ledger.METRIC_KEYS
+
+    def test_rows_without_a_phase_count_as_turns(self) -> None:
+        m = ledger.usage_metrics([{'cost_usd': 0.1}, {'phase': ''}], [])
+        assert m['turns'] == 2 and m['calls'] == 2 and m['tokens'] == 0
+
+    def test_empty(self) -> None:
+        m = ledger.usage_metrics([], [])
+        assert all(v == 0 for v in m.values())
+        assert set(m) == set(ledger.METRIC_KEYS)
+
+    def test_tolerates_missing_and_null_columns(self) -> None:
+        m = ledger.usage_metrics([{'tokens_in': None, 'tokens_out': '7'}],
+                                 [{'shown_bytes': None}])
+        assert m['tokens_in'] == 0 and m['tokens_out'] == 7
+        assert m['tool_bytes'] == 0

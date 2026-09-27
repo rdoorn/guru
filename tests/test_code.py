@@ -167,3 +167,28 @@ class TestFindSymbol:
     def test_denied_root(self, tree, monkeypatch) -> None:
         monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', set())
         assert 'denied' in code.find_symbol('Widget')
+
+
+class TestSharedOutlineHelpers:
+    """C1/C4: the outline rows are one function shared by ``outline``,
+    ``read_file``'s structural view and the project brief."""
+
+    SRC = ('def a():\n    pass\n\n\nclass B:\n    def m(self):\n'
+           '        def inner():\n            pass\n')
+
+    def test_outline_rows(self) -> None:
+        rows = code.outline_rows(self.SRC)
+        assert rows == ['L1-2 def a()', 'L5-8 class B',
+                        '  L6-8 def m(self)', '    L7-8 def inner()']
+        assert code.outline_rows('def (:') is None
+        assert code.outline_rows('x = 1\n') == []
+
+    def test_rows_are_capped_with_a_more_row(self) -> None:
+        rows = code.outline_rows(self.SRC, limit=2)
+        assert rows == ['L1-2 def a()', 'L5-8 class B', '… 2 more entries']
+
+    def test_definitions_carry_depth(self) -> None:
+        import ast
+        defs = list(code.definitions(ast.parse(self.SRC)))
+        assert defs == [('a', 1, 0), ('B', 5, 0), ('m', 6, 1),
+                        ('inner', 7, 2)]

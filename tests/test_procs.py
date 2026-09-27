@@ -74,6 +74,7 @@ class TestRun:
         assert env['PYTHONPATH'] == str(allowed)
         assert 'PATH' in env and 'LANG' in env
         assert env['HOME'] != os.path.expanduser('~')
+        assert env['TMPDIR'] == env['HOME']       # scratch temp dir too
         assert not Path(env['HOME']).exists()     # temp HOME removed after
 
     def test_timeout_kills_a_sleeping_child(self, allowed) -> None:

@@ -6,12 +6,31 @@ called and how tool results are threaded back into its native history. This
 module owns the shared skeleton so all adapters get the same behaviour:
 
 * cancel checks (between rounds, and mid-stream where the adapter supports it),
-* the act-nudge that pokes a model which announced an action but ran no tool,
-* the delegation nudges (end of turn after a broad read-heavy answer, and
-  the mid-turn over-read guard after ``config.OVER_READ_LIMIT`` distinct
-  files without a spawn),
-* duplicate-call suppression, and
-* final-answer rendering.
+* the **turn contract**: a round ends with a tool call. A worker's answer
+  is a ``final_answer(text)`` call; a controller's every reply is one
+  ``plan`` call (:mod:`guru.domain.plan`). Adapters that can force a tool
+  call do (:func:`forced_tool` tells them what this round needs, their
+  ``forces`` says whether they will); on such an adapter a text-only reply
+  is a protocol violation: one deterministic re-prompt, then the text is
+  the answer and the ``protocol_violation`` struggle counter is bumped. On
+  an adapter that cannot force (Ollama) the text is the answer, and a
+  controller's text is parsed for the plan object first.
+* the controller plan: a rejected plan (the handler's re-ask) gets one more
+  round, a second rejection ends the turn on a plain-text fallback with
+  ``protocol_violation``; an ``answer`` plan is the reply (its text, else
+  the round's own text; never rejected); a ``delegate`` plan ends the
+  turn like a ``join`` (the mailbox resumes the agent); a second ``plan``
+  in one round is refused unrun,
+* the round cap (``_MAX_ROUNDS`` plan rounds for a controller,
+  ``_MAX_TOOL_ROUNDS`` for everyone else): the turn ends on the last text
+  with ``protocol_violation`` instead of paying for rounds without end,
+* the delegation nudge (end of turn after a broad read-heavy answer) for a
+  hands-on delegation-capable agent,
+* duplicate-call suppression (same name and arguments as an earlier call
+  in the turn; never for ``plan``/``final_answer``), and
+* final-answer rendering: the answer lands in ``session.messages`` as the
+  assistant's text (a lone ``final_answer``/``plan`` round is collapsed
+  into it, so the next turn's history carries the text once).
 
 Each adapter supplies three closures over its per-turn state:
 
@@ -31,47 +50,63 @@ Each adapter supplies three closures over its per-turn state:
     ``session.messages`` and the provider-native history.
 
 ``add_user(text)``
-    Append a user turn (the nudge) to both histories.
+    Append a user turn (a nudge or re-prompt) to both histories.
 """
+import json
 import os
 import re
 import time
+from typing import Optional
 
 from rich.markdown import Markdown
 
 from guru import config, session, ui
-from guru.domain import decisions, ledger, tools
+from guru.adapters.base import FORCE_ANY, FORCE_PLAN
+from guru.domain import conversation, decisions, ledger, plan, tools
 
-# A controller answer longer than this with no spawn in the turn counts as
-# the controller doing the work itself (design doc §5: measured, not
+# A controller answer longer than this with no delegation in the turn counts
+# as the controller doing the work itself (design doc §5: measured, not
 # punished).
 _CONTROLLER_ANSWER_CHARS = 600
 
-# A weak model sometimes ends a turn by announcing an action ("Let me read the
-# files…") without calling a tool; without a nudge that would be taken as the
-# final answer. looks_like_preamble catches that stall so the loop can poke it.
-_NUDGE_CAP = 2
-_PREAMBLE_RE = re.compile(
-    r"\b(let me|i'?ll|i will|let'?s|i'?m going to|i am going to|going to|"
-    r"start by|next[,]? i|first[,]? i)\b", re.IGNORECASE)
+# One deterministic re-prompt per turn for a text-only reply where a tool
+# call was forced (or an empty reply anywhere); one re-ask per turn for a
+# rejected plan. Then the text is the answer.
+_REPROMPT_CAP = 1
+_REASK_CAP = 1
 
-_NUDGE_TEXT = (
-    "Do not describe what you will do — do it now. Call the tool you need in"
-    " this reply (use search_tools first if it is not active). If you are"
-    " genuinely finished, give the final answer."
-)
+# Per-turn round caps: every provider round is a paid call and the loop
+# below has no other exit while the model keeps calling tools. A
+# controller's round is one ``plan`` call, so a controller that has not
+# produced an accepted plan in _MAX_ROUNDS rounds is stuck (a refusal or
+# an unavailable handler answered every time); a worker legitimately
+# chains many tool rounds (read, edit, test, ...) so its cap is wider.
+# At the cap the turn ends with ``protocol_violation`` on the last text the
+# model wrote — for a controller ``plan.fallback_text`` over its last plan,
+# so the user sees what was attempted.
+_MAX_ROUNDS = 12
+_MAX_TOOL_ROUNDS = 40
+_CAPPED_TEXT = '(guru ended the turn after {n} rounds without a final answer.)'
 
-_DELEGATION_TEXT = (
-    "You inspected several files yourself. This task spans multiple concerns —"
-    " decompose it now instead of answering directly: spawn parallel"
-    " sub-agents, one per domain, then join and synthesise. For a review,"
-    " spawn(task='review the code for correctness, readability, tests',"
-    " role='developer', skill='code-review') AND spawn(task='review the code"
-    " for injection, authz, secrets, path traversal, vulnerable deps',"
-    " role='security-engineer', skill='code-review'), then join both and give"
-    " one consolidated report. Add architect/SRE sub-agents if design or"
-    " reliability matter."
-)
+# The tool result an adapter returns for a call the loop marked duplicate
+# (``run_tools`` gets ``duplicate=True``); the call itself does not run.
+DUPLICATE_RESULT = ('Already called {name} with these arguments. Use the'
+                    ' previous result.')
+
+# Calls that are never suppressed as duplicates: ``plan`` is the turn's
+# protocol (the same plan again after a coverage re-ask is the accepted
+# second try, and a re-issued plan must reach the handler to be judged)
+# and ``final_answer`` ends the turn. Every other call with the same name
+# and arguments as an earlier one in the turn is answered from the
+# earlier result without running. A second ``plan`` in one round is
+# refused the same way (unrun) so the round has one plan verdict.
+_NEVER_DUPLICATE = frozenset(('plan', 'final_answer'))
+
+_DELEGATION_TEXT = conversation.DELEGATION_TEXT
+# Historical: the act nudge's text. The loop no longer sends it (the turn
+# contract replaced the preamble heuristic); the name stays for the eval
+# runner's counter and for reading old histories.
+_NUDGE_TEXT = conversation.NUDGE_TEXT
 
 
 # A request shaped like a single edit: an edit verb and at most one
@@ -90,37 +125,21 @@ def _single_target_request(request: str) -> bool:
     return len(set(_FILE_TOKEN_RE.findall(request))) <= 1
 
 
-def _is_nudge(text: str) -> bool:
-    """True for a user message the loop itself injected (act, delegation
-    or over-read nudge)."""
-    return (text in (_NUDGE_TEXT, _DELEGATION_TEXT)
-            or text.endswith(_DELEGATION_TEXT))
-
-
-def _over_read_text(n: int) -> str:
-    """The over-read nudge: how many files were read, then the delegation
-    text (``_is_nudge`` recognises it by its suffix)."""
-    return f'You have read {n} files without delegating. ' + _DELEGATION_TEXT
+# True for a user message the loop itself injected (the delegation nudge,
+# a re-prompt or a plan re-ask).
+_is_nudge = conversation.is_nudge
 
 
 def _turn_start() -> int:
     """Index in ``session.messages`` of this turn's request (the last user
     message that is not a nudge); 0 when there is none."""
-    for i in range(len(session.messages) - 1, -1, -1):
-        m = session.messages[i]
-        if not isinstance(m, dict) or m.get('role') != 'user':
-            continue
-        text = (m.get('content') or '').strip()
-        if text and not _is_nudge(text):
-            return i
-    return 0
+    return conversation.turn_start(session.messages)
 
 
 def _distinct_reads(start: int = 0) -> int:
     """Distinct paths read with the read tools (by the ``path`` argument
-    recorded on tool messages) from ``session.messages[start:]`` on — the
-    whole conversation by default, this turn with ``_turn_start()``; -1
-    once a spawn ran in that span."""
+    recorded on tool messages) from ``session.messages[start:]`` on (the
+    whole conversation by default); -1 once a spawn ran in that span."""
     paths: set = set()
     for m in session.messages[start:]:
         if not isinstance(m, dict) or m.get('role') != 'tool':
@@ -142,7 +161,7 @@ def _should_delegate() -> bool:
     files to make a domain panel worthwhile, the request is not a
     single-target edit, and it has not spawned a single sub-agent — the cue
     for the one-time delegation nudge. Never for a controller (it has no
-    read tools and must delegate anyway) and disabled when
+    read tools and delegates through its plan) and disabled when
     DELEGATION_NUDGE_MIN_READS is 0."""
     if (session.controller or not session.can_spawn
             or config.DELEGATION_NUDGE_MIN_READS <= 0):
@@ -153,62 +172,58 @@ def _should_delegate() -> bool:
     return not _single_target_request(_turn_request())
 
 
-def _over_read() -> int:
-    """How many distinct files a delegation-capable main agent has read
-    this turn once that reaches ``config.OVER_READ_LIMIT`` without a spawn
-    (the cue for the mid-turn over-read nudge); 0 otherwise. Never for a
-    controller or a sub-agent; 0 disables the guard."""
-    if (session.controller or not session.can_spawn
-            or config.OVER_READ_LIMIT <= 0):
-        return 0
-    reads = _distinct_reads(_turn_start())
-    return reads if reads >= config.OVER_READ_LIMIT else 0
-
-
-def looks_like_preamble(content: str) -> bool:
-    """True if text announces an action instead of answering — a short
-    'Let me… / I'll…' preamble, or one trailing off into a promised list.
-    Long substantive answers (the real result) do not match."""
-    if len(content) > 600:
-        return False
-    if content.rstrip().endswith((':', '…', '...')):
-        return True
-    return bool(_PREAMBLE_RE.search(content))
+# The user's request in a history: the most recent user message that is
+# neither a nudge nor a mailbox delivery, capped
+# (:func:`guru.domain.conversation.request_in`).
+request_in = conversation.request_in
 
 
 def _turn_request() -> str:
-    """The user's request for this turn: the most recent user message that
-    is not one of the loop's own nudges."""
-    for m in reversed(session.messages):
-        if not isinstance(m, dict) or m.get('role') != 'user':
-            continue
-        text = (m.get('content') or '').strip()
-        if text and not _is_nudge(text):
-            return text
-    return ''
+    """The user's request for this turn (:func:`request_in` over the bound
+    session's messages): on a mailbox turn the human request the
+    delivery answers, not the delivery."""
+    return request_in(session.messages)
 
 
 # Public name: the sandbox gate hands the turn's request to the reviewer.
 turn_request = _turn_request
 
-_MAILBOX_PREFIXES = ('[joined results]', '[result from')
+_MAILBOX_PREFIXES = conversation.MAILBOX_PREFIXES
 
 
 def _mailbox_turn() -> bool:
     """True when this turn was started by a mailbox delivery (a joined or
-    single sub-agent result): the request text is the sub-agents' output,
-    not a task from the user."""
-    return _turn_request().startswith(_MAILBOX_PREFIXES)
+    single sub-agent result): the message that opened the turn (the last
+    user message that is not a nudge) is the sub-agents' output, not a
+    task from the user."""
+    return conversation.mailbox_turn(session.messages)
 
 
-def controller_executed(tools_used: list, answer: str) -> bool:
+# --- the turn contract -------------------------------------------------------
+
+def forced_tool() -> str:
+    """What this round must answer with: ``FORCE_PLAN`` (the ``plan``
+    tool) for a controller, ``FORCE_ANY`` (any tool, ``final_answer`` to
+    finish) for every other agent. Adapters read it per round and force
+    when they can (``Adapter.forces``)."""
+    return FORCE_PLAN if session.controller else FORCE_ANY
+
+
+def _forcing(forced: str) -> bool:
+    """Whether the bound session's adapter forces ``forced`` this round."""
+    fn = getattr(session.adapter, 'forces', None)
+    return callable(fn) and bool(fn(forced))
+
+
+def controller_executed(tools_used: list, answer: str,
+                        delegated: int = 0) -> bool:
     """Did a controller do the work itself this turn?
 
-    True only in controller mode, when a tool outside spawn/check/join/
-    use_skill was attempted or the final answer exceeds
-    ``_CONTROLLER_ANSWER_CHARS`` with no spawn in the turn. Turns driven by
-    a mailbox delivery (a joined or single sub-agent result) are synthesis
-    turns and never count.
+    True only in controller mode, when a tool outside ``plan`` was
+    attempted or the final answer exceeds ``_CONTROLLER_ANSWER_CHARS``
+    with nothing delegated in the turn (``delegated`` plan tasks, plus
+    any ``spawn`` call). Turns driven by a mailbox delivery (a joined or
+    single sub-agent result) are synthesis turns and never count.
     """
     if not session.controller:
         return False
@@ -217,19 +232,20 @@ def controller_executed(tools_used: list, answer: str) -> bool:
     if any(name not in tools.CONTROLLER_TOOLS for name in tools_used):
         return True
     return (len(answer) > _CONTROLLER_ANSWER_CHARS
-            and tools_used.count('spawn') == 0)
+            and tools_used.count('spawn') + delegated == 0)
 
 
 def _close_turn(start: float, in0: int, out0: int, cost0: float,
                 unpriced0: int, struggle0: dict, tools_used: list,
-                answer: str = '') -> None:
+                answer: str = '', delegated: int = 0) -> None:
     """Write the TurnRecord for any agent not executing a task.
 
     A sub-agent running a spawned task is accounted for by its task row.
     Tokens, cost and struggle counters are this turn's deltas over the
     session values snapshotted at turn start; cost is None only when a call
     made during *this* turn could not be priced. ``answer`` is the final
-    answer text (empty on cancel/error), for ``controller_executed``.
+    answer text (empty on cancel/error), for ``controller_executed``;
+    ``delegated`` the plan tasks guru spawned this turn.
     """
     if session.task_id:
         return
@@ -238,11 +254,13 @@ def _close_turn(start: float, in0: int, out0: int, cost0: float,
     ledger.record_turn(ledger.TurnRecord(
         turn_id=session.turn_id, request=_turn_request(),
         model=session.model, seconds=time.monotonic() - start,
-        tasks_spawned=tools_used.count('spawn'), tools_used=tools_used,
+        tasks_spawned=tools_used.count('spawn') + delegated,
+        tools_used=tools_used,
         tokens_in=session.session_in - in0,
         tokens_out=session.session_out - out0,
         cost_usd=cost,
-        controller_executed=controller_executed(tools_used, answer),
+        controller_executed=controller_executed(tools_used, answer,
+                                                delegated),
         agent=session.agent_id,
         adapter=getattr(session.adapter, 'name', ''),
         struggle=ledger.struggle_delta(struggle0, session.struggle)))
@@ -260,10 +278,12 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     Owns the shared control flow; the adapter owns the provider calls and
     history threading. See the module docstring for the closure contracts.
     Exactly one TurnRecord is written per call, on every exit path.
+    ``nudge`` gates the delegation nudges only; the turn contract's
+    re-prompts are not nudges.
     """
     session.cancel_requested = False
     session.last_error = ''          # this turn's provider failure, if any
-    session.turn_waiting = False     # set by join/check (orchestrator)
+    session.turn_waiting = False     # set by join/check/plan (orchestrator)
     session.check_polls = 0
     if not session.task_id:
         # A sub-agent executing a task keeps the turn_id it inherited.
@@ -274,105 +294,323 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     struggle0 = dict(session.struggle)
     tools_used: list = []
     answer = ''
+    delegated = 0
     try:
-        answer = _drive(step, run_tools, add_user, nudge, tools_used)
+        answer, delegated = _drive(step, run_tools, add_user, nudge,
+                                   tools_used)
     finally:
         _close_turn(start, in0, out0, cost0, unpriced0, struggle0,
-                    tools_used, answer)
+                    tools_used, answer, delegated)
 
 
-def _drive(step, run_tools, add_user, nudge: bool, tools_used: list) -> str:
+class _Round:
+    """What one provider round produced and what the loop decided."""
+
+    def __init__(self, text: str, tool_calls: list) -> None:
+        self.text = (text or '').strip()
+        self.calls = tool_calls
+        self.answer: Optional[str] = None     # set when the turn ends here
+        self.collapse = False                 # lone final_answer/plan round
+        self.delegated = 0                    # plan tasks guru spawned
+        # A contract re-prompt is due: ``reason`` says why, ``fallback``
+        # is the answer once the re-prompt cap is spent.
+        self.reprompt = False
+        self.reason = ''
+        self.fallback = ''
+
+    def call(self, name: str) -> Optional[dict]:
+        """Arguments of the first call named ``name`` in this round."""
+        return next((args for n, args, _ in self.calls if n == name), None)
+
+    def ask_again(self, reason: str, fallback: str) -> None:
+        self.reprompt, self.reason, self.fallback = True, reason, fallback
+
+
+def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
+           ) -> tuple[str, int]:
     """The round loop proper; every requested tool lands in ``tools_used``.
-    Returns the final answer text (``''`` on cancel or error)."""
+    Returns ``(answer, delegated)``: the final answer text (``''`` on
+    cancel, error or a delegating turn) and the plan tasks spawned."""
     called: set = set()
-    nudged = 0
+    reprompts = 0
+    rounds = 0
+    last_text = ''
+    last_plan: Optional[dict] = None
     delegation_nudged = False
-    over_read_nudged = False
     panel_asked = False
+    delegated = 0
+    turn0 = _turn_start()
     while True:
         if session.cancel_requested:
             ui.console.print("[yellow]* cancelled[/yellow]")
-            return ''
+            return '', delegated
+        cap = _MAX_ROUNDS if session.controller else _MAX_TOOL_ROUNDS
+        if rounds >= cap:
+            # The cap is the only exit while the model keeps calling
+            # tools (or a controller keeps planning without an accepted
+            # plan): end on what it last wrote.
+            ledger.bump('protocol_violation')
+            ui.console.print(
+                f"[dim yellow]\\[CONTRACT][/dim yellow] {rounds} rounds"
+                " without a final answer — ending the turn")
+            content = _capped_text(last_text, last_plan, rounds)
+            _settle(content, False)
+            _render_answer(content)
+            return content, delegated
+        rounds += 1
         ui.note_thinking()
         result = step()
         if result is None:
             # None = stop: a cancel (flagged) or an error (step printed it).
             if session.cancel_requested:
                 ui.console.print("[yellow]* cancelled[/yellow]")
-            return ''
+            return '', delegated
         ui.status_draw()
-        text, tool_calls = result
+        rnd = _Round(*result)
+        forced = forced_tool()
+        if rnd.text:
+            last_text = rnd.text
 
-        if not tool_calls:
-            content = (text or '').strip()
-            stalled = not content or looks_like_preamble(content)
-            if content:
-                # The stall judge sees the same candidate answer the
-                # heuristic scored. Shadow: its verdict only lands in the
-                # ledger. Active ([decisions.active] stall = true): its
-                # verdict decides, the heuristic is the timeout fallback.
-                stalled = bool(decisions.decide(
-                    'stall', decisions.stall_question(content),
-                    heuristic=stalled))
-                if (session.can_spawn and not panel_asked
-                        and not _mailbox_turn()):
-                    # One boolean cannot stand in for three specialist
-                    # questions, so the panel batch carries no heuristic.
-                    # A mailbox delivery is the sub-agents' results, not a
-                    # task to staff, so it is never judged (f1929d55c41a).
-                    panel_asked = True
-                    decisions.shadow(
-                        'panel', decisions.panel_questions(_turn_request()))
-            if nudge and stalled and nudged < _NUDGE_CAP:
-                nudged += 1
-                ledger.bump('stall_nudges')
-                reason = ("empty response" if not content
-                          else "announced an action but called no tool")
-                ui.console.print(
-                    f"[dim yellow]\\[NUDGE][/dim yellow] {reason}"
-                    " — asking it to act"
-                )
-                add_user(_NUDGE_TEXT)
-                continue
-            if (nudge and not delegation_nudged and content
-                    and _should_delegate()):
-                delegation_nudged = True
-                ledger.bump('delegation_nudges')
-                ui.console.print(
-                    "[dim yellow]\\[DELEGATE][/dim yellow] broad task, no"
-                    " sub-agents — asking it to spawn a domain panel")
-                add_user(_DELEGATION_TEXT)
-                continue
-            _render_answer(content)
-            return content
+        if not rnd.calls:
+            # A text-only reply. A controller's text may carry the plan as
+            # JSON (an adapter that cannot force); otherwise the contract
+            # decides whether the text is the answer.
+            if forced == FORCE_PLAN and _plan_from_text(
+                    rnd, add_user, tools_used, turn0):
+                last_plan = plan.from_text(rnd.text) or last_plan
+            elif not rnd.text or _forcing(forced):
+                rnd.ask_again('empty reply' if not rnd.text
+                              else 'text where a tool call was forced',
+                              rnd.text)
+            else:
+                rnd.answer = rnd.text
+        else:
+            pending = []
+            seen_plan = False
+            for name, args, ref in rnd.calls:
+                tools_used.append(name)
+                if name == 'plan':
+                    duplicate = seen_plan       # one plan verdict per round
+                    seen_plan = True
+                    if not duplicate:
+                        last_plan = args
+                elif name in _NEVER_DUPLICATE:
+                    duplicate = False
+                else:
+                    key = (name, _args_key(args))
+                    duplicate = key in called
+                    if not duplicate:
+                        called.add(key)
+                pending.append((name, args, ref, duplicate))
+            before = len(session.messages)
+            run_tools(pending)
+            _after_tools(rnd, turn0, before)
 
-        pending = []
-        for name, args, ref in tool_calls:
-            tools_used.append(name)
-            key = (name, tuple(sorted(args.items())))
-            duplicate = key in called
-            if not duplicate:
-                called.add(key)
-            pending.append((name, args, ref, duplicate))
-        run_tools(pending)
+        if rnd.reprompt:
+            if reprompts < _REPROMPT_CAP:
+                reprompts += 1
+                ui.console.print(
+                    f"[dim yellow]\\[CONTRACT][/dim yellow] {rnd.reason}"
+                    " — asking for a tool call")
+                add_user(plan.PLAN_REPROMPT_TEXT
+                         if forced == FORCE_PLAN else plan.REPROMPT_TEXT)
+                continue
+            ledger.bump('protocol_violation')
+            rnd.answer = rnd.fallback
+
+        delegated += rnd.delegated
         if session.turn_waiting:
-            # A join opened a barrier (or check kept polling running
-            # sub-agents): stop here instead of another model round. No
-            # answer is rendered; the mailbox resumes this agent with the
-            # results.
+            # A plan delegated, a join opened a barrier (or check kept
+            # polling running sub-agents): stop here instead of another
+            # model round. No answer is rendered; the mailbox resumes this
+            # agent with the results.
             ui.console.print("[dim]\\[waiting for sub-agents][/dim]")
-            return ''
-        if nudge and not over_read_nudged:
-            reads = _over_read()
-            if reads:
-                # Over-read guard (triage 2026-09-24): the model is reading
-                # the codebase itself instead of delegating; tell it now,
-                # once, rather than after it has read everything.
-                over_read_nudged = True
-                ledger.bump('over_read')
-                ui.console.print(
-                    f"[dim yellow]\\[DELEGATE][/dim yellow] {reads} files"
-                    " read, no sub-agents — asking it to spawn a domain"
-                    " panel")
-                add_user(_over_read_text(reads))
-                continue
+            return '', delegated
+        if rnd.answer is None:
+            continue
+
+        # The turn ends on rnd.answer.
+        content = rnd.answer
+        if (content and session.can_spawn and not panel_asked
+                and not _mailbox_turn()):
+            # One boolean cannot stand in for three specialist questions,
+            # so the panel batch carries no heuristic. A mailbox delivery
+            # is the sub-agents' results, not a task to staff, so it is
+            # never judged (f1929d55c41a).
+            panel_asked = True
+            decisions.shadow(
+                'panel', decisions.panel_questions(_turn_request()))
+        if (nudge and not delegation_nudged and content
+                and _should_delegate()):
+            delegation_nudged = True
+            ledger.bump('delegation_nudges')
+            ui.console.print(
+                "[dim yellow]\\[DELEGATE][/dim yellow] broad task, no"
+                " sub-agents — asking it to spawn a domain panel")
+            add_user(_DELEGATION_TEXT)
+            continue
+        _settle(content, rnd.collapse)
+        _render_answer(content)
+        return content, delegated
+
+
+def _capped_text(last_text: str, last_plan: Optional[dict], rounds: int
+                 ) -> str:
+    """The answer when the round cap ends a turn: a controller's last
+    plan rendered through ``plan.fallback_text`` (its own text first),
+    else the last text the model wrote, else a fixed line."""
+    if session.controller and last_plan is not None:
+        return plan.fallback_text(
+            last_text, last_plan,
+            [f'{rounds} plan rounds without an accepted plan'])
+    return last_text or _CAPPED_TEXT.format(n=rounds)
+
+
+def _args_key(args: object) -> str:
+    """A hashable identity for a call's arguments (nested lists — the
+    plan's tasks — included)."""
+    try:
+        return json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(args)
+
+
+def _answer_text(args: dict, text: str) -> str:
+    """The reply of an accepted ``answer`` plan: its ``answer`` field, else
+    ``text`` (the round's own assistant text). ``answer`` is never
+    rejected for lacking text; only when both are empty does the loop
+    fall to the empty-reply re-prompt."""
+    parsed, _ = plan.parse(args)
+    answer = parsed.answer if parsed is not None else ''
+    return answer or text.strip()
+
+
+def _plan_from_text(rnd: _Round, add_user, tools_used: list,
+                    turn0: int) -> bool:
+    """A controller's text reply parsed as a plan (the text path of an
+    adapter that cannot force a tool call). False when the text holds no
+    plan object. Otherwise the plan runs through the ``plan`` tool: an
+    accepted ``answer`` sets ``rnd.answer`` (its text, else the prose
+    around the plan object, else the empty-reply re-prompt), a
+    ``delegate`` ends the turn (``session.turn_waiting``), a re-ask or
+    refusal goes back to the model as a user message — a second re-ask
+    ends the turn on the fallback text with ``protocol_violation``."""
+    args = plan.from_text(rnd.text)
+    if args is None:
+        return False
+    tools_used.append('plan')
+    result = tools.execute_tool('plan', args)
+    kind = _plan_kind(result)
+    if kind == 'answer':
+        answer = _answer_text(args, plan.prose_around(rnd.text))
+        if answer:
+            rnd.answer = answer
+        else:
+            rnd.ask_again('answer plan without text',
+                          plan.fallback_text('', args,
+                                             ['outcome answer without text']))
+    elif kind == 'delegated':
+        rnd.delegated = _task_count(args)
+    elif kind == 'reask' and _reasks_exceeded(turn0, result):
+        ledger.bump('protocol_violation')
+        rnd.answer = plan.fallback_text(
+            '', args, [plan.reask_problems(result)])
+    else:
+        add_user(result)
+    return True
+
+
+def _after_tools(rnd: _Round, turn0: int, start: int) -> None:
+    """Read a round's ``plan`` / ``final_answer`` outcome after its tools
+    ran (the adapter threaded each result into ``session.messages`` from
+    index ``start`` on; the first ``plan`` result there is the round's
+    verdict — a second plan in the round was refused unrun)."""
+    args = rnd.call('plan')
+    if args is not None:
+        result = _round_tool_result('plan', start)
+        kind = _plan_kind(result)
+        if kind == 'answer':
+            answer = _answer_text(args, rnd.text)
+            if answer:
+                rnd.answer = answer
+                rnd.collapse = len(rnd.calls) == 1
+            else:
+                rnd.ask_again('answer plan without text',
+                              plan.fallback_text(
+                                  '', args, ['outcome answer without text']))
+        elif kind == 'delegated':
+            rnd.delegated = _task_count(args)
+        elif kind == 'reask' and _reasks_exceeded(turn0):
+            ledger.bump('protocol_violation')
+            rnd.answer = plan.fallback_text(
+                rnd.text, args, [plan.reask_problems(result)])
+        return
+    args = rnd.call('final_answer')
+    if args is not None:
+        rnd.answer = plan.final_text(args)
+        rnd.collapse = len(rnd.calls) == 1
+
+
+def _plan_kind(result: str) -> str:
+    """The handler's decision as its result text encodes it: ``answer``,
+    ``delegated``, ``reask`` or ``other`` (refused, unavailable)."""
+    if result == plan.ANSWER_ACK:
+        return 'answer'
+    if result.startswith(plan.DELEGATED_PREFIX):
+        return 'delegated'
+    if plan.is_reask(result):
+        return 'reask'
+    return 'other'
+
+
+def _reasks_exceeded(turn0: int, pending: str = '') -> bool:
+    """Whether this turn has had more than ``_REASK_CAP`` plan re-asks,
+    counting the ones in ``session.messages`` since ``turn0`` plus a
+    ``pending`` re-ask not yet appended (the text path)."""
+    n = plan.reasks_in(session.messages[turn0:]) + (1 if pending else 0)
+    return n > _REASK_CAP
+
+
+def _task_count(args: dict) -> int:
+    parsed, _ = plan.parse(args)
+    return len(parsed.tasks) if parsed is not None else 0
+
+
+def _round_tool_result(name: str, start: int) -> str:
+    """Content of the first tool message named ``name`` appended at or
+    after index ``start`` of ``session.messages`` (this round's results);
+    ``''`` when there is none."""
+    for m in session.messages[start:]:
+        if isinstance(m, dict) and m.get('role') == 'tool' \
+                and m.get('tool_name') == name:
+            return m.get('content') or ''
+    return ''
+
+
+def _settle(answer: str, collapse: bool) -> None:
+    """Land ``answer`` in ``session.messages`` as the assistant's text.
+
+    A lone ``final_answer``/``plan`` round (``collapse``) — the assistant's
+    tool-call message and its tool result — is replaced by one assistant
+    text message, so the next turn's history (and ``final_answer`` readers:
+    the orchestrator, the bench) carry the text once. Otherwise the last
+    message's text becomes the answer when it is the assistant's (the text
+    path: the model's own text or its JSON plan), or the answer is
+    appended after the round's tool results.
+    """
+    msgs = session.messages
+    if (collapse and len(msgs) >= 2
+            and conversation.msg_role(msgs[-1]) == 'tool'
+            and conversation.msg_role(msgs[-2]) == 'assistant'):
+        del msgs[-2:]
+        msgs.append({'role': 'assistant', 'content': answer})
+        return
+    if msgs and conversation.msg_role(msgs[-1]) == 'assistant' \
+            and not conversation._tool_calls_of(msgs[-1]):
+        last = msgs[-1]
+        if isinstance(last, dict):
+            last['content'] = answer
+        else:
+            last.content = answer
+        return
+    msgs.append({'role': 'assistant', 'content': answer})

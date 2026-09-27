@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from guru import config, session
-from guru.domain import decisions, gate, ledger, patch, policy, routing
+from guru.domain import (decisions, gate, health, ledger, patch, policy,
+                         routing)
 from guru.domain.policy import Finding
 from guru.judges import llm
 import guru.judges as judges
@@ -36,6 +37,17 @@ GOOD_REVIEW = {'implements_task': 'yes', 'unrelated_changes': 'none',
 DELETE_DIFF = ('diff --git a/old.py b/old.py\ndeleted file mode 100644\n'
                '--- a/old.py\n+++ /dev/null\n@@ -1,3 +0,0 @@\n'
                '-import os\n-\n-X = 1\n')
+# Every line of a test module removed, the (now empty) file kept: what
+# ``git diff`` shows for ``open(p, 'w').close()`` in the copy.
+EMPTIED_DIFF = ('diff --git a/tests/test_x.py b/tests/test_x.py\n'
+                '--- a/tests/test_x.py\n+++ b/tests/test_x.py\n'
+                '@@ -1,3 +0,0 @@\n-def test_x():\n-    assert 1\n-\n')
+
+
+def _hflags(diff: str, reader) -> list:
+    """The health flags of ``diff`` over ``reader`` (the single path the
+    submit takes: deltas first, then ``health_flags_from``)."""
+    return gate.health_flags_from(gate.health_deltas(diff, reader))
 
 
 class MarkerScanner:
@@ -216,7 +228,7 @@ class TestRules:
              '-x = 1\n+import subprocess\n\n'
              'rename from a\nrename to b\n')
         kinds = self._kinds(gate.rules(d, tmp_path))
-        assert kinds == ['exec', 'parse']
+        assert kinds == ['destructive', 'exec', 'parse']
 
     def test_deleted_file_is_an_informational_flag(self, tmp_path) -> None:
         [flag] = gate.rules(DELETE_DIFF, tmp_path)
@@ -229,11 +241,12 @@ class TestRules:
 
     def test_deleted_config_and_test_files_keep_their_flags(self, tmp_path):
         d = DELETE_DIFF.replace('old.py', 'conftest.py')
-        assert self._kinds(gate.rules(d, tmp_path)) == ['config', 'delete']
+        assert self._kinds(gate.rules(d, tmp_path)) == [
+            'config', 'delete', 'destructive']
         d = ('--- a/tests/test_a.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n'
              '-def test_x():\n-    assert x\n')
-        assert self._kinds(gate.rules(d, tmp_path)) == ['assert-removed',
-                                                        'delete']
+        assert self._kinds(gate.rules(d, tmp_path)) == [
+            'assert-removed', 'delete', 'destructive']
         d = DELETE_DIFF.replace('old.py', '../old.py')
         assert 'outside' in self._kinds(gate.rules(d, tmp_path))
 
@@ -242,7 +255,7 @@ class TestRules:
         flags = gate.rules(d, tmp_path)
         assert [(f.kind, f.detail) for f in flags if f.kind == 'delete'] \
             == [('delete', 'deletes old.py (3 lines)')]
-        assert gate.stat(d) == [('old.py', 0, 3, True)]
+        assert gate.stat(d) == [('old.py', 0, 3, True, False)]
 
     def test_empty_diff(self, tmp_path) -> None:
         assert gate.rules('', tmp_path) == []
@@ -255,6 +268,351 @@ class TestRules:
         assert [(f.kind, f.path) for f in flags] == [
             ('exec', 'a.py'), ('config', 'Makefile')]
         assert flags[0].describe() == 'exec: a.py: import socket'
+
+
+# --- destructive rules -------------------------------------------------------
+
+def _delete_diff(path: str, n: int = 2) -> str:
+    body = ''.join(f'-line {i}\n' for i in range(n))
+    return (f'diff --git a/{path} b/{path}\ndeleted file mode 100644\n'
+            f'--- a/{path}\n+++ /dev/null\n@@ -1,{n} +0,0 @@\n{body}')
+
+
+class TestDestructive:
+    @staticmethod
+    def _destructive(diff: str, project: Path) -> list:
+        return [f for f in gate.rules(diff, project)
+                if f.kind == gate.DESTRUCTIVE_KIND]
+
+    def test_kind_is_blocking_not_suspicious(self) -> None:
+        assert gate.DESTRUCTIVE_KIND == 'destructive'
+        assert 'destructive' in gate.BLOCKING_KINDS
+        assert 'destructive' not in gate.SUSPICIOUS_KINDS
+        assert (gate.DESTRUCTIVE_DELETED_FILES,
+                gate.DESTRUCTIVE_REMOVED) == (3, 200)
+        assert not hasattr(gate, 'DESTRUCTIVE_NET_REMOVED')
+
+    def test_git_rename_headers(self, tmp_path) -> None:
+        d = ('diff --git a/pkg/old.py b/pkg/new.py\nsimilarity index 90%\n'
+             'rename from pkg/old.py\nrename to pkg/new.py\n'
+             '--- a/pkg/old.py\n+++ b/pkg/new.py\n@@ -1,1 +1,1 @@\n'
+             '-x = 1\n+x = 2\n')
+        [flag] = self._destructive(d, tmp_path)
+        assert flag.path == 'pkg/old.py'
+        assert flag.detail == 'renames pkg/old.py -> pkg/new.py'
+        # the parse flag is raised too; the rules still scan
+        assert 'parse' in {f.kind for f in gate.rules(d, tmp_path)}
+
+    def test_header_pair_rename_without_git_lines(self, tmp_path) -> None:
+        d = ('--- a/a.py\n+++ b/b.py\n@@ -1,1 +1,1 @@\n-x\n+y\n')
+        [flag] = self._destructive(d, tmp_path)
+        assert flag.describe() == 'destructive: a.py: renames a.py -> b.py'
+        assert gate._renames('rename from only\n') == []
+
+    def test_new_and_deleted_files_are_not_renames(self, tmp_path) -> None:
+        d = _diff('a.py', [], ['x'], new_file=True) + DELETE_DIFF
+        assert self._destructive(d, tmp_path) == []
+
+    def test_more_than_three_deleted_files(self, tmp_path) -> None:
+        three = ''.join(_delete_diff(f'p{i}.py') for i in range(3))
+        assert self._destructive(three, tmp_path) == []
+        four = three + _delete_diff('p3.py')
+        [flag] = self._destructive(four, tmp_path)
+        assert flag.path == ''
+        assert flag.detail == ('deletes 4 files (more than 3): p0.py, p1.py,'
+                               ' p2.py, p3.py')
+
+    def test_gross_removed_lines(self, tmp_path) -> None:
+        # exactly 200 gross is fine; 201 is not — added lines offset nothing
+        ok = _diff('big.py', [f'l{i}' for i in range(200)],
+                   [f'n{i}' for i in range(300)])
+        assert self._destructive(ok, tmp_path) == []
+        d = _diff('big.py', [f'l{i}' for i in range(201)],
+                  [f'n{i}' for i in range(300)])
+        [flag] = self._destructive(d, tmp_path)
+        assert flag.path == ''
+        assert flag.detail == ('removes 201 lines (more than 200); +300 '
+                               'added, 300 of them content')
+        # a large deleted file counts as removed lines
+        d = _delete_diff('gone.py', 250)
+        kinds = [f.kind for f in gate.rules(d, tmp_path)]
+        assert kinds == ['destructive', 'delete']
+
+    def test_padding_with_blank_and_comment_lines_does_not_offset(
+            self, tmp_path) -> None:
+        # the iteration-1 evasion: 300 removed, 300 comment lines added
+        d = _diff('big.py', [f'l{i}' for i in range(300)],
+                  ['#' for _ in range(150)] + ['' for _ in range(100)]
+                  + ['   # note'] * 40 + [f'x{i} = 1' for i in range(10)])
+        [flag] = self._destructive(d, tmp_path)
+        assert flag.detail == ('removes 300 lines (more than 200); +300 '
+                               'added, 10 of them content')
+        assert gate.substantive(['', '  ', '# c', '   # c', 'x = 1']) == 1
+
+    def test_cumulative_deleted_files_over_a_task(self, tmp_path) -> None:
+        two = _delete_diff('p0.py') + _delete_diff('p1.py')
+        assert self._destructive(two, tmp_path) == []
+        prior = gate.Tally(deleted=3, removed=6, files=3)
+        [flag] = [f for f in gate.rules(two, tmp_path, prior=prior)
+                  if f.kind == gate.DESTRUCTIVE_KIND]
+        assert flag.path == ''
+        assert flag.detail == ('deletes 2 files now, 5 in this task (more '
+                               'than 3): p0.py, p1.py')
+        # a prior that leaves the total within the threshold changes nothing
+        within = gate.Tally(deleted=1, removed=2, files=1)
+        assert [f for f in gate.rules(two, tmp_path, prior=within)
+                if f.kind == gate.DESTRUCTIVE_KIND] == []
+        # an empty prior reads like no prior at all
+        four = two + _delete_diff('p2.py') + _delete_diff('p3.py')
+        [flag] = [f for f in gate.rules(four, tmp_path, prior=gate.Tally())
+                  if f.kind == gate.DESTRUCTIVE_KIND]
+        assert flag.detail.startswith('deletes 4 files (more than 3): ')
+
+    def test_cumulative_removed_lines_over_a_task(self, tmp_path) -> None:
+        d = _diff('big.py', [f'l{i}' for i in range(150)], ['x'])
+        assert self._destructive(d, tmp_path) == []
+        prior = gate.Tally(deleted=0, removed=60, files=2)
+        [flag] = gate.destructive_flags(d, prior=prior)
+        assert flag.detail == ('removes 150 lines now, 210 in this task '
+                               '(more than 200); +1 added, 1 of them '
+                               'content')
+
+    def test_tally(self) -> None:
+        t = gate.tally(EMPTIED_DIFF + DELETE_DIFF + _diff('a.py', ['x'],
+                                                          ['y', 'z']))
+        assert t == gate.Tally(deleted=2, removed=7, files=3)
+        assert t + gate.Tally(1, 1, 1) == gate.Tally(3, 8, 4)
+        assert t.describe() == '3 file(s) touched, 2 deleted, 7 line(s) ' \
+            'removed'
+        assert gate.Tally() == gate.Tally(0, 0, 0) and t != gate.Tally()
+        assert gate.tally('') == gate.Tally()
+
+    def test_emptied_file_is_a_delete_flag_and_destructive(self, tmp_path):
+        flags = gate.rules(EMPTIED_DIFF, tmp_path)
+        assert [(f.kind, f.path, f.detail) for f in flags] == [
+            ('destructive', 'tests/test_x.py',
+             'empties test file tests/test_x.py'),
+            ('delete', '', 'empties tests/test_x.py (3 lines; file kept)'),
+            ('assert-removed', 'tests/test_x.py', '1 assert line(s) removed'),
+        ]
+        assert gate.deleted_paths(EMPTIED_DIFF) == [
+            'tests/test_x.py (emptied)']
+        [sec] = gate._sections(EMPTIED_DIFF)[0]
+        assert sec.emptied and not sec.deleted and sec.gone
+        # a non-test file emptied: informational delete flag, counted
+        d = EMPTIED_DIFF.replace('tests/test_x.py', 'pkg/m.py')
+        assert [f.kind for f in gate.rules(d, tmp_path)] == [
+            'delete', 'assert-removed']
+        assert gate.tally(d).deleted == 1
+        three = ''.join(_delete_diff(f'p{i}.py') for i in range(3))
+        [flag] = self._destructive(three + d, tmp_path)
+        assert flag.detail == ('deletes 4 files (more than 3): p0.py, p1.py,'
+                               ' p2.py, pkg/m.py')
+
+    def test_emptied_needs_every_line_gone(self, tmp_path) -> None:
+        # a context line means something survived: an edit, not emptied
+        kept = ('--- a/tests/test_x.py\n+++ b/tests/test_x.py\n'
+                '@@ -1,3 +1,1 @@\n-def test_x():\n-    pass\n import os\n')
+        assert gate.stat(kept) == [('tests/test_x.py', 0, 2, False, False)]
+        assert self._destructive(kept, tmp_path) == []
+        # a replaced body is not emptied either
+        d = _diff('tests/test_x.py', ['a', 'b'], ['c'])
+        assert gate.stat(d)[0][4] is False
+        # a new file, a deletion: neither is "emptied"
+        assert gate.stat(_diff('n.py', [], ['x'], new_file=True))[0][4] \
+            is False
+        assert gate.stat(DELETE_DIFF) == [('old.py', 0, 3, True, False)]
+
+    def test_emptied_in_an_unparsable_diff(self, tmp_path) -> None:
+        d = EMPTIED_DIFF + 'rename from a\nrename to b\n'
+        assert gate.stat(d) == [('tests/test_x.py', 0, 3, False, True)]
+        kinds = sorted(f.kind for f in gate.rules(d, tmp_path))
+        assert kinds == ['assert-removed', 'delete', 'destructive',
+                         'destructive', 'parse']
+        kept = ('--- a/t.py\n+++ b/t.py\n@@ -1,2 +1,1 @@\n-x\n y\n'
+                'rename from a\nrename to b\n')
+        assert gate.stat(kept)[0] == ('t.py', 0, 1, False, False)
+
+    def test_renames_only_looked_for_in_an_unparsable_diff(
+            self, tmp_path) -> None:
+        # a body line ``-- foo`` in a parsed diff is a removed line, never
+        # a ``---`` header pair with the next ``+++``-looking line
+        d = _diff('a.py', ['- foo', '++ bar'], ['x'])
+        assert gate._renames(d) == []       # the scan itself is clean here
+        d = ('--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,1 @@\n'
+             '--- a/other.py\n-x\n+++ b/else.py\n')
+        assert gate._renames(d) == [('other.py', 'else.py')]
+        # ... but the parsed diff never consults the scan
+        assert self._destructive(d, tmp_path) == []
+        assert 'parse' not in {f.kind for f in gate.rules(d, tmp_path)}
+
+    @pytest.mark.parametrize('path', [
+        'tests/test_a.py', 'tests/util.py', 'pkg/test/helpers.py',
+        'pkg/test_mod.py', 'pkg/mod_test.py', 'conftest.py',
+        'pkg/conftest.py', 'tests_unit/x.py', 'pkg/tests_e2e/y.py',
+        'testing/helpers.py', 'pkg/mod_tests.py'])
+    def test_deleted_test_file(self, tmp_path, path) -> None:
+        assert gate.is_test_path(path)
+        [flag] = self._destructive(_delete_diff(path), tmp_path)
+        assert flag.path == path
+        assert flag.detail == f'deletes test file {path}'
+
+    @pytest.mark.parametrize('path', [
+        'pkg/testing.py', 'pkg/contest.py', 'latest/x.py', 'pkg/tests.py',
+        'tests_/x.py', 'pkg/tests_.py', 'mytests/x.py', 'pkg/latests.py'])
+    def test_not_a_test_file(self, tmp_path, path) -> None:
+        assert not gate.is_test_path(path)
+        assert self._destructive(_delete_diff(path), tmp_path) == []
+
+    def test_editing_a_test_file_is_fine(self, tmp_path) -> None:
+        assert self._destructive(_diff('tests/test_a.py', ['x'], ['y']),
+                                 tmp_path) == []
+
+    def test_decide_makes_unclear_not_suspicious(self) -> None:
+        flag = gate.Flag(gate.DESTRUCTIVE_KIND, 'tests/test_a.py',
+                         'deletes test file tests/test_a.py')
+        v = gate.decide([flag], GOOD_REVIEW)
+        assert v.state == gate.UNCLEAR
+        assert v.reasons[0] == ('destructive: tests/test_a.py: deletes test'
+                                ' file tests/test_a.py')
+        assert 'deterministic flags need a human: destructive' in v.reasons
+
+
+# --- code health -------------------------------------------------------------
+
+def _fn_src(name: str, n_args: int) -> str:
+    args = ', '.join(f'a{i}' for i in range(n_args))
+    return f'def {name}({args}):\n    return 0\n'
+
+
+def _edit_diff(path: str, before: str, after: str) -> str:
+    """A whole-file replacement diff (old lines removed, new added)."""
+    return _diff(path, before.splitlines(), after.splitlines())
+
+
+class TestHealth:
+    def test_kind_is_blocking_not_suspicious(self) -> None:
+        assert gate.HEALTH_KIND == 'health'
+        assert 'health' in gate.BLOCKING_KINDS
+        assert 'health' not in gate.SUSPICIOUS_KINDS
+
+    def test_degraded_function_is_a_health_flag(self) -> None:
+        before = _fn_src('f', 1) + _fn_src('g', 1)
+        after = _fn_src('f', 7) + _fn_src('g', 2)
+        diff = _edit_diff('pkg/m.py', before, after)
+        reader = {'pkg/m.py': before}.get
+        deltas = gate.health_deltas(diff, reader)
+        assert [(p, d.name, d.verdict) for p, d in deltas] == [
+            ('pkg/m.py', 'f', health.DEGRADED),
+            ('pkg/m.py', 'g', health.UNCHANGED)]
+        [flag] = _hflags(diff, reader)
+        assert flag.describe() == \
+            'health: pkg/m.py: f: degraded (args 1→7 >6)'
+        assert gate.health_text(deltas) == \
+            'pkg/m.py: f: degraded (args 1→7 >6)'
+
+    def test_new_file_and_missing_baseline(self) -> None:
+        diff = _diff('pkg/new.py', [], _fn_src('f', 7).splitlines(),
+                     new_file=True)
+        calls: list = []
+
+        def reader(path):
+            calls.append(path)
+            return None
+        [flag] = _hflags(diff, reader)
+        assert calls == []                  # a new file has no baseline
+        assert flag.detail == 'f: degraded (new; args 7 >6)'
+        # an edit whose baseline the reader cannot find: treated as new
+        diff = _edit_diff('pkg/m.py', '', _fn_src('f', 7))
+        [flag] = _hflags(diff, lambda p: None)
+        assert 'new;' in flag.detail
+
+    def test_improved_is_text_not_flag(self) -> None:
+        before, after = _fn_src('f', 9), _fn_src('f', 2)
+        diff = _edit_diff('pkg/m.py', before, after)
+        deltas = gate.health_deltas(diff, lambda p: before)
+        assert _hflags(diff, lambda p: before) == []
+        assert gate.health_text(deltas) == \
+            'pkg/m.py: f: improved (args 9→2)'
+
+    def test_degraded_rows_come_first(self) -> None:
+        before = _fn_src('a', 9) + _fn_src('b', 1)
+        after = _fn_src('a', 2) + _fn_src('b', 7)
+        deltas = gate.health_deltas(_edit_diff('m.py', before, after),
+                                    lambda p: before)
+        text = gate.health_text(deltas)
+        assert text.splitlines() == ['m.py: b: degraded (args 1→7 >6)',
+                                     'm.py: a: improved (args 9→2)']
+        assert gate.health_text([]) == ''
+
+    def test_skips_non_python_deleted_unparsable_and_raising(self) -> None:
+        assert _hflags(_edit_diff('README.md', 'a', 'b'), lambda p: 'a') \
+            == []
+        assert _hflags(DELETE_DIFF, lambda p: 'x') == []
+        assert _hflags('rename from a\nrename to b\n', lambda p: '') == []
+        # hunks that do not apply to the baseline: nothing to measure
+        diff = _edit_diff('m.py', 'x = 1\n', _fn_src('f', 7))
+        assert _hflags(diff, lambda p: 'y = 2\n') == []
+        # syntax error after the change
+
+        def boom(path):
+            raise OSError('no')
+        assert _hflags(_edit_diff('m.py', '', 'def f(:\n'), boom) == []
+        assert _hflags('', lambda p: '') == []
+
+    def test_paths_filter_reads_only_those_baselines(self) -> None:
+        before = _fn_src('f', 1)
+        diff = (_edit_diff('a.py', before, _fn_src('f', 7))
+                + _edit_diff('b.py', before, _fn_src('f', 7))
+                + _diff('c.py', [], _fn_src('g', 7).splitlines(),
+                        new_file=True))
+        calls: list = []
+
+        def reader(path):
+            calls.append(path)
+            return before
+        deltas = gate.health_deltas(diff, reader, paths={'b.py'})
+        assert [(p, d.name) for p, d in deltas] == [('b.py', 'f')]
+        assert calls == ['b.py']
+        assert gate.health_deltas(diff, reader, paths={'nope.py'}) == []
+        assert gate.health_deltas(diff, reader, paths=set()) == []
+        assert len(gate.health_deltas(diff, reader, paths=None)) == 3
+
+    def test_at_most_max_files_are_measured(self) -> None:
+        assert gate.HEALTH_MAX_FILES == 20
+        diff = ''.join(_diff(f'p{i:02}.py', [], _fn_src('f', 7).splitlines(),
+                             new_file=True) for i in range(25))
+        deltas = gate.health_deltas(diff, lambda p: None)
+        assert [p for p, _d in deltas] == [f'p{i:02}.py' for i in range(20)]
+        assert len(gate.health_deltas(diff, lambda p: None, max_files=2)) \
+            == 2
+        # non-Python and deleted files do not use up the budget
+        mixed = (_edit_diff('README.md', 'a', 'b') + DELETE_DIFF
+                 + _diff('z.py', [], _fn_src('f', 7).splitlines(),
+                         new_file=True))
+        assert [p for p, _d in gate.health_deltas(mixed, lambda p: None,
+                                                  max_files=1)] == ['z.py']
+
+    def test_decide_makes_unclear_not_suspicious(self) -> None:
+        flag = gate.Flag(gate.HEALTH_KIND, 'm.py', 'f: degraded (args 1→7)')
+        v = gate.decide([flag], GOOD_REVIEW)
+        assert v.state == gate.UNCLEAR
+        assert 'deterministic flags need a human: health' in v.reasons
+        assert gate.decide([flag], None).state == gate.UNCLEAR
+
+    def test_packet_gets_a_health_block_outside_the_fences(self) -> None:
+        rows = 'm.py: f: degraded (args 1→7 >6)'
+        text = gate.packet_text('r', 't', 'i', 'd', nonce='n',
+                                health_block=rows)
+        summary = text.split('Change summary')[1].split('<<<DIFF')[0]
+        assert ('Code health (computed by guru from the diff and the '
+                'original files; degraded functions need a human):\n'
+                + rows) in summary
+        assert text.count('<<<END n>>>') == 2
+        plain = gate.packet_text('r', 't', 'i', 'd', nonce='n')
+        assert 'Code health' not in plain
+        assert gate.packet_text('r', 't', 'i', 'd', nonce='n',
+                                health_block='  \n') == plain
 
 
 # --- gate.decide -------------------------------------------------------------
@@ -429,17 +787,35 @@ class TestParseReview:
 
     def test_stat(self) -> None:
         d = (_diff('a.py', ['x'], ['y', 'z']) + _diff('b/c.py', [], ['n']))
-        assert gate.stat(d) == [('a.py', 2, 1, False), ('b/c.py', 1, 0, False)]
+        assert gate.stat(d) == [('a.py', 2, 1, False, False),
+                                ('b/c.py', 1, 0, False, False)]
         text = gate.stat_text(d)
         assert 'a.py   | +2 -1' in text and 'b/c.py | +1 -0' in text
         assert text.endswith('2 file(s) changed, 3 insertion(s), '
                              '1 deletion(s)')
-        assert 'deleted' not in text
+        assert 'deleted' not in text and 'emptied' not in text
         assert gate.stat_text('') == ''
+
+    def test_stat_renders_emptied_files(self) -> None:
+        d = EMPTIED_DIFF + _diff('a.py', ['x'], ['y'])
+        assert gate.stat(d) == [('tests/test_x.py', 0, 3, False, True),
+                                ('a.py', 1, 1, False, False)]
+        text = gate.stat_text(d)
+        assert 'tests/test_x.py | +0 -3 emptied' in text
+        assert text.endswith('2 file(s) changed, 1 insertion(s), '
+                             '4 deletion(s), 1 file(s) emptied: '
+                             'tests/test_x.py')
+        assert gate.deleted_paths(d) == ['tests/test_x.py (emptied)']
+        # the reviewer's summary names it outside the fences
+        packet = gate.packet_text('r', 't', 'i', d, nonce='n')
+        summary = packet.split('Change summary')[1].split('<<<DIFF')[0]
+        assert 'tests/test_x.py | +0 -3 emptied' in summary
+        assert '1 file(s) emptied: tests/test_x.py' in summary
 
     def test_stat_renders_deletions(self) -> None:
         d = DELETE_DIFF + _diff('a.py', ['x'], ['y'])
-        assert gate.stat(d) == [('old.py', 0, 3, True), ('a.py', 1, 1, False)]
+        assert gate.stat(d) == [('old.py', 0, 3, True, False),
+                                ('a.py', 1, 1, False, False)]
         text = gate.stat_text(d)
         assert 'old.py | +0 -3 deleted' in text
         assert 'a.py   | +1 -1\n' in text
@@ -721,3 +1097,82 @@ class TestLLMSpec:
     def test_rung_shape(self) -> None:
         assert routing.Rung('a', 'm', 'standard', remote=True).default is False
         assert Path('.').exists()
+
+
+class TestEmptiedToComments:
+    """A file whose every line went, with only blank or comment lines
+    added in their place, is emptied (review I-2: a ``# removed`` left
+    behind hid the emptying from the destructive rule)."""
+
+    def test_reduced_to_a_comment_is_emptied(self, tmp_path) -> None:
+        d = _diff('tests/test_x.py', ['def test_x():', '    assert 1'],
+                  ['# removed'])
+        [sec] = gate._sections(d)[0]
+        assert sec.emptied and sec.gone
+        assert gate.tally(d).deleted == 1
+        assert [f.detail for f in gate.rules(d, tmp_path)
+                if f.kind == gate.DESTRUCTIVE_KIND] == [
+            'empties test file tests/test_x.py']
+
+    def test_reduced_to_a_blank_line_is_emptied(self, tmp_path) -> None:
+        d = _diff('pkg/m.py', ['X = 1', 'Y = 2'], [''])
+        [sec] = gate._sections(d)[0]
+        assert sec.emptied
+        assert gate.deleted_paths(d) == ['pkg/m.py (emptied)']
+        # the raw scan (unparsable diff) agrees
+        raw = d + 'rename from a\nrename to b\n'
+        assert gate.stat(raw)[0][4] is True
+
+    def test_reduced_to_real_code_is_not_emptied(self, tmp_path) -> None:
+        d = _diff('pkg/m.py', ['X = 1', 'Y = 2'], ['# kept', 'Z = 3'])
+        [sec] = gate._sections(d)[0]
+        assert not sec.emptied and not sec.gone
+        assert gate.tally(d).deleted == 0
+        assert gate.deleted_paths(d) == []
+
+
+class TestOverThresholdWording:
+    """``_over``: singular nouns for 1, and no flag for a submit that adds
+    nothing to a task already over a threshold (review M-3)."""
+
+    def test_singular_and_plural(self) -> None:
+        assert gate._over(1, 3, 3, 'files') == \
+            '1 file now, 4 in this task (more than 3)'
+        assert gate._over(2, 3, 3, 'files') == \
+            '2 files now, 5 in this task (more than 3)'
+        assert gate._over(1, 200, 200, 'lines') == \
+            '1 line now, 201 in this task (more than 200)'
+        assert gate._over(201, 0, 200, 'lines') == '201 lines (more than 200)'
+        assert gate._over(0, 5, 3, 'files') == ''         # nothing now
+        assert gate._over(2, 1, 3, 'files') == ''         # within
+
+    def test_over_task_flags_only_a_substantive_removal(self, tmp_path):
+        prior = gate.Tally(deleted=0, removed=250, files=3)
+        # blank and comment lines removed: no content, no flag
+        d = _diff('pkg/m.py', ['', '# old note', '   '], ['X = 1'])
+        assert gate.destructive_flags(d, prior=prior) == []
+        # nothing removed at all: no flag either
+        add = _diff('pkg/n.py', [], ['Y = 2'], new_file=True)
+        assert gate.destructive_flags(add, prior=prior) == []
+        # one substantive line removed: flagged with both numbers
+        d = _diff('pkg/m.py', ['X = 1'], ['X = 2'])
+        [flag] = gate.destructive_flags(d, prior=prior)
+        assert flag.detail == ('removes 1 line now, 251 in this task (more '
+                               'than 200); +1 added, 1 of them content')
+        # not yet over: comment-only removals still count towards crossing
+        d = _diff('pkg/m.py', [f'# c{i}' for i in range(5)], [])
+        [flag] = gate.destructive_flags(
+            d, prior=gate.Tally(removed=198, files=1))
+        assert flag.detail.startswith('removes 5 lines now, 203 in this '
+                                      'task (more than 200)')
+
+    def test_no_deletion_now_is_not_flagged_for_earlier_ones(self, tmp_path):
+        prior = gate.Tally(deleted=5, removed=10, files=5)
+        d = _diff('pkg/m.py', ['X = 1'], ['X = 2'])
+        assert gate.destructive_flags(d, prior=prior) == []
+        [flag] = gate.destructive_flags(_delete_diff('p.py'), prior=prior)
+        assert flag.detail.startswith('deletes 1 file now, 6 in this task '
+                                      '(more than 3): p.py')
+
+    def test_tally_has_no_truthiness(self) -> None:
+        assert '__bool__' not in vars(gate.Tally)

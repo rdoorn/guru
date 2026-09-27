@@ -6,6 +6,7 @@ needs Ollama or a network; the fixture pytest runs really do run.
 import gzip
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -173,6 +174,20 @@ class TestFilesChanged:
 
 
 class TestFixtureTests:
+    def test_sandbox_marked_tests_are_deselected(self, tmp_path: Path):
+        """A fixture's container tests (guru's ``sandbox`` marker) never
+        count: with them selected this copy would fail."""
+        copy = tmp_path / 'proj'
+        (copy / 'tests').mkdir(parents=True)
+        (copy / 'pyproject.toml').write_text(
+            '[tool.pytest.ini_options]\nmarkers = ["sandbox: containers"]\n')
+        (copy / 'tests' / 'test_x.py').write_text(
+            'import pytest\n\n\ndef test_ok():\n    assert True\n\n\n'
+            '@pytest.mark.sandbox\ndef test_container():\n'
+            '    assert False, "would need docker"\n')
+        assert runner.fixture_tests_pass(copy) is True
+        assert runner.FIXTURE_PYTEST_DESELECT == 'not sandbox'
+
     def test_cli_tool_fails_and_flaskish_passes(self, tmp_path: Path):
         assert runner.fixture_tests_pass(
             runner.prepare_fixture('cli-tool', tmp_path)) is False
@@ -341,7 +356,10 @@ class TestRunCase:
             base, [base.adapter], tmp_path)
         assert bad.observed['fixture_tests_pass'] is False
         assert bad.passed is False
-        assert bad.checks[0]['detail'] == 'fixture tests failed, expected pass'
+        assert bad.checks[0]['detail'].startswith(
+            'fixture tests failed, expected pass: ')
+        assert 'test_words_across_newlines' in bad.checks[0]['detail']
+        assert '\x1b[' not in bad.checks[0]['detail']
         good = runner.run_case(
             _case(fixture='flaskish', fixture_tests_pass=True),
             base, [base.adapter], tmp_path)
@@ -557,7 +575,7 @@ class TestRunSuite:
     def test_resolves_base_when_not_given(self, tmp_path: Path, canned,
                                           monkeypatch) -> None:
         a = FakeAdapter()
-        monkeypatch.setattr(bench, '_build_adapters', lambda: [a])
+        monkeypatch.setattr(bench, 'build_adapters', lambda: [a])
         run = runner.run_suite([_case(name='a')], 'Fake|m', tmp_path,
                                trajectory_dir=tmp_path)
         assert run.model == 'Fake|m'
@@ -569,7 +587,7 @@ class TestRunSuite:
                                                     canned,
                                                     monkeypatch) -> None:
         a = FakeAdapter()
-        monkeypatch.setattr(bench, '_build_adapters', lambda: [a])
+        monkeypatch.setattr(bench, 'build_adapters', lambda: [a])
         run = runner.run_suite([_case(name='a')], 'Fake|m', tmp_path,
                                trajectory_dir=tmp_path, num_ctx=8192)
         assert run.num_ctx == 8192
@@ -647,10 +665,12 @@ class TestCli:
         def fake_suite(suite, model_spec, out_root, base_state=None,
                        adapters=None, note='', on_result=None, num_ctx=0,
                        routing=None, routing_name='', allow_spend=False,
-                       decisions=None, rubric_spec='', rubric_min=None):
+                       decisions=None, rubric_spec='', rubric_min=None,
+                       rubric_samples=1):
             assert [c.name for c in suite] == ['a']
             assert decisions is None
             assert rubric_spec == '' and rubric_min is None
+            assert rubric_samples == 1
             assert callable(on_result)
             assert model_spec == 'Fake|m'
             assert note == 'n1'
@@ -1522,6 +1542,7 @@ class TestCliRouting:
 
     def test_allow_spend_flag(self, tmp_path: Path, monkeypatch) -> None:
         cdir = self._cases_dir(tmp_path)
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: [])
         seen: dict = {}
 
         def fake_suite(suite, model_spec, out_root, **kw):
@@ -1631,6 +1652,17 @@ class TestGitFixture:
         (copy / 'pkg' / '__init__.py').write_text('X = 2\n')
         assert runner.fixture_tests_pass(copy) is False
 
+    def test_result_carries_the_failing_tail(self, tmp_path) -> None:
+        copy = runner.prepare_fixture('cli-tool', tmp_path)
+        ok, tail = runner.fixture_tests_result(copy)
+        assert ok is False and 'test_words_across_newlines' in tail
+        assert 'failed' in tail.splitlines()[-1]
+        (copy / 'wordcount.py').write_text(
+            (copy / 'wordcount.py').read_text().replace(
+                "text.split(' ')", 'text.split()'))
+        ok, tail = runner.fixture_tests_result(copy)
+        assert ok is True and 'passed' in tail
+
     def test_pythonpath_prepends_and_keeps_existing(self, tmp_path,
                                                     monkeypatch) -> None:
         monkeypatch.setenv('PYTHONPATH', '/elsewhere')
@@ -1639,6 +1671,21 @@ class TestGitFixture:
         monkeypatch.delenv('PYTHONPATH')
         assert runner._fixture_env(tmp_path)['PYTHONPATH'] == str(tmp_path)
         assert runner._fixture_env(tmp_path)['PYTHONDONTWRITEBYTECODE'] == '1'
+
+    def test_scratch_dir_sits_next_to_the_copy_not_inside(self,
+                                                          tmp_path) -> None:
+        # The copy may be a git repository (guru as its own fixture); a
+        # TMPDIR inside it would put "not a repo" temp dirs inside a repo.
+        copy = tmp_path / 'work' / 'guru'
+        copy.mkdir(parents=True)
+        env = runner._fixture_env(copy)
+        scratch = Path(env['TMPDIR'])
+        assert scratch == tmp_path / 'work' / '.guru-eval-tmp'
+        assert scratch.is_dir()
+        assert copy not in scratch.parents and scratch != copy
+        assert env[runner.SANDBOX_ROOT_ENV] == str(scratch)
+        assert Path(env['HOME']) == scratch / 'home'
+        assert Path(env['HOME']).is_dir()
 
     def test_run_case_records_fixture_git_in_observed(self, tmp_path, repo,
                                                       canned) -> None:
@@ -1692,8 +1739,7 @@ class TestSandboxCase:
         assert [c['detail'] for c in res.checks] == [
             'error: sandbox unavailable'] * 2
         assert calls == [] and 'prompt' not in canned    # model never ran
-        assert not (Path(tempfile.gettempdir())
-                    / runner.SANDBOX_WORKDIR).exists()
+        assert not (runner.sandbox_root() / runner.SANDBOX_WORKDIR).exists()
 
     def test_provisioned_case_records_image_and_verdicts(
             self, tmp_path: Path, monkeypatch) -> None:
@@ -1748,7 +1794,9 @@ class TestSandboxCase:
         # (cwd, on the read list), the index domains allowed, the project
         # dir on the copy, the denying approval asker.
         copy = seen['project']
-        assert copy.parent == Path(tempfile.gettempdir()) / \
+        assert copy.parent == runner.sandbox_root() / runner.SANDBOX_WORKDIR
+        # ...and never the shared temp dir (conftest isolates the root).
+        assert copy.parent != Path(tempfile.gettempdir()) / \
             runner.SANDBOX_WORKDIR
         assert copy.name == 'cli-tool'
         assert Path(seen['cwd']).resolve() == copy.resolve()
@@ -1955,6 +2003,20 @@ class FakeJudge:
         return self.reply
 
 
+class SequenceJudge:
+    """A judge that replies with the next item of ``replies`` per call."""
+
+    def __init__(self, replies: list, model: str = 'judge-model') -> None:
+        self.replies, self.model, self.prompts = list(replies), model, []
+
+    def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
 def _result(case: str = 'a', answer: str = 'the answer',
             passed: bool = True) -> runs.CaseResult:
     return runs.CaseResult(case=case, passed=passed, checks=[],
@@ -2009,6 +2071,33 @@ class TestGradeCase:
         assert 'the answer' in judge.prompts[0]
         assert config.LEDGER_ENABLED is False             # restored
         assert ledger.repository() is not repo
+
+    def test_packet_carries_the_observed_evidence(self, tmp_path,
+                                                  monkeypatch) -> None:
+        """The judge sees what guru observed (files, tests, tools, gate,
+        cost) outside the answer fence, never only the answer text."""
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        case = _case(name='a')
+        case.expect.rubric = 'adds the flag with a test'
+        res = _result(answer='Done; I did not paste the diff.')
+        res.observed.update({
+            'files_changed': ['guru/cli.py', 'tests/test_misc.py'],
+            'fixture_tests_pass': True,
+            'tools_used': ['edit_file', 'edit_file', 'run_tests'],
+            'gate_verdicts': [], 'spawned': 1, 'roles': ['developer']})
+        res.cost_usd = 0.128
+        judge = FakeJudge('{"score": 2, "reason": "evidence shows both"}')
+        runner.grade_case(case, res, judge, self._repo(tmp_path), 'r:a')
+        packet = judge.prompts[0]
+        before, _, fenced = packet.rpartition('<<<ANSWER ')
+        assert rubric_mod.EVIDENCE_HEADER in before
+        assert '- files changed: guru/cli.py, tests/test_misc.py' in before
+        assert '- fixture tests: pass' in before
+        assert '- tools used: edit_file(2), run_tests' in before
+        assert '- sub-agents spawned: 1 (roles: developer)' in before
+        assert '- cost: $0.128' in before
+        assert 'files changed' not in fenced
+        assert res.rubric_score == 2
 
     def test_no_rubric_no_call(self, tmp_path: Path) -> None:
         judge = FakeJudge('{"score": 2}')
@@ -2067,6 +2156,80 @@ class TestGradeCase:
                           repo, 'r:a', rubric_min=1)
         assert already_failed.passed is False       # a grade never rescues
 
+    def test_samples_record_median_and_every_sample(self, tmp_path,
+                                                    monkeypatch) -> None:
+        """Three samples 2, 1, 2 -> median 2; the result keeps all three,
+        the label is the median and its note lists every sample."""
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', False)
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        res = _result()
+        judge = SequenceJudge(['{"score": 2, "reason": "full"}',
+                               '{"score": 1, "reason": "one gap"}',
+                               '{"score": 2, "reason": "meets it"}'])
+        repo = self._repo(tmp_path)
+        runner.grade_case(case, res, judge, repo, 'r:a', samples=3)
+        assert len(judge.prompts) == 3
+        # Each sample has its own nonce (independent packets).
+        assert len({p.split('<<<ANSWER ')[1].split('>>>')[0]
+                    for p in judge.prompts}) == 3
+        assert res.rubric_score == 2
+        assert res.rubric_samples == [2, 1, 2]
+        assert res.rubric_reason == ('samples 2,1,2 -> median 2; 2: full; '
+                                     '1: one gap; 2: meets it')
+        rows = repo.rows('labels')
+        assert len(rows) == 1
+        assert rows[0]['label'] == '2'
+        assert rows[0]['note'] == res.rubric_reason
+
+    def test_samples_tie_goes_to_the_lower_value(self, tmp_path) -> None:
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        res = _result()
+        judge = SequenceJudge(['{"score": 2}', '{"score": 1}'])
+        runner.grade_case(case, res, judge, self._repo(tmp_path), 'r:a',
+                          samples=2)
+        assert res.rubric_score == 1 and res.rubric_samples == [2, 1]
+        # rubric_min applies to the median.
+        low = _result()
+        runner.grade_case(case, low, SequenceJudge(['{"score": 2}',
+                                                    '{"score": 1}']),
+                          self._repo(tmp_path), 'r:a', rubric_min=2,
+                          samples=2)
+        assert low.passed is False
+        assert low.checks[0]['detail'] == 'rubric 1 < 2'
+
+    def test_one_failing_sample_fails_the_grade(self, tmp_path) -> None:
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        res = _result()
+        judge = SequenceJudge(['{"score": 2}', 'garbage', '{"score": 2}'])
+        repo = self._repo(tmp_path)
+        runner.grade_case(case, res, judge, repo, 'r:a', samples=3)
+        assert res.rubric_score is None and res.rubric_samples == []
+        assert res.rubric_reason.startswith('error: ')
+        assert repo.rows('labels') == []
+        assert len(judge.prompts) == 2              # stopped at the failure
+
+    def test_one_sample_keeps_the_plain_reason(self, tmp_path) -> None:
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        res = _result()
+        runner.grade_case(case, res, FakeJudge('{"score": 1, "reason": "r"}'),
+                          self._repo(tmp_path), 'r:a', samples=1)
+        assert (res.rubric_score, res.rubric_reason) == (1, 'r')
+        assert res.rubric_samples == []
+
+    def test_empty_answer_samples_are_all_zero(self, tmp_path) -> None:
+        case = _case(name='a')
+        case.expect.rubric = 'x'
+        res = _result(answer='')
+        judge = FakeJudge('{"score": 2}')
+        runner.grade_case(case, res, judge, self._repo(tmp_path), 'r:a',
+                          samples=3)
+        assert judge.prompts == []
+        assert res.rubric_score == 0 and res.rubric_samples == [0, 0, 0]
+
 
 class TestRunSuiteRubric:
     def _suite(self, rubric_text: str = 'mentions path traversal') -> list:
@@ -2074,6 +2237,31 @@ class TestRunSuiteRubric:
         a.expect.rubric = rubric_text
         b = _case(name='b')                          # no rubric
         return [a, b]
+
+    def test_rubric_samples_reach_the_judge_and_the_run(self, tmp_path,
+                                                        canned) -> None:
+        base = _base()
+        adapter = GradingAdapter()
+        base.adapter = adapter
+        run = runner.run_suite(self._suite(), 'Fake|base-model',
+                               tmp_path / 'runs', base_state=base,
+                               adapters=[adapter], trajectory_dir=tmp_path,
+                               rubric_spec='Fake|judge-model',
+                               rubric_samples=3)
+        assert run.rubric_samples == 3
+        a = run.cases[0]
+        assert a.rubric_score == 2 and a.rubric_samples == [2, 2, 2]
+        assert a.rubric_reason.startswith('samples 2,2,2 -> median 2; ')
+        assert len(adapter.completions) == 3
+        saved = runs.load(runs.find_run(tmp_path / 'runs', run.run_id))
+        assert saved.rubric_samples == 3
+        assert saved.cases[0].rubric_samples == [2, 2, 2]
+        with pytest.raises(ValueError, match='rubric_samples'):
+            runner.run_suite(self._suite(), 'Fake|base-model',
+                             tmp_path / 'runs', base_state=base,
+                             adapters=[adapter], trajectory_dir=tmp_path,
+                             rubric_spec='Fake|judge-model',
+                             rubric_samples=0)
 
     def test_grades_rubric_cases_and_records_everything(self, tmp_path,
                                                         canned) -> None:
@@ -2088,8 +2276,10 @@ class TestRunSuiteRubric:
                                on_result=seen.append,
                                rubric_spec='Fake|judge-model')
         assert run.rubric == 'Fake|judge-model'
+        assert run.rubric_samples == 1
         a, b = run.cases
         assert (a.rubric_score, a.rubric_reason) == (2, 'names the bug')
+        assert a.rubric_samples == []
         assert b.rubric_score is None and b.rubric_reason == ''
         assert a.passed and b.passed
         assert run.rubric_total() == (2, 2)
@@ -2212,6 +2402,42 @@ class TestCliRubricAndRepeat:
         assert '· rubric 3/4' in out
         assert 'grade by hand' not in out
 
+    def test_samples_flag_is_passed_and_samples_shown(self, tmp_path,
+                                                      capsys,
+                                                      monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a', 'b')
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            r = _fake_run(model_spec, {'a': True, 'b': True},
+                          {'a': 2, 'b': 1}, rubric=kw['rubric_spec'])
+            r.rubric_samples = kw['rubric_samples']
+            r.cases[0].rubric_samples = [2, 2, 1]
+            r.cases[1].rubric_samples = [1, 1, 1]
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r'),
+                         '--rubric', 'F|judge', '--samples', '3'])
+        assert code == 0
+        assert seen['rubric_samples'] == 3
+        out = capsys.readouterr().out
+        assert 'rubric: 2/2 (2,2,1)' in out and 'rubric: 1/2 (1,1,1)' in out
+        assert '· rubric 3/4 (median of 3 samples)' in out
+
+    def test_samples_below_one_is_a_usage_error(self, tmp_path, capsys,
+                                                monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+        monkeypatch.setattr(runner, 'run_suite',
+                            lambda *a, **k: pytest.fail('must not run'))
+        assert cli_main(['run', '--cases-dir', str(cdir), '--out',
+                         str(tmp_path), '--rubric', 'F|j',
+                         '--samples', '0']) == 2
+        assert '--samples must be at least 1' in capsys.readouterr().err
+
     def test_ungraded_rubric_says_grade_by_hand(self, tmp_path, capsys,
                                                 monkeypatch) -> None:
         cdir = _cli_case_dir(tmp_path, 'a')
@@ -2243,16 +2469,53 @@ class TestCliRubricAndRepeat:
             return _fake_run(model_spec, {'a': True}, {'a': 2})
 
         monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: [
+            {'name': 'Remote', 'type': 'litellm'}])
         base = ['run', '--cases-dir', str(cdir), '--out',
                 str(tmp_path / 'r'), '--routing', str(routing_file)]
         assert cli_main(base + ['--allow-spend']) == 0
-        assert seen['rubric_spec'] == 'Fake|haiku'
+        assert seen['rubric_spec'] == 'Fake|haiku'      # the rung wins
         assert cli_main(base) == 0                      # no spend: no judge
         assert seen['rubric_spec'] == ''
         assert cli_main(base + ['--allow-spend', '--rubric', 'none']) == 0
         assert seen['rubric_spec'] == ''
         assert cli_main(base + ['--allow-spend', '--rubric', 'X|y']) == 0
         assert seen['rubric_spec'] == 'X|y'
+
+    def test_default_judge_with_spend_alone_is_the_cheapest_remote_tier(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        """Grading is the default whenever the run may spend: without a
+        routing file (or with one that has no rung) the judge is the
+        cheapest Claude tier of the first enabled remote adapter; no
+        remote adapter means nothing to grade with."""
+        cdir = _cli_case_dir(tmp_path, 'a')
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            return _fake_run(model_spec, {'a': True}, {'a': 2})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        adapters = [{'name': 'Ollama', 'type': 'ollama'},
+                    {'name': 'SBP Litellm', 'type': 'litellm'}]
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: adapters)
+        base = ['run', '--cases-dir', str(cdir), '--out', str(tmp_path / 'r')]
+        assert cli_main(base + ['--allow-spend']) == 0
+        assert seen['rubric_spec'] == 'SBP Litellm|aws/claude-4-5-haiku'
+        assert cli_main(base) == 0                      # no spend: no judge
+        assert seen['rubric_spec'] == ''
+        assert cli_main(base + ['--allow-spend', '--rubric', 'none']) == 0
+        assert seen['rubric_spec'] == ''
+        rungless = tmp_path / 'ctl.toml'
+        rungless.write_text('[routing]\ncontroller = true\n')
+        assert cli_main(base + ['--allow-spend', '--routing',
+                                str(rungless)]) == 0
+        assert seen['rubric_spec'] == 'SBP Litellm|aws/claude-4-5-haiku'
+        monkeypatch.setattr(config, 'load_adapter_configs', lambda: [])
+        assert cli_main(base + ['--allow-spend']) == 0
+        assert seen['rubric_spec'] == ''
+        assert cli_main(base + ['--allow-spend', '--rubric-min', '1']) == 2
+        assert 'needs a rubric judge' in capsys.readouterr().err
 
     def test_rubric_min_without_judge_is_a_usage_error(self, tmp_path,
                                                        capsys,
@@ -2307,8 +2570,11 @@ class TestCliRubricAndRepeat:
         assert out.count('[evals] repeat ') == 3
         assert 'aggregate over 3 run(s):' in out
         agg = out.split('aggregate over 3 run(s):')[1]
-        assert 'a     3/3     $0.500 ± $0.000  12.0 ± 2.0  2.0/2' in agg
-        assert 'b     1/3     $0.500 ± $0.000  12.0 ± 2.0  0.0/2' in agg
+        # no metrics on these fake results: tok/turns read n/a, smells 0
+        assert ('a     3/3     $0.500 ± $0.000  12.0 ± 2.0  n/a  n/a    0'
+                '       2.0/2') in agg
+        assert ('b     1/3     $0.500 ± $0.000  12.0 ± 2.0  n/a  n/a    0'
+                '       0.0/2') in agg
         assert 'gate: every case must pass at least 2/3 — below: b' in agg
         assert 'runs: ' in agg
 
@@ -2342,3 +2608,592 @@ class TestCliRubricAndRepeat:
         assert cli_main(['run', '--cases-dir', str(cdir), '--out',
                          str(tmp_path), '--repeat', '0']) == 2
         assert '--repeat must be at least 1' in capsys.readouterr().err
+
+
+# --- the copy must survive the run; a raised turn is a failed case ---------
+
+def _sandbox_ready(monkeypatch) -> list:
+    """Colima present, provisioning canned, no real task copies to clean;
+    returns the list ``verbs.cleanup_all`` calls are recorded in."""
+    monkeypatch.setattr(colima, 'available', lambda *a, **k: True)
+    monkeypatch.setattr(provision, 'provision',
+                        lambda *a, **k: _record())
+    cleaned: list = []
+    monkeypatch.setattr(verbs, 'cleanup_all',
+                        lambda: cleaned.append(True) or 0)
+    return cleaned
+
+
+def _clear_handlers() -> None:
+    tools.set_spawn_handler(None)
+    tools.set_check_handler(None)
+    tools.set_join_handler(None)
+
+
+class SpawningAdapter(FakeAdapter):
+    """Drives the real orchestrator without a model: the main agent spawns
+    one worker and answers once the worker's result arrives; the worker
+    runs ``self.work`` (a callable given the worker's SessionState) and
+    reports. ``on_mailbox`` runs at the start of main's second turn."""
+
+    def __init__(self, work, on_mailbox=None) -> None:
+        super().__init__()
+        self.work = work
+        self.on_mailbox = on_mailbox
+
+    def run_turn(self):
+        st = session.current()
+        if st.agent_id != 'main':
+            self.work(st)
+            st.messages.append({'role': 'assistant',
+                                'content': 'worker: done'})
+            return
+        users = [m for m in st.messages if m.get('role') == 'user']
+        if len(users) == 1:
+            out = tools.execute_tool('spawn', {'task': 'do the work'})
+            st.messages.append({'role': 'tool', 'tool_name': 'spawn',
+                                'content': out})
+            st.messages.append({'role': 'assistant',
+                                'content': 'Let me check the result:'})
+            return
+        if self.on_mailbox is not None:
+            self.on_mailbox()
+        st.messages.append({'role': 'assistant',
+                            'content': 'fixed: the worker applied it'})
+
+
+class TestSandboxCopyIntegrity:
+    """Run 94fdc1bb11a5: another process emptied ``<tmp>/guru-eval-sandbox``
+    while a case ran; the checks then saw ``Errno 2`` (or a fresh, clean
+    copy) and the main agent's mailbox turn died silently on the vanished
+    cwd, so its pre-join stall line was recorded as the answer."""
+
+    def _run(self, tmp_path: Path, case: Case, adapter) -> runs.CaseResult:
+        base = session.SessionState()
+        base.adapter = adapter
+        base.model = 'fake'
+        try:
+            return runner.run_case(case, base, [base.adapter],
+                                   tmp_path / 'out')
+        finally:
+            _clear_handlers()
+
+    def test_fake_sandbox_case_end_to_end_checks_see_the_copy(
+            self, tmp_path: Path, monkeypatch) -> None:
+        cleaned = _sandbox_ready(monkeypatch)
+        seen: dict = {}
+
+        def work(st) -> None:
+            # What an applied sandbox_submit leaves behind: the fix in the
+            # real tree (the copy is the cwd) and the verb on the record.
+            copy = Path.cwd()
+            seen['copy'] = copy.resolve()
+            src = (copy / 'wordcount.py').read_text(encoding='utf-8')
+            (copy / 'wordcount.py').write_text(
+                src.replace("text.split(' ')", 'text.split()'),
+                encoding='utf-8')
+            st.messages.append({'role': 'tool', 'tool_name': 'sandbox_submit',
+                                'content': 'Gate verdict: intended'})
+        case = _sandbox_case(tools_used_all=['sandbox_submit'],
+                             files_changed=['wordcount.py'],
+                             fixture_tests_pass=True,
+                             answer_contains=['fixed'])
+        res = self._run(tmp_path, case, SpawningAdapter(work))
+        obs = res.observed
+        assert obs['error'] == '', obs
+        assert res.passed is True, res.checks
+        assert obs['files_changed'] == ['wordcount.py']
+        assert obs['fixture_tests_pass'] is True
+        assert obs['answer'] == 'fixed: the worker applied it'
+        assert obs['spawned'] == 1 and 'sandbox_submit' in obs['tools_used']
+        # The stable path, under the isolated root, and the verbs' copies
+        # were cleaned before the checks — the copy itself only afterwards.
+        root = runner.sandbox_root() / runner.SANDBOX_WORKDIR
+        assert seen['copy'] == (root / 'cli-tool').resolve()
+        assert cleaned == [True]
+        assert not root.exists()
+
+    def test_replaced_copy_is_a_clear_error_not_a_clean_diff(
+            self, tmp_path: Path, monkeypatch) -> None:
+        """The dependency-request shape: a concurrent ``run_case`` in
+        another process emptied and re-made the stable path mid-run."""
+        _sandbox_ready(monkeypatch)
+
+        async def replace_copy(self, prompt, timeout=None):
+            copy = Path.cwd()
+            (copy / 'wordcount.py').write_text('edited\n', encoding='utf-8')
+            shutil.rmtree(copy)
+            runner.prepare_fixture('cli-tool', copy.parent)
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', replace_copy)
+        case = _sandbox_case(files_changed=['wordcount.py'])
+        res = self._run(tmp_path, case, FakeAdapter())
+        obs = res.observed
+        assert obs['error'].startswith(runner.COPY_LOST)
+        assert runner.SANDBOX_ROOT_ENV in obs['error']
+        assert obs['files_changed'] == [] and res.passed is False
+        assert [c['detail'] for c in res.checks] == [
+            f"error: {obs['error']}"]
+
+    def test_removed_copy_is_the_same_error_not_errno_2(
+            self, tmp_path: Path, monkeypatch) -> None:
+        _sandbox_ready(monkeypatch)
+
+        async def remove_copy(self, prompt, timeout=None):
+            shutil.rmtree(Path.cwd())
+            return _canned_agents()
+        monkeypatch.setattr(bench.BenchRun, 'run', remove_copy)
+        res = self._run(tmp_path, _sandbox_case(files_changed=[]),
+                        FakeAdapter())
+        assert res.observed['error'].startswith(runner.COPY_LOST)
+        assert 'Errno' not in res.observed['error']
+        assert res.passed is False
+
+    def test_raised_turn_fails_the_case_instead_of_the_stall_line(
+            self, tmp_path: Path, monkeypatch) -> None:
+        """The main agent's mailbox synthesis turn raises (in the run: the
+        cwd was gone). The case must say so; 'Let me check the result:'
+        is not the answer."""
+        def boom() -> None:
+            raise FileNotFoundError(2, 'No such file or directory')
+        case = _case(fixture='docs-only', files_changed=[],
+                     answer_contains=['fixed'])
+        res = self._run(tmp_path, case, SpawningAdapter(
+            lambda st: None, on_mailbox=boom))
+        obs = res.observed
+        assert obs['error'] == ('worker error: main: FileNotFoundError: '
+                                '[Errno 2] No such file or directory')
+        assert obs['answer'] == ''
+        assert res.passed is False
+        assert {c['detail'] for c in res.checks} == {f"error: {obs['error']}"}
+        # The mailbox delivery is on the transcript, unanswered.
+        with gzip.open(res.transcript_path, 'rt', encoding='utf-8') as fh:
+            agents = json.load(fh)
+        last = agents[0]['messages'][-1]
+        assert last['role'] == 'user'
+        assert last['content'].startswith('[result from agent1')
+
+    def test_clean_run_has_no_worker_error(self, tmp_path: Path) -> None:
+        case = _case(fixture='docs-only', files_changed=[],
+                     answer_contains=['fixed'])
+        res = self._run(tmp_path, case, SpawningAdapter(lambda st: None))
+        assert res.observed['error'] == '' and res.passed is True
+
+
+class TestFinalAnswer:
+    def _main(self, messages: list) -> Agent:
+        return _agent('main', [{'role': 'system', 'content': 'sys'},
+                               {'role': 'user', 'content': 'the prompt'},
+                               *messages])
+
+    def test_stall_line_before_an_unanswered_join_is_not_the_answer(
+            self) -> None:
+        agent = self._main([
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [('spawn', {'task': 't'})]},
+            {'role': 'tool', 'tool_name': 'spawn', 'content': 'Spawned'},
+            {'role': 'assistant', 'content': 'Let me check the result:',
+             'tool_calls': [('join', {'targets': 'agent1'})]},
+            {'role': 'tool', 'tool_name': 'join', 'content': 'Waiting'},
+            {'role': 'user', 'content': '[joined results]\n\nagent1: done'},
+        ])
+        assert bench._final_answer(agent) == ''
+
+    def test_synthesis_after_the_mailbox_message_is_the_answer(self) -> None:
+        agent = self._main([
+            {'role': 'assistant', 'content': 'Let me check the result:'},
+            {'role': 'user', 'content': '[joined results]\n\nagent1: done'},
+            {'role': 'assistant', 'content': 'The fix landed.'},
+        ])
+        assert bench._final_answer(agent) == 'The fix landed.'
+
+    def test_answer_after_a_nudge_and_tool_results_still_counts(
+            self) -> None:
+        agent = self._main([
+            {'role': 'assistant', 'content': ''},
+            {'role': 'user', 'content': turn._NUDGE_TEXT},
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [('read_file', {'path': 'x'})]},
+            {'role': 'tool', 'tool_name': 'read_file', 'content': 'text'},
+            {'role': 'assistant', 'content': 'Found it.'},
+        ])
+        assert bench._final_answer(agent) == 'Found it.'
+        # And the empty-answer shape of collect_metrics is unchanged.
+        assert bench._final_answer(self._main([])) == ''
+
+
+class TestNoLogFileUnderTests:
+    """The eval CLI calls ``log.setup``; under pytest that is a no-op so
+    the developer's ``~/.guru/guru.log`` is never touched (review M-7)."""
+
+    def test_cli_attaches_no_file_handler(self) -> None:
+        import logging
+        from guru import log
+        assert cli_main(['list']) == 0
+        assert log.setup() is None
+        assert not [h for h in log.log.handlers
+                    if isinstance(h, logging.FileHandler)]
+        assert log._configured is False
+
+
+# --- Package E: metrics, smells, matrix --------------------------------------
+
+def _measured_run(model_spec: str, verdicts: dict, tokens: int = 4_000,
+                  turns: int = 3, tool_bytes: int = 1_500, cost=0.1,
+                  smells=None, **kw) -> runs.Run:
+    r = _fake_run(model_spec, verdicts, {}, cost=cost, **kw)
+    for c in r.cases:
+        c.rubric = ''
+        c.metrics = {'tokens_in': tokens // 2, 'tokens_out': tokens // 4,
+                     'cache_read': tokens // 4, 'cache_write': 0,
+                     'tokens': tokens, 'tool_bytes': tool_bytes,
+                     'turns': turns, 'calls': turns + 1}
+        c.smells = dict(smells or {})
+    return r
+
+
+class TestRunCaseMetrics:
+    """``run_case`` stores the case's metrics and smells from the ledger
+    rows it appended (and only those)."""
+
+    def _record(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'LEDGER_ENABLED', True)
+
+        async def run_and_record(self, prompt, timeout=None):
+            ledger.submit('calls', {'tokens_in': 1000, 'tokens_out': 100,
+                                    'cache_read': 500, 'cache_write': 0,
+                                    'phase': 'step', 'cost_usd': 0.1})
+            ledger.submit('calls', {'tokens_in': 200, 'tokens_out': 20,
+                                    'phase': 'step', 'cost_usd': 0.1})
+            ledger.submit('calls', {'tokens_in': 50, 'tokens_out': 5,
+                                    'phase': 'complete', 'cost_usd': 0.1})
+            base = {'run_id': 'r', 'agent': 'main', 'task_id': 'k',
+                    'turn_id': 't'}
+            ledger.submit('tool_events', {
+                **base, 'tool': 'outline', 'args': {'path': 'a.py'},
+                'shown_bytes': 300})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'read_file', 'args': {'path': 'a.py'},
+                'shown_bytes': 4000})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'search_code', 'args': {'q': 'x'},
+                'shown_bytes': 100})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'search_code', 'args': {'q': 'x'},
+                'shown_bytes': 100})
+            ledger.submit('tool_events', {
+                **base, 'tool': 'write_file', 'args': {'path': 'b'},
+                'shown_bytes': 0, 'denied': 'mode'})
+            return _canned_agents()
+
+        monkeypatch.setattr(bench.BenchRun, 'run', run_and_record)
+
+    def test_metrics_and_smells_from_the_case_rows(self, tmp_path: Path,
+                                                   monkeypatch) -> None:
+        self._record(monkeypatch)
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path)
+        assert res.metrics == {
+            'tokens_in': 1250, 'tokens_out': 125, 'cache_read': 500,
+            'cache_write': 0, 'tokens': 1875, 'tool_bytes': 4500,
+            'turns': 2, 'calls': 3}
+        assert res.tokens == 1875 and res.turns == 2
+        assert res.smells == {'whole_file_after_outline': 1,
+                              'repeated_calls': 1, 'refused': 1}
+        assert res.smell_total() == 3
+        # a second case in the same out dir counts only its own rows
+        res2 = runner.run_case(_case(name='second'), base, [base.adapter],
+                               tmp_path)
+        assert res2.metrics == res.metrics and res2.smells == res.smells
+        assert set(res.metrics) == set(ledger.METRIC_KEYS)
+        assert tuple(res.smells) == runs.SMELL_KEYS
+
+    def test_no_rows_means_zero_metrics(self, tmp_path: Path, canned):
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path)
+        assert res.metrics['tokens'] == 0 and res.metrics['calls'] == 0
+        assert res.smells == {'whole_file_after_outline': 0,
+                              'repeated_calls': 0, 'refused': 0}
+
+    def test_case_smells_ignores_preactivated_search(self) -> None:
+        rows = [{'tool': 'search_tools', 'args': {'query': 'read_file'},
+                 'agent': 'a', 'task_id': 'k', 'turn_id': 't'}]
+        assert runner.case_smells(rows) == {
+            'whole_file_after_outline': 0, 'repeated_calls': 0,
+            'refused': 0}
+
+    def test_run_file_round_trips_metrics(self, tmp_path: Path,
+                                          monkeypatch) -> None:
+        self._record(monkeypatch)
+        base = _base()
+        r = runner.run_suite([_case()], None, tmp_path / 'out', base,
+                             [base.adapter], trajectory_dir=tmp_path)
+        loaded = runs.load(next((tmp_path / 'out').glob('*.json')))
+        assert loaded.cases[0].metrics == r.cases[0].metrics
+        assert loaded.cases[0].smells == r.cases[0].smells
+        row = (tmp_path / 'TRAJECTORY.md').read_text().splitlines()[-1]
+        assert row.endswith('|  | 1.9 | 2.0 |')
+
+
+class TestCliMetricsColumns:
+    def test_table_and_summary_show_tok_turns_and_smells(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a', 'b')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            r = _measured_run(model_spec, {'a': True, 'b': True},
+                              tokens=12_345, turns=4,
+                              smells={'whole_file_after_outline': 1,
+                                      'repeated_calls': 0, 'refused': 2})
+            r.cases[1].metrics = dict(r.cases[1].metrics, tokens=655,
+                                      turns=1)
+            r.cases[1].smells = {'whole_file_after_outline': 0,
+                                 'repeated_calls': 0, 'refused': 0}
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r')]) == 0
+        out = capsys.readouterr().out
+        head = out.splitlines()[0].split()
+        assert head == ['case', 'result', 'seconds', 'tok', 'turns',
+                        'smells', 'cost', 'detail']
+        row_a = next(ln for ln in out.splitlines() if ln.startswith('a '))
+        assert row_a.split()[:5] == ['a', 'PASS', '2.0', '12.3', '4']
+        assert 'whole-file 1, refused 2' in row_a
+        row_b = next(ln for ln in out.splitlines() if ln.startswith('b '))
+        assert row_b.split()[:6] == ['b', 'PASS', '2.0', '0.7', '1', '-']
+        assert '· tok 13.0k (6.5k/case) · turns 5 · smells 3 ·' in out
+
+    def test_old_results_without_metrics_read_dash(self, tmp_path, capsys,
+                                                   monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            return _fake_run(model_spec, {'a': True}, {})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r')]) == 0
+        out = capsys.readouterr().out
+        row = next(ln for ln in out.splitlines() if ln.startswith('a '))
+        assert row.split()[:6] == ['a', 'PASS', '2.0', '-', '-', '-']
+        assert '· tok ' not in out and '· smells' not in out
+
+    def test_aggregate_reports_tokens_and_turns_mean_and_spread(
+            self, tmp_path, capsys, monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+        tokens = iter([4_000, 6_000])
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            r = _measured_run(model_spec, {'a': True}, tokens=next(tokens),
+                              turns=3, smells={'refused': 1})
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r'), '--repeat', '2']) == 0
+        out = capsys.readouterr().out
+        agg = out.split('aggregate over 2 run(s):')[1]
+        assert agg.splitlines()[1].split() == [
+            'case', 'passes', 'cost', 'seconds', 'tok', 'turns', 'smells',
+            'rubric']
+        row = next(ln for ln in agg.splitlines() if ln.startswith('a '))
+        assert '5.0 ± 1.4' in row and '3.0 ± 0.0' in row
+        assert row.split()[-2:] == ['2', '-']         # smells summed
+
+    def test_aggregate_without_metrics_says_na(self, tmp_path, capsys,
+                                               monkeypatch) -> None:
+        cdir = _cli_case_dir(tmp_path, 'a')
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            r = _fake_run(model_spec, {'a': True}, {})
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        assert cli_main(['run', '--cases-dir', str(cdir), '--model', 'F|m',
+                         '--out', str(tmp_path / 'r'), '--repeat', '2']) == 0
+        agg = capsys.readouterr().out.split('aggregate over')[1]
+        row = next(ln for ln in agg.splitlines() if ln.startswith('a '))
+        assert row.count('n/a') == 2                  # tok and turns
+
+
+class TestCliMatrix:
+    def _cases(self, tmp_path: Path) -> Path:
+        cdir = tmp_path / 'cases'
+        cdir.mkdir()
+        (cdir / 'a.toml').write_text(
+            'name = "a"\nfixture = "docs-only"\nprompt = "hi"\n'
+            'tags = ["fast"]\n')
+        (cdir / 'b.toml').write_text(
+            'name = "b"\nfixture = "docs-only"\nprompt = "hi"\n')
+        return cdir
+
+    def test_one_run_and_one_row_per_model(self, tmp_path, capsys,
+                                           monkeypatch) -> None:
+        cdir = self._cases(tmp_path)
+        models_dir = tmp_path / 'models'
+        models_dir.mkdir()
+        (models_dir / 'sbp-litellm-aws-claude-4-5-haiku.json').write_text(
+            json.dumps({'model': 'SBP Litellm|aws/claude-4-5-haiku',
+                        'summary': {'tools': 12, 'ok': 11,
+                                    'schema_errors': 1}, 'tools': {}}))
+        (models_dir / 'ollama-qwen3-8b.json').write_text(
+            json.dumps({'model': 'Ollama|qwen3:8b', 'seconds': 3.0}))
+        seen: list = []
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.append((model_spec, [c.name for c in suite], kw))
+            ok = model_spec.startswith('SBP')
+            r = _measured_run(model_spec, {'a': True, 'b': ok},
+                              tokens=30_700 if ok else 44_450,
+                              tool_bytes=9_100 if ok else 12_850,
+                              seconds=65.5, cost=0.125 if ok else 0.0)
+            runs.save(r, out_root)
+            return r
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['matrix', '--cases-dir', str(cdir),
+                         '--models-dir', str(models_dir),
+                         '--models', 'SBP Litellm|aws/claude-4-5-haiku, '
+                                     'Ollama|qwen3:8b',
+                         '--out', str(tmp_path / 'r'), '--note', 'n1',
+                         '--num-ctx', '8192'])
+        assert code == 0
+        assert [(m, names) for m, names, _ in seen] == [
+            ('SBP Litellm|aws/claude-4-5-haiku', ['a', 'b']),
+            ('Ollama|qwen3:8b', ['a', 'b'])]
+        for spec, _, kw in seen:
+            assert kw['note'] == f'matrix {spec}: n1'
+            assert kw['num_ctx'] == 8192 and kw['routing'] is None
+            assert kw['allow_spend'] is False and kw['decisions'] is None
+            assert callable(kw['on_result'])
+            assert 'rubric_spec' not in kw          # matrix never grades
+        out = capsys.readouterr().out
+        assert '[evals] matrix: SBP Litellm|aws/claude-4-5-haiku' in out
+        lines = out.splitlines()
+        head = next(i for i, ln in enumerate(lines)
+                    if ln.split() == ['model', 'passed', 'tok', 'tool',
+                                      'kB', 'seconds', 'cost', 'contract'])
+        haiku, qwen = lines[head + 2], lines[head + 3]
+        assert haiku.split() == ['SBP', 'Litellm|aws/claude-4-5-haiku',
+                                 '2/2', '61.4', '18.2', '131.0', '$0.250',
+                                 '11/12']
+        assert qwen.split() == ['Ollama|qwen3:8b', '1/2', '88.9', '25.7',
+                                '131.0', '$0.000', '-']
+        assert 'runs: ' in out and 'compares' not in out
+
+    def test_routing_file_and_spend_are_passed(self, tmp_path, capsys,
+                                               monkeypatch) -> None:
+        cdir = self._cases(tmp_path)
+        routing_file = tmp_path / 'exp.toml'
+        routing_file.write_text(
+            '[routing]\ncontroller = true\n'
+            '[[routing.ladder]]\nadapter = "F"\nmodel = "w"\n'
+            'max_complexity = "hard"\n'
+            '[decisions]\nmode = "shadow"\n')
+        seen: dict = {}
+
+        def fake_suite(suite, model_spec, out_root, **kw):
+            seen.update(kw)
+            return _measured_run(model_spec, {'a': True})
+
+        monkeypatch.setattr(runner, 'run_suite', fake_suite)
+        code = cli_main(['matrix', '--cases-dir', str(cdir),
+                         '--models-dir', str(tmp_path / 'none'),
+                         '--models', 'F|m', '--tags', 'fast',
+                         '--routing', str(routing_file), '--allow-spend',
+                         '--out', str(tmp_path / 'r')])
+        assert code == 0
+        assert isinstance(seen['routing'], RoutingSettings)
+        assert seen['routing'].controller is True
+        assert seen['routing_name'] == 'exp'
+        assert seen['decisions'] is not None
+        assert seen['decisions'].mode == 'shadow'
+        assert seen['allow_spend'] is True
+        assert '1 case(s) per model' in capsys.readouterr().out
+
+    @pytest.mark.parametrize('argv, message', [
+        (['--models', 'nomodel'], "'Adapter|model'"),
+        (['--models', 'A|m,B|'], "'Adapter|model'"),
+        (['--models', ' , '], "'Adapter|model'"),
+        (['--models', 'A|m', '--tags', 'nope'], 'nope'),
+        (['--models', 'A|m', '--num-ctx', '-1'], '--num-ctx'),
+        (['--models', 'A|m', '--routing', 'absent.toml'], 'routing file'),
+    ])
+    def test_usage_errors(self, tmp_path, capsys, monkeypatch, argv,
+                          message) -> None:
+        cdir = self._cases(tmp_path)
+        monkeypatch.setattr(runner, 'run_suite',
+                            lambda *a, **k: pytest.fail('must not run'))
+        assert cli_main(['matrix', '--cases-dir', str(cdir),
+                         '--out', str(tmp_path / 'r'), *argv]) == 2
+        assert message in capsys.readouterr().err
+
+    def test_models_is_required(self, tmp_path) -> None:
+        with pytest.raises(SystemExit):
+            cli_main(['matrix', '--cases-dir', str(tmp_path)])
+
+    def test_run_suite_value_error_is_a_usage_error(self, tmp_path, capsys,
+                                                    monkeypatch) -> None:
+        cdir = self._cases(tmp_path)
+
+        def boom(*a, **k):
+            raise ValueError("no adapter 'A'")
+
+        monkeypatch.setattr(runner, 'run_suite', boom)
+        assert cli_main(['matrix', '--cases-dir', str(cdir), '--models',
+                         'A|m', '--out', str(tmp_path / 'r')]) == 2
+        assert "no adapter 'A'" in capsys.readouterr().err
+
+
+class TestContractCell:
+    @pytest.mark.parametrize('record, cell', [
+        (None, '-'), ({}, '-'), ({'summary': {'tools': 12}}, '-'),
+        ({'summary': {'ok': 3}}, '-'),
+        ({'summary': {'tools': 12, 'ok': 11}}, '11/12'),
+        ({'summary': {'tools': 12.0, 'ok': 11.0, 'schema_errors': 1}},
+         '11/12'),
+        ({'summary': {'tools': '12', 'ok': 11}}, '-'),
+        ({'summary': {'tools': 12, 'ok': True}}, '-'),
+        ({'summary': [12, 11]}, '-'),
+        ({'calls': 12, 'ok': 11}, '-'),        # the old, top-level shape
+    ])
+    def test_ok_over_tools_or_dash(self, record, cell) -> None:
+        from guru.evals.__main__ import contract_cell
+        assert contract_cell(record) == cell
+
+    def test_reads_the_committed_reports(self) -> None:
+        """The real shape ``bench/tool_contract.py`` writes: the cell
+        comes out of ``summary``, and the matrix finds the file by the
+        shared slug."""
+        from guru.evals.__main__ import contract_cell
+        models_dir = Path(__file__).resolve().parents[1] / 'evals' / 'models'
+        reports = sorted(models_dir.glob('*.json'))
+        assert reports
+        for path in reports:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            s = data['summary']
+            assert contract_cell(data) == f"{s['ok']}/{s['tools']}" != '-'
+            assert runs.load_contract(models_dir, data['model']) == data
+
+
+class TestBriefStorePerCase:
+    def test_sandbox_points_the_brief_store_next_to_the_copy(
+            self, tmp_path, monkeypatch) -> None:
+        from guru.repositories import briefs
+        copy = tmp_path / 'work' / 'cli-tool'
+        copy.mkdir(parents=True)
+        monkeypatch.setenv(briefs.BRIEFS_DIR_ENV, '/elsewhere')
+        repo = JsonlLedger(tmp_path / 'ledger')
+        with runner._sandbox(copy, config.MODE_AUTO, repo):
+            assert briefs.root() == tmp_path / 'work' / runner.BRIEFS_DIRNAME
+            assert briefs.root() != copy      # not inside the git copy
+        assert os.environ[briefs.BRIEFS_DIR_ENV] == '/elsewhere'
+        monkeypatch.delenv(briefs.BRIEFS_DIR_ENV)
+        with runner._sandbox(copy, config.MODE_AUTO, repo):
+            assert briefs.root().name == runner.BRIEFS_DIRNAME
+        assert briefs.BRIEFS_DIR_ENV not in os.environ

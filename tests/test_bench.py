@@ -205,7 +205,7 @@ class TestBenchRunner:
                 session.current().num_ctx = 4096
                 session.current().ctx_ceiling = 4096
 
-        monkeypatch.setattr(bench, '_build_adapters',
+        monkeypatch.setattr(bench, 'build_adapters',
                             lambda: [FakeAdapter()])
         monkeypatch.setattr(bench, '_adapter_for',
                             lambda name, built: built[0])
@@ -248,7 +248,7 @@ class TestBenchRunner:
                 session.current().num_ctx = 4096
                 session.current().ctx_ceiling = 4096
 
-        monkeypatch.setattr(bench, '_build_adapters',
+        monkeypatch.setattr(bench, 'build_adapters',
                             lambda: [FakeAdapter()])
         monkeypatch.setattr(bench, '_adapter_for',
                             lambda name, built: built[0])
@@ -283,7 +283,7 @@ class TestBenchRunner:
                 session.current().num_ctx = 4096
                 session.current().ctx_ceiling = 4096
 
-        monkeypatch.setattr(bench, '_build_adapters',
+        monkeypatch.setattr(bench, 'build_adapters',
                             lambda: [FakeAdapter()])
         monkeypatch.setattr(bench, '_adapter_for',
                             lambda name, built: built[0])
@@ -318,7 +318,7 @@ class TestBenchRunner:
                 session.current().num_ctx = 4096
                 session.current().ctx_ceiling = 4096
 
-        monkeypatch.setattr(bench, '_build_adapters',
+        monkeypatch.setattr(bench, 'build_adapters',
                             lambda: [FakeAdapter()])
         monkeypatch.setattr(bench, '_adapter_for',
                             lambda name, built: built[0])

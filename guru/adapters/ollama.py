@@ -12,12 +12,17 @@ import ollama
 
 from guru import config, log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo
+from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
+                                openai_tool_defs)
 from guru.domain import ledger, pricing, tools
 
-# Re-exported for callers/tests that reference it here; the shared turn loop
-# owns the act-nudge heuristic now (see guru.adapters.turn).
-_looks_like_preamble = turn.looks_like_preamble
+# Tool forcing: the Ollama chat API has no ``tool_choice``, so this
+# adapter never forces (``Adapter.forces`` stays False). The turn loop
+# then takes a text reply as the answer, and a controller's text is parsed
+# for the plan object (guru.domain.plan.from_text). Tools are sent as the
+# same schemas the other adapters send (from the specs, not by
+# introspecting the callables), so the nested ``plan`` schema arrives
+# intact.
 
 
 # Smallest context to fall back to before giving up on fitting into memory.
@@ -549,7 +554,7 @@ class OllamaAdapter(Adapter):
             model=session.model,
             messages=session.messages,
             think=self._supports_thinking(session.model),
-            tools=session.active_tools,
+            tools=openai_tool_defs(tools.active_specs()),
             options=options,
             stream=True,
         )
@@ -619,8 +624,7 @@ class OllamaAdapter(Adapter):
                 ui.console.print(
                     f"[yellow]\\[SKIP][/yellow] duplicate:"
                     f" {name}({arguments})")
-                content = (f"Already called {name} with these arguments."
-                           " Use the previous result.")
+                content = turn.DUPLICATE_RESULT.format(name=name)
             else:
                 content = tools.execute_tool(name, arguments)
             # tool_args is guru-only (the delegation nudge counts distinct

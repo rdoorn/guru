@@ -51,7 +51,9 @@ Requires the Ollama app running in the menu bar (for local models).
 | `/good [note]`, `/bad [note]` | Label the last completed turn (and the sub-agent tasks it spawned) in the ledger's `labels` stream |
 | `/ledger` | Print this run's spend: calls, tokens and cost per model, tasks per model, the three most expensive tasks |
 | `/tools` | Print the last turn's tool calls from the audit stream: tool, args head, seconds, bytes shown/produced, denials |
+| `/brief`, `/brief refresh`, `/brief slice <text>` | Show the project brief for the checked-out HEAD (built once, stored under `~/.guru/briefs/`), rebuild it, or preview the slice a worker gets for a task (see **Project brief**) |
 | `/routing`, `/routing off`, `/routing on` | Show the active routing configuration (mode, ladders, judges) or flip `mode` in `settings.toml` and reload it |
+| `/sandbox [status \| provision [--force] \| gate \| deps …]` | Inspect the project's sandbox, build its image, review the pending gate, manage dependency requests (see **Sandbox**) |
 | `exit` / `quit` | Exit |
 
 ## Roles & skills
@@ -143,10 +145,11 @@ lists recent unlabelled tasks with route, status, cost and transcript path
 for triage.
 
 The same ledger holds a `decisions` stream: guru's small closed-form
-decisions — is this reply a stall, does this task need a security /
-architecture / reliability reviewer, is a fetched page a prompt-injection
-attempt — can be handed to a fast local judge alongside the built-in
-heuristic. In `shadow` mode judges only *observe*: the heuristic still
+decisions — does this task need a security / architecture / reliability
+reviewer, is a fetched page a prompt-injection attempt — can be handed to a
+fast local judge alongside the built-in heuristic (the `stall` point is
+retired: the turn contract forces a tool call instead of judging a reply;
+its config keys are accepted and ignored). In `shadow` mode judges only *observe*: the heuristic still
 decides, and both answers are logged so the first few hundred can be
 reviewed before any judge is trusted. In `active` mode the points listed
 under `[decisions.active]` take the judge's answer: the judge runs
@@ -180,20 +183,23 @@ labels = true
 stall = 0.6
 ```
 
-Two points can act on a judge's verdict: `stall` (whether a turn is
-nudged) and `labels`, a margin-gated *tie-breaker* for the complexity label
+One point acts on a judge's verdict: `labels`, a margin-gated
+*tie-breaker* for the complexity label
 a controller puts on a spawned task — the judge's tier routes the task
 only when it differs from the controller's and beats the runner-up by
 `labels_margin`; the task row's `reason` then says
 `labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
 lost on margin leaves a row with `fallback_reason = "margin"` (the kind
-label is only observed). The default routing block also runs `panel`
-active: when its `needs_security` answer is yes for a review-kind task and
-no security worker was spawned, the orchestrator adds one
-(`reason` starts with `origin:panel`). `injection` stays shadow-only until
-the review loop promotes it. The promotion rule (100+ labelled rows, judge
-beats the heuristic, acceptable false-positive rate) and the labelling
-procedure are in `docs/review-loop.md`.
+label is only observed). `panel` asks the same judge `needs_security` over
+a review-kind task spawned without a security worker and, when active,
+has the orchestrator add one (`reason` starts with `origin:panel`); the
+default routing block keeps it **shadow** (`panel = false`) until
+labelled rows say otherwise — in three eval suites it answered no on
+every "correctness and security" review request, so its verdicts are
+recorded and measured, nothing acts on them. `injection` stays shadow-only
+until the review loop promotes it. The promotion rule (100+ labelled
+rows, judge beats the heuristic, acceptable false-positive rate) and the
+labelling procedure are in `docs/review-loop.md`.
 
 Judge specs are `ollama` or `ollama:<model>`, `encoder` or
 `encoder:<hf-model>` (default `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`)
@@ -203,6 +209,20 @@ judges need `uv sync --extra judge` (torch + transformers, about 1 GB);
 without it they are skipped with a log line and the heuristic runs alone.
 Design and measurements: `docs/plans/2026-09-23-routing-framework-design.md`,
 `bench/primitives/README.md`.
+
+Debugging what a remote adapter sends (prompt-cache misses, prefix
+stability): `GURU_DUMP_REQUESTS=<dir>` makes the LiteLLM and Anthropic
+adapters write every outgoing request's keyword arguments — model,
+messages, tools, system, `cache_control` markers — as JSON to
+`<dir>/<utc-timestamp>-<adapter>-<n>.json` (`n` counts requests in the
+process, so a listing is the request sequence). The files hold the request
+body only; the API key is held by the SDK client and never appears in
+them — but the body *is* the whole conversation: system prompt, every
+file the agent read, every gate diff and tool result. Treat the dump
+directory as sensitive and delete it after use. Diff two consecutive
+files of the same agent to see what moved in the cached prefix; the
+`calls` ledger stream has the matching `cache_read` / `cache_write`
+counts.
 
 ## Multi-agent
 
@@ -279,14 +299,15 @@ panel = "encoder"           # needs_security: one extra security reviewer
 injection = "injection"     # shadow: fetched pages checked for injection
 [decisions.active]
 labels = true
-panel = true
+panel = false               # shadow until labelled rows say otherwise
 ```
 
 For an `anthropic` adapter the model ids are the first-party ones
 (`claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5-5`). The
 `[decisions]` part is skipped when the file already has one, and without
-the `judge` extra (`uv sync --extra judge`) `labels` and `panel` are
-written `false` with a note: the encoder judges are then only observed.
+the `judge` extra (`uv sync --extra judge`) `labels` is written `false`
+with a note: the encoder judge is then only observed (`panel` is shadow
+either way).
 The measurements behind the block used Haiku 4.5 as the main (controller)
 model — pick it in `/models`; the routing table does not set the main
 model.
@@ -307,7 +328,9 @@ off, the ladder's `default` rung. With `type_router` on, a task whose
 `kind` has a per-kind ladder (`[[routing.ladders.<kind>]]`) uses it — the
 default block gives `review` its own ladder starting at Sonnet, so a
 trivial-labelled review never lands on Haiku; every other kind uses the
-default ladder. A rung naming an adapter that is not configured is dropped
+default ladder. Like `controller`, `type_router` needs no setting: it is on
+whenever a per-kind ladder is configured and `type_router = false` turns it
+off. A rung naming an adapter that is not configured is dropped
 with a warning at startup; an invalid table logs a warning and the defaults
 apply. The parent's own adapter/model is always *pre-approved*: it is the
 "no change" fallback, it never needs a spend confirmation and neither a scan
@@ -332,28 +355,69 @@ the local-only option: point the rungs at an Ollama adapter for a
 `local-only` setup, and at the sidecar for the `ollama` judge.
 
 **Controller mode.** `controller = true` turns the main agent into a
-coordinator: it converses, clarifies, decomposes with
-`spawn(task, kind, complexity, role, skill)`, polls with `check`, waits with
-`join` and synthesises — and never executes a task itself. Its tool set is
-exactly `spawn`, `check`, `join`, `use_skill` (no file or web tools). The
-key defaults to on as soon as any ladder rung is configured (a ladder
-without a controller is the configuration that over-read in the
-2026-09-24 real cases); set `controller = false` next to a ladder to keep
-the main agent hands-on, and it is off without a ladder. A controller
+coordinator that never executes a task itself. Its only tool is `plan`,
+and every reply is one forced `plan` call (`guru/domain/plan.py`):
+`{outcome: "answer" | "delegate", answer?, tasks?: [{goal, kind,
+complexity, files?, role?, skill?}]}`. `answer` is the reply (greetings,
+clarifications, follow-ups on delivered results — no worker runs; a
+simple question has no task). `delegate` hands the tasks to guru, which
+validates the plan in code — known `kind`/`complexity`, at least one task,
+and when the request names several concerns (correctness, security,
+performance, reliability, design, tests, docs — noun forms only; "fix",
+"test", "auth" and other everyday task words do not count) joined by
+"and", a comma, "&" or a sentence break, every named concern must appear
+in some task goal (`plan.coverage_concerns`; the handler reads the full
+request, not the ledger's 1000-character `request` column) — spawns every
+task on its routed rung (a `review` task takes the review ladder), joins
+them and ends the turn; the joined results resume the controller, which
+answers with `plan` again. A rejected plan gets one re-ask naming the
+problem; a second malformed plan ends the turn on a plain-text fallback
+with `protocol_violation = 1` in the row's `struggle` counters. `answer` is
+never rejected: an `answer` without text takes the round's own assistant
+text, and only when both are empty does the loop's empty-reply re-prompt
+apply (once, then the fallback). `plan` and `final_answer` are never
+suppressed as duplicate calls (the same plan again after a coverage
+re-ask is the accepted second try); a second `plan` in one round is
+refused unrun and the first one's verdict stands. A controller that keeps
+planning without an accepted plan is stopped after `turn._MAX_ROUNDS`
+(12) rounds, any other agent after `_MAX_TOOL_ROUNDS` (40) tool rounds:
+the turn ends on the last text with `protocol_violation`. One user request
+gets at most `plan.MAX_DELEGATE_ROUNDS` (3) `delegate` plans (counted in
+the history from the request, `plan.delegations_in`): the fourth is
+refused with a text that says to answer from the results in hand. The
+`plan` tool's own description states the controller's contract (it has no
+other tools; anything that needs a file, a command, a package, a test or
+the sandbox is delegated) — there is no prose hint and no heuristic on the
+answer text. The key
+defaults to on as soon as any ladder rung is configured; set
+`controller = false` next to a ladder to keep the main agent hands-on
+(`spawn`/`check`/`join`), and it is off without a ladder. A controller
 that does the work anyway is measured, not punished: the turn row carries
 `controller_executed = true` when it attempted any other tool or answered
-with more than 600 characters without spawning. A hands-on main agent has
-an over-read guard instead: after `OVER_READ_LIMIT` (8) distinct files
-read in one turn without a spawn it is told, once, to delegate
-(struggle counter `over_read`).
+with more than 600 characters without delegating.
 
-**Judges on the routing seam.** Two decision points act with the default
-block (`[decisions] mode = "active"`, see **Ledger and decisions**):
+**Turn contract.** Every other agent (workers, a hands-on main agent) ends
+its turn with a tool call: the tools it needs, then `final_answer(text)`.
+Adapters that can force a tool call do — Anthropic `tool_choice: any`
+(the Messages API rejects it together with extended thinking, so the
+controller's `plan` round is sent without thinking and a worker round is
+forced only on an adapter with `thinking = false`), LiteLLM `tool_choice:
+required` (a proxy that rejects it gets one retry without and forcing is
+turned off for that adapter). On a forcing adapter a text-only reply is a
+protocol violation: one deterministic re-prompt, then the text is the
+answer and `protocol_violation` is bumped. Ollama cannot force: a text
+reply is the answer, and a controller's text is parsed for the plan
+object first. The old preamble heuristic and its stall nudge are gone
+(`stall_nudges` stays a column, reading 0).
+
+**Judges on the routing seam.** Two decision points can act on the routing
+seam (`[decisions] mode = "active"`, see **Ledger and decisions**); the
+default block activates `labels` and keeps `panel` shadow.
 `labels` is a margin-gated tie-breaker for the controller's complexity
 label — the encoder judge's tier routes the task only when it differs from
 the controller's and beats the runner-up by `labels_margin` (the task
 row's `reason` then says `labels:judge override standard->hard (0.57 vs
-0.33)`); `panel` asks the same judge `needs_security` over every
+0.33)`); `panel`, when active, asks the same judge `needs_security` over every
 `review`-kind task a controller spawns without a security reviewer (role
 `security-engineer` or a skill containing `security`), and on *yes* guru
 spawns one extra `security-engineer` worker on the same task with the
@@ -455,6 +519,16 @@ Remote models are queried for their context window; no memory is shown.
 
 ## Configuration
 
+**Defaults.** guru works without any settings file: every feature that is
+meant to be used is on by default, and a parameter exists only to turn it
+off or to tweak a number or a choice — never to switch the intended
+behaviour on. The routing block is written for you when a remote adapter
+is enabled, the ledger records from the first call, a provisioned project
+is sandboxed without a `.guru/sandbox.toml`, and an eval that may spend
+grades its rubric cases. [`docs/defaults.md`](docs/defaults.md) lists every
+knob with its default, what it does and why it exists; the tables below
+name the defaults inline.
+
 **Global** — `~/.guru/`:
 
 - `GURU.md` — the base system prompt, appended to the built-in one. Edit it to
@@ -493,7 +567,13 @@ Remote models are queried for their context window; no memory is shown.
     benchmark; a model that stalls past it is cancelled and recorded as a
     timeout (default `600`; `0` disables the guard).
 - `[routing]`, `[[routing.ladder]]`, `[[routing.ladders.<kind>]]` — see
-  **Routing (controller and ladder)** above.
+  **Routing (controller and ladder)** above (written for you at startup when
+  a remote adapter is enabled; `/routing off` turns it off).
+- `[decisions]`, `[ledger]` (`enabled`, `turn_line`, both `true`),
+  `[pricing."<model>"]` — see **Ledger and decisions** above.
+- `[evals]` (`model`, `num_ctx = 8192`) — see `evals/README.md`.
+- `[sandbox]` — global container limits and pinned images; see **Sandbox**
+  below.
 
 **Per-project** — a `.guru/` folder in the current directory, so project
 state travels with the project (created lazily on first write):
@@ -505,6 +585,8 @@ state travels with the project (created lazily on first write):
 - `.guru/read_dirs_allow.txt` / `.guru/write_dirs_allow.txt` — approved
   file-read / file-write directories.
 - `.guru/tools.toml` — the project's tool policy (see **Audited tools**).
+- `.guru/sandbox.toml` — optional: `enabled = false` turns the sandbox off
+  for this project, other keys tweak its limits (see **Sandbox**).
 - `.guru/memory/*.memory` — saved conversations, one JSON file per `/save`.
 
 ## Access modes & safeguards
@@ -541,15 +623,91 @@ Registry tools:
 
 - **Filesystem** — `list_dir`, `list_tree`, `read_file`, `search_code`
   (grep), `write_file`, `edit_file`, `delete_file`. All are restricted to
-  allowed directories and gated by the access mode.
+  allowed directories and gated by the access mode. `read_file` is
+  **structural** on long files: a file up to 200 lines
+  (`files.READ_OUTLINE_LINES`) reads whole; a longer one without `lines=`
+  returns its def/class outline with line ranges, the first 20 lines and
+  how to fetch a span -- never the text -- and one `lines='a-b'` call
+  returns at most 800 lines (`files.READ_RANGE_SPAN`; an explicit span is
+  a deliberate choice, so it is wider than the 200-line structural
+  threshold). A whole-file read of a long file is impossible, not
+  discouraged.
 - **Web** — `web_search`, `web_fetch`, `fetch_github_releases`.
 - **Code** — the eight audited verbs below.
 - **Sandbox** — `sandbox_run`, `sandbox_python`, `sandbox_diff`,
-  `sandbox_submit`, `request_dependency`; advertised only in a project
-  with a provisioned sandbox image (see Sandbox below).
+  `code_health`, `sandbox_submit`, `request_dependency`; advertised only
+  in a project with a provisioned sandbox image (see Sandbox below).
 
-`search_tools`, `use_skill`, and (for delegation-capable agents) `spawn`,
-`check`, `join` are always available and not part of the registry.
+`search_tools`, `use_skill`, `final_answer` and (for delegation-capable
+agents) `spawn`, `check`, `join` are always available and not part of the
+registry; a controller has `plan` alone (see **Controller mode**).
+
+**Strict arguments.** Every call -- registry or always-on tool -- is
+validated against the tool's spec before anything runs
+(`tools.validate_arguments`): an object of named parameters, no unknown
+parameter, every required one present, each value of its declared type
+(`str` by default; `int`, `bool` and `list` are coerced from the strings a
+provider sends, so `depth="3"` and `argv='["pytest", "-q"]'` are fine but
+`argv="pytest -q"` is not) and within its enum (`find_symbol kind`,
+`spawn kind`/`complexity`, `lint detail`). A rejected call returns ONE line
+-- the problem, the expected shape and an example, e.g.
+`Invalid arguments: read_file is missing required 'path'. Expected
+read_file(path: str, lines?: str), e.g. read_file(path='src/app.py',
+lines='40-80')` -- counts as a tool error and is audited with `ok = false`.
+
+**Review tasks are read-only.** `toolpolicy.for_kind(kind)` names the tools
+a task of that kind neither sees nor may call; for `review` that is every
+write tool (`write_file`, `edit_file`, `apply_patch`, `delete_file`,
+`sandbox_run`, `sandbox_python`, `sandbox_submit`, `request_dependency`) —
+a reviewer reads and reports; it neither edits nor runs commands in the
+sandbox copy (`sandbox_diff` and `code_health` stay). The orchestrator
+passes the kind to `tools.initial_tools(..., kind=)` and sets
+`session.task_kind`; a hidden tool named anyway answers
+`Refused: <tool> is not available to a review task (read-only) ...` and is
+recorded with `denied = "kind"`.
+
+### Project brief
+
+`guru.domain.brief` builds, once per checked-out HEAD, what a worker needs
+before its first tool call: the file map (directories with counts,
+top-level modules), a capped def/class outline per Python module, a symbol
+index (name -> `path:line`), how to run the tests (`make test` when the
+Makefile has the target, else pytest/unittest as configured) and the
+conventions declared in `pyproject.toml` `[tool.*]` sections (plus
+`[flake8]` from `.flake8`/`setup.cfg`). The walk stops outlining after 3 s
+(`BUILD_BUDGET_S`) and keeps counting; on guru itself a build takes about
+0.2-0.6 s. Briefs are stored as JSON under
+`~/.guru/briefs/<project-key>/<head_sha>.json` (`guru.repositories.briefs`;
+`GURU_BRIEFS_DIR` overrides the root, five briefs per project and twenty
+project directories kept, oldest removed on save) and rebuilt when HEAD
+changes or on `/brief refresh` (`guru.briefcmd`). The eval runner points
+`GURU_BRIEFS_DIR` inside each case's workdir, so fixture copies never
+leave briefs under your home. Outline signatures show defaults as `...`
+(`def f(a, b=...)`) so no project string literal lands in a system prompt.
+
+`brief.slice(brief, task_text, max_tokens=1500)` is what a worker gets in
+its system context (`[project brief]`): the map, the test command, then
+the outline of every module the task names (by path, basename or stem) and
+the location of every code-like symbol it names, cut at a 4-chars-per-token
+estimate. The controller gets `brief.render_map(brief)` in its system
+context (`[project map]`). The orchestrator loads the brief once per
+(root, HEAD) and hands the same object to the controller and every child
+(`Orchestrator.project_brief`); a brief that cannot be built is logged and
+left out — it is a saving, never a dependency.
+
+### Tool contract benchmark
+
+`bench/tool_contract.py --model 'Adapter|model' [--out evals/models]
+[--web] [--only a,b]` qualifies a model by measurement: one canned
+mini-task per tool on a fresh copy of the `cli-tool` fixture, the call
+forced where the provider allows it (Anthropic and OpenAI-style
+`tool_choice`; Ollama is asked), up to three attempts with the corrective
+line fed back. Per tool it records whether a call came, whether it was the
+right tool, schema errors, retries, whether the executed call did the job,
+tokens, USD and seconds; the result lands in `evals/models/<slug>.json`
+(the eval matrix reads it for its `contract` column) and prints as a table.
+Web tools need `--web`; the sandbox verbs are listed as skipped until the
+fixture has an image.
 
 ### Audited tools
 
@@ -612,8 +770,8 @@ timeout_s = 60             # per-project subprocess ceilings (see [tools.limits]
 
 No file means everything is enabled. `disabled` wins over `enabled`; a
 non-empty `enabled` list is an allowlist for registry tools. The always-on
-tools (`search_tools`, `use_skill`, `spawn`, `check`, `join`) are never
-subject to it. A disabled tool is not advertised at all — it is not
+tools (`search_tools`, `use_skill`, `final_answer`, `spawn`, `check`,
+`join`, and a controller's `plan`) are never subject to it. A disabled tool is not advertised at all — it is not
 pre-activated, `search_tools` does not return it and it is absent from the
 tool schemas the model sees — and if the model names it anyway the call
 answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
@@ -622,8 +780,8 @@ answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
 **Fail closed.** If the policy file is present but invalid (unknown key,
 unknown runner, bad limit, broken TOML) or unreadable, guru reports the
 problem at startup (naming the file) and disables *every* registry tool
-until it is fixed or removed — only `search_tools`, `use_skill`, `spawn`,
-`check`, `join` remain. A policy meant to restrict tools can never widen
+until it is fixed or removed — only `search_tools`, `use_skill`,
+`final_answer`, `spawn`, `check`, `join` (or a controller's `plan`) remain. A policy meant to restrict tools can never widen
 them by mistake.
 
 **Audit.** Every tool call — allowed, refused or unknown — writes one row to
@@ -644,19 +802,27 @@ gate. Design and plan:
 `pyproject.toml` + `uv.lock`. Only lockfile-declared packages exist in the
 image; the model never installs anything.
 
-**Enable.** Create `.guru/sandbox.toml` in the project (global defaults live
-in `[sandbox]` of `~/.guru/settings.toml`; the project file overrides key by
-key and is the only place `enabled` is read from):
+**Default: on once provisioned.** No file is needed: as soon as the
+project has a provisioned image (below) the sandbox verbs replace the
+direct write tools. Guru does not provision by itself (an image build takes
+minutes, needs Colima and asks to allow the PyPI hosts), so
+`/sandbox provision` is the one explicit step. `.guru/sandbox.toml` is
+optional — the off switch for a project, or a per-project tweak of the
+`[sandbox]` limits in `~/.guru/settings.toml` (the project file wins key by
+key; `enabled` is read from the project file only):
 
 ```toml
 [sandbox]
-enabled = true
+# enabled = false                            # turn the sandbox off for this project
 # base_image = "python:3.12-slim@sha256:…"   # digest-pinned, or refused
 # cpus = 2.0
 # memory_mb = 2048
 # pids = 256
 # timeout_s = 600                            # wall clock per container run
 ```
+
+With `enabled = false` the verbs are hidden (and refused if named), the
+write tools come back and `/sandbox provision` refuses.
 
 **Provision.** `/sandbox provision` (or `--force`) generates a Dockerfile
 from `pyproject.toml` + `uv.lock`, asks once to allow `pypi.org` and
@@ -674,15 +840,22 @@ path.
 
 **The verbs.**
 
-- `sandbox_run(argv)` — a fixed argv (`argv[0]` one of `python`, `pytest`,
-  `uv`, `ruff`, `mypy`, `flake8`, `make`; shells refused) in the task's
+- `sandbox_run(argv)` — a fixed argv as a JSON list (`argv[0]` one of
+  `python`, `pytest`, `uv`, `ruff`, `mypy`, `flake8`, `make`; shells
+  refused; a plain string is split on whitespace only) in the task's
   copy inside the container: `--network none`, unprivileged user, all
-  capabilities dropped, read-only root, tmpfs `/tmp`, cpu/memory/pid limits,
-  wall-clock kill. Digest: exit code and the first lines of output;
-  `detail` returns the last 4 KB.
+  capabilities dropped, read-only root, tmpfs `/tmp` (also `HOME`),
+  `.git` read-only, cpu/memory/pid limits, wall-clock kill. Digest: exit
+  code and the first lines of output; `detail` returns the last 4 KB.
 - `sandbox_python(code)` — runs a Python snippet the same way (arbitrary
   code is fine *inside* the sandbox; that is what it is for).
 - `sandbox_diff()` — per-file `+/-` counts of the copy against the project.
+- `code_health(path='')` — the copy's changed or new Python functions with
+  their metrics (lines, cyclomatic complexity, nesting depth, arguments,
+  returns) and a verdict per function — `degraded | improved | unchanged`
+  against the gate's thresholds — so a worker can fix a degraded function
+  before it submits; `path` narrows to one file (an unchanged file shows
+  its current metrics). Digest capped at 600 chars.
 - `sandbox_submit(intent)` — the only way changes reach the real tree: the
   copy's diff goes through the gate with the agent's stated intent.
 - `request_dependency(name, constraint)` — records a package request;
@@ -690,11 +863,13 @@ path.
 
 **The gate.** Two stages. Deterministic rules first: paths inside the
 project and outside the noise dirs, a size cap, the secret scanner over
-added lines, and red-flag patterns (process/network/eval primitives,
-encoded blobs, skipped tests, removed asserts, CI/config/conftest edits).
+added lines, red-flag patterns (process/network/eval primitives,
+encoded blobs, skipped tests, removed asserts, CI/config/conftest edits),
+the `destructive` rules and the code-health rules (both below).
 Then an AI reviewer (the configured `gate` judge, else the routing ladder's
 `standard` rung, else the session model) answers a fixed question set over
-the user's request, the task, the intent and the diff. Three verdicts:
+the user's request, the task, the intent, guru's change summary and
+code-health rows, and the diff. Three verdicts:
 
 - `intended` — applied via `apply_patch` (auto mode; ask mode shows the
   diff and asks first).
@@ -707,9 +882,76 @@ up as a `delete` flag (`deletes <path> (N lines)`, informational) and in
 the change summary the reviewer sees, and the reviewer answers whether
 every deletion is something the *user's request* asked for
 (`deletions_requested`); a `no` makes the verdict `unclear`, a `yes` with
-an otherwise clean review is applied like any edit. `apply_patch` accepts
-deletions (`+++ /dev/null`) whose body equals the file exactly, inside and
-outside the sandbox — one patch algebra.
+an otherwise clean review is applied like any edit. A file *emptied* in
+the copy (every line removed, the file kept) is treated as a deletion
+throughout: `empties <path> (N lines; file kept)`, an `emptied` marker in
+the change summary, and the destructive counts below. `apply_patch`
+accepts deletions (`+++ /dev/null`) whose body equals the file exactly,
+inside and outside the sandbox — one patch algebra.
+
+*Destructive changes* are never auto-applied: a rename (the patch algebra
+refuses them; the headers are scanned only when the diff failed to
+parse), more than 3 files deleted or emptied, more than 200 lines removed
+*gross* — added lines offset nothing, so padding a removal with blank or
+comment lines (or anything else) buys nothing; the flag reports how many
+added lines were content — or the deletion or emptying of any test file
+(under a `tests/`, `test/`, `testing/` or `tests_*/` directory, or named
+`test_*.py`, `*_test.py`, `*_tests.py`, `conftest.py`) raises a
+`destructive` flag naming the files, and the verdict is `unclear` at
+most — the user is asked, whatever the reviewer says. The two thresholds
+hold over the *whole task*, not per submit: guru keeps a per-task tally
+of the files deleted and lines removed by the submits it already
+applied, and a submit that would push the running total over a threshold
+is flagged with both numbers (`deletes 2 files now, 5 in this task (more
+than 3)`). Once a task is over the removed-lines threshold, a later
+submit is flagged for it only when it removes at least one substantive
+(non-blank, non-comment) line itself, and a submit that deletes no file
+is never flagged for the task's earlier deletions. The tally is cleared
+when the task ends; for an agent that runs no task (the main agent in a
+hands-on session) the tally is the current user turn's, so a new turn
+starts from zero while the agent's working copy lives on. A file reduced
+to blank and comment lines only (a `# removed` left behind) counts as
+emptied.
+
+*Code health* (`guru/domain/health.py`, pure `ast`): for every Python
+function the diff changes or adds, the gate compares the copy's baseline
+(`git show HEAD:<path>` in the copy) with the result and measures lines,
+cyclomatic complexity (branches, `except`, `with`, `assert`, comprehension
+`if`s, ternaries, `match` cases and boolean operands), maximum nesting
+depth, argument count (`self`/`cls` excluded) and return count. A function
+is `degraded` when a metric crosses a threshold it was under before
+(lines > 60, complexity > 10, nesting > 4, args > 6), when a new function
+is over one, or when a metric already over its threshold grows by more
+than 20%; `improved` when an over-threshold metric shrank; `unchanged`
+otherwise — pre-existing debt the change leaves alone is not flagged.
+Each degraded function is a `health` flag (`unclear` at most, never
+`suspicious`), and the reviewer's packet carries a "Code health" block
+computed by guru outside the untrusted fences listing the degraded and
+improved functions with before→after metrics. A source that does not
+parse is skipped, never an error; at most 20 Python files per diff are
+measured, and none when the deterministic rules already found the change
+suspicious (the verdict is settled). `code_health(path)` measures only
+that file (no other baseline is read) and refuses a path that resolves
+outside the copy — a symlink out of it included.
+
+*The baseline is guru's, not the worker's.* The gate compares the copy
+with the commit `prepare_copy` made, so that commit must be out of the
+container's reach: the copy is mounted read-write, but its `.git` is
+mounted read-only on top of it (`-v <copy>/.git:/work/.git:ro`), and the
+baseline commit's sha is kept in guru's memory next to the copy's path
+(the copy's marker file records it too, as documentation — nothing reads
+it back once the copy is made). `sandbox_diff`, `code_health` and
+`sandbox_submit` all verify `git rev-parse HEAD` against the kept sha
+before reading anything; a copy whose baseline moved is refused
+(`Refused: sandbox copy baseline changed`) and discarded, and so is one
+whose marker the worker removed or rewrote (`Refused: the sandbox copy's
+marker file was removed or changed`) — the directory is removed either
+way. The diff is read with `git diff --text`, so a `.gitattributes` the
+worker writes cannot turn it into `Binary files differ`. Inside the
+container `HOME` and
+`XDG_CACHE_HOME` point at the tmpfs `/tmp` (uid 1000 has no home and the
+root is read-only), so tool caches and tests that write under `HOME`
+work and nothing persists.
 
 In read-only mode a submit reports the diff and stops before the reviewer
 is consulted (nothing could be applied, so the diff never leaves the
@@ -778,10 +1020,12 @@ Provider adapters are configured in `~/.guru/adapters.toml` (see **Providers**).
 
 Make targets (local; there is no CI):
 
+- `make check` — the gate before a commit: `lint`, `typecheck`, `test`
+  and `test-sandbox` in that order (needs Colima for the last).
 - `make test` — run the test suite (pytest; container tests excluded).
 - `make test-sandbox` — the container integration tests against the
   local Colima (skipped when `docker info` fails).
-- `make lint` — flake8 over `guru bench tests`.
+- `make lint` — flake8 over `guru bench tests evals`.
 - `make typecheck` — mypy over `guru`.
 - `make bench` — run the headless coding-model benchmark, writing
   `bench/results-<timestamp>.json` plus a companion `transcript-<timestamp>.json`.

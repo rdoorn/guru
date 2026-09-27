@@ -13,13 +13,50 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-__all__ = ['ALWAYS_ON_TOOLS', 'ToolsPolicy', 'active_policy',
-           'is_enabled', 'set_policy']
+__all__ = ['ALWAYS_ON_TOOLS', 'KIND_HIDDEN_TOOLS', 'ToolsPolicy',
+           'WRITE_TOOLS', 'active_policy', 'for_kind', 'is_enabled',
+           'kind_refusal', 'set_policy']
 
 # Tools every agent has regardless of the project tool policy: discovery,
-# method selection and the delegation mailbox are not registry tools.
+# method selection, the delegation mailbox and the turn contract's own
+# calls (``final_answer``, a controller's ``plan``) are not registry tools
+# and are never gated.
 ALWAYS_ON_TOOLS = frozenset(
-    ('search_tools', 'use_skill', 'spawn', 'check', 'join'))
+    ('search_tools', 'use_skill', 'spawn', 'check', 'join', 'final_answer',
+     'plan'))
+
+# Every registry tool that changes files -- directly, or in the sandbox
+# copy (``sandbox_run`` executes a command in the copy; ``sandbox_python``
+# runs code there) and through the gate. The per-task-kind policy below
+# hides them: a reviewer reads, it neither edits nor runs.
+WRITE_TOOLS = frozenset((
+    'write_file', 'edit_file', 'apply_patch', 'delete_file',
+    'sandbox_run', 'sandbox_python', 'sandbox_submit',
+    'request_dependency'))
+
+# Per task kind (``guru.domain.routing.KINDS``): the registry tools a task
+# of that kind neither sees nor may call (structural round, Package C
+# item 3). A ``review`` task is read-only: a reviewer reports, it does not
+# edit. Kinds absent here hide nothing.
+KIND_HIDDEN_TOOLS: dict[str, frozenset] = {'review': WRITE_TOOLS}
+
+
+def for_kind(kind: object) -> frozenset:
+    """The tool names hidden from (and refused for) a task of ``kind``.
+
+    Case-insensitive; an unknown or empty kind hides nothing. The
+    orchestrator calls this when it configures a child (``initial_tools``
+    takes the same ``kind``) and ``execute_tool`` calls it with the bound
+    session's ``task_kind`` so a hidden tool named anyway is refused."""
+    key = str(kind).strip().lower() if isinstance(kind, str) else ''
+    return KIND_HIDDEN_TOOLS.get(key, frozenset())
+
+
+def kind_refusal(name: str, kind: object) -> str:
+    """The result text for a tool call ``for_kind`` refuses."""
+    return (f"Refused: {name} is not available to a {str(kind).lower()}"
+            " task (read-only): report the change you would make, with the"
+            " file and lines, instead of making it.")
 
 
 @dataclass

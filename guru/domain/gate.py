@@ -7,9 +7,24 @@ paths must lie inside the project and outside the noise directories, the
 diff must be under a size cap, the added lines are run through the bound
 secret scanner, and the ``RED_FLAG_PATTERNS`` (process/network/eval
 primitives, encoded blobs, skipped tests, removed asserts, CI/config
-edits) are matched; a deleted file is an informational ``delete`` flag
-(the reviewer's ``deletions_requested`` question decides whether the
-user asked for it). The patterns are a *triage filter*, not a parser: a
+edits) are matched; a deleted file — or an *emptied* one, whose hunk
+removes every line while the file stays — is an informational ``delete``
+flag (the reviewer's ``deletions_requested`` question decides whether
+the user asked for it); a rename, more than ``DESTRUCTIVE_DELETED_FILES``
+files deleted, more than ``DESTRUCTIVE_REMOVED`` lines removed (gross:
+added lines offset nothing, so padding a deletion with blank or comment
+lines buys nothing) or a deleted test file is a ``destructive`` flag (the
+change needs a human, whatever the reviewer says). The deleted-files and
+removed-lines thresholds also apply to the *task's running total*: the
+caller passes the :class:`Tally` of the submits it already applied as
+``prior``, so a worker cannot split a mass deletion across submits; the
+flag then names both the current and the cumulative numbers.
+:func:`health_flags_from` — over the :func:`health_deltas` the submit
+computes with the baseline sources in hand — adds a ``health`` flag per
+function :mod:`guru.domain.health` finds degraded, so a change that
+pushes a function over the size, complexity, nesting or argument
+thresholds is asked about, never auto-applied. The patterns are a
+*triage filter*, not a parser: a
 determined author can spell ``os.system`` in ways no regex anticipates,
 so a clean rules pass proves nothing — the reviewer is the backstop, and
 the rules exist to refuse the obvious without spending a review and to
@@ -25,7 +40,7 @@ handling per access mode lives in the endpoint
 (``guru.sandbox.verbs.sandbox_submit``).
 
 Stdlib only; imports sibling domain modules (``patch``, ``policy``,
-``files``, ``decisions``).
+``files``, ``decisions``, ``health``).
 """
 from __future__ import annotations
 
@@ -34,9 +49,9 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from guru.domain import decisions, files, patch, policy
+from guru.domain import decisions, files, health, patch, policy
 
 INTENDED, UNCLEAR, SUSPICIOUS = 'intended', 'unclear', 'suspicious'
 STATES = (INTENDED, UNCLEAR, SUSPICIOUS)
@@ -47,15 +62,42 @@ PACKET_DIFF_CHARS = 120_000         # diff text handed to the reviewer
 
 # Flag kinds. The first group makes a verdict suspicious on its own; the
 # second blocks ``intended`` (the change needs a human) but is not proof
-# of bad intent. ``delete`` is informational: it names what the diff
-# removes so the user and the reviewer see it; the verdict comes from the
-# reviewer's ``deletions_requested`` answer (and from the config/test
+# of bad intent: ``destructive`` (renames, mass deletions, deleted test
+# files) and ``health`` (a function degraded past a threshold) are
+# informational findings the user must see before anything is applied,
+# so they map to ``unclear`` at most. ``delete`` is informational and
+# blocks nothing: it names what the diff removes so the user and the
+# reviewer see it; the verdict comes from the reviewer's
+# ``deletions_requested`` answer (and from the config/test/destructive
 # flags a deleted file raises like an edited one would).
 SUSPICIOUS_KINDS = frozenset(('secret', 'noise', 'outside', 'exec',
                               'exec-alias', 'network'))
+HEALTH_KIND = 'health'
+DESTRUCTIVE_KIND = 'destructive'
 BLOCKING_KINDS = frozenset(('config', 'skip', 'assert-removed', 'size',
-                            'parse'))
+                            'parse', DESTRUCTIVE_KIND, HEALTH_KIND))
 DELETE_KIND = 'delete'
+# ``destructive`` thresholds, per submit and cumulative over a task: files
+# deleted (an emptied file counts), and lines removed *gross* over the
+# whole diff — added lines offset nothing.
+DESTRUCTIVE_DELETED_FILES = 3
+DESTRUCTIVE_REMOVED = 200
+# A deleted file under a ``tests``/``test``/``testing``/``tests_*``
+# directory or named like a test module is a destructive change on its
+# own.
+TEST_DIRS = frozenset(('tests', 'test', 'testing'))
+_TEST_DIR_RX = re.compile(r'^tests_.+$')
+_TEST_NAME_RX = re.compile(
+    r'^(?:test_.*\.py|.*_tests?\.py|conftest\.py)$')
+_RENAME_RX = re.compile(r'^rename (from|to) (.+)$')
+_COMMENT_RX = re.compile(r'^\s*(?:#.*)?$')     # a blank or comment-only line
+# Python files measured for code health per diff, at most (the rest are
+# skipped; a mass edit is a ``size``/``destructive`` matter, not a health
+# one).
+HEALTH_MAX_FILES = 20
+# The baseline reader a submit hands ``health_deltas``: the pre-change
+# source of a project-relative path, None when the file did not exist.
+BaselineReader = Callable[[str], Optional[str]]
 
 # Patterns matched against ADDED lines only: (kind, label, regex).
 _IMPORT = r'^\s*(?:import\s+{m}\b|from\s+{m}\s+import)'
@@ -184,27 +226,79 @@ class Verdict:
                              if self.reasons else '')
 
 
+@dataclass(frozen=True)
+class Section:
+    """One file of a diff: its ``path``, the ``added`` and ``removed``
+    line texts, ``deleted`` (``+++ /dev/null``) and ``emptied`` (the
+    hunks remove every line, add none, and the file stays). ``gone`` is
+    either: what the delete flag, the destructive counts and the test-
+    file rule treat as a deletion."""
+    path: str
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    deleted: bool = False
+    emptied: bool = False
+
+    @property
+    def gone(self) -> bool:
+        return self.deleted or self.emptied
+
+
+@dataclass(frozen=True)
+class Tally:
+    """Destructive counts of one diff or of a task's applied submits so
+    far: ``deleted`` files (emptied ones included), ``removed`` lines
+    gross and ``files`` touched. Added together with ``+``."""
+    deleted: int = 0
+    removed: int = 0
+    files: int = 0
+
+    def __add__(self, other: 'Tally') -> 'Tally':
+        return Tally(self.deleted + other.deleted,
+                     self.removed + other.removed, self.files + other.files)
+
+    def describe(self) -> str:
+        """``'3 file(s) touched, 1 deleted, 42 line(s) removed'``."""
+        return (f'{self.files} file(s) touched, {self.deleted} deleted, '
+                f'{self.removed} line(s) removed')
+
+
 # --- deterministic rules -----------------------------------------------------
 
-def _sections(diff_text: str) -> tuple[list, Optional[str]]:
-    """``([(path, added_lines, removed_lines, deleted)], parse_error)``
-    for a diff.
+def _emptied(added: list, removed: list, context: bool, deleted: bool,
+             new_file: bool) -> bool:
+    """Whether a section empties its file: lines removed, nothing
+    substantive added (no line, or only blank and comment lines — a
+    ``# removed`` left behind is still an emptied file), no context line
+    (so every line went), and the file neither deleted nor new."""
+    return bool(removed) and not substantive(added) and not context \
+        and not deleted and not new_file
+
+
+def _sections(diff_text: str) -> tuple[list[Section], Optional[str]]:
+    """``([Section, …], parse_error)`` for a diff, in diff order.
 
     Uses :func:`patch.parse` when it can; an unparsable diff (rename,
     binary, malformed) falls back to a raw scan of the ``---``/``+++``/
-    ``+``/``-`` lines so the red-flag rules still see every added line,
-    and reports the parse error.
+    ``+``/``-``/`` `` lines so the red-flag rules still see every added
+    line, and reports the parse error.
     """
     try:
         parsed = patch.parse(diff_text)
     except patch.PatchError as e:
         error = str(e)
     else:
-        out = []
+        out: list[Section] = []
         for fp in parsed:
+            tags = [tag for h in fp.hunks for tag, _t in h.lines]
             added = [t for h in fp.hunks for tag, t in h.lines if tag == '+']
-            out.append((fp.path, added, fp.removed_lines, fp.deleted))
+            removed = fp.removed_lines
+            emptied = _emptied(added, removed, ' ' in tags, fp.deleted,
+                               fp.new_file)
+            out.append(Section(fp.path, tuple(added), tuple(removed),
+                               fp.deleted, emptied))
         return out, None
+    # raw scan: path -> [added, removed, deleted, new_file, context_seen]
     sections: dict = {}
     current = ''
     pending_old = ''
@@ -216,7 +310,9 @@ def _sections(diff_text: str) -> tuple[list, Optional[str]]:
             deleted = new == patch._DEV_NULL
             current = pending_old if deleted else new
             if current and current != patch._DEV_NULL:
-                sections.setdefault(current, ([], [], deleted))
+                sections.setdefault(
+                    current, [[], [], deleted, pending_old == patch._DEV_NULL,
+                              False])
             else:
                 current = ''
         elif line.startswith('@@'):
@@ -225,7 +321,11 @@ def _sections(diff_text: str) -> tuple[list, Optional[str]]:
             sections[current][0].append(line[1:])
         elif line.startswith('-') and current:
             sections[current][1].append(line[1:])
-    return ([(p, a, r, d) for p, (a, r, d) in sections.items()], error)
+        elif line.startswith(' ') and current:
+            sections[current][4] = True
+    out = [Section(p, tuple(a), tuple(r), d, _emptied(a, r, c, d, n))
+           for p, (a, r, d, n, c) in sections.items()]
+    return out, error
 
 
 def _path_flags(rel: str, project: Path) -> list:
@@ -265,7 +365,8 @@ def _removed_asserts(added: list, removed: list) -> int:
 
 
 def rules(diff_text: str, project: Path,
-          max_bytes: int = MAX_DIFF_BYTES) -> list:
+          max_bytes: int = MAX_DIFF_BYTES,
+          prior: Optional[Tally] = None) -> list:
     """The deterministic flags for ``diff_text`` against ``project``.
 
     Size cap (``size``), unparsable diff (``parse``), every target path
@@ -277,9 +378,13 @@ def rules(diff_text: str, project: Path,
     of ``BASE64_MIN_CHARS`` over the file's concatenated added lines
     (``exec``), asserts removed without being re-added
     (``assert-removed``) and one informational ``delete`` flag per deleted
-    file (``deletes <path> (N lines)``; the path, config and assert rules
-    apply to a deleted file as to an edited one). Order: whole-diff flags,
-    then per file in diff order. Never raises for odd input.
+    file (``deletes <path> (N lines)``) or emptied file (``empties <path>
+    (N lines; file kept)``; the path, config and assert rules apply to a
+    deleted file as to an edited one), plus the :func:`destructive_flags`
+    with ``prior`` (the task's :class:`Tally` so far). Order: whole-diff
+    flags (size, parse, destructive), then per file in diff order. Never
+    raises for odd input. The ``health`` flags need the baseline sources
+    and are added by the caller (:func:`health_flags_from`).
     """
     text = diff_text or ''
     flags: list = []
@@ -292,10 +397,16 @@ def rules(diff_text: str, project: Path,
     sections, error = _sections(text)
     if error is not None:
         flags.append(Flag('parse', '', f'diff not applicable: {error}'))
-    for rel, added, removed, deleted in sections:
-        if deleted:
+    flags.extend(destructive_flags(text, (sections, error), prior=prior))
+    for sec in sections:
+        rel, added, removed = sec.path, list(sec.added), list(sec.removed)
+        if sec.deleted:
             flags.append(Flag(DELETE_KIND, '',
                               f'deletes {rel} ({len(removed)} lines)'))
+        elif sec.emptied:
+            flags.append(Flag(DELETE_KIND, '',
+                              f'empties {rel} ({len(removed)} lines; '
+                              'file kept)'))
         flags.extend(_path_flags(rel, project))
         findings = policy.scan('\n'.join(added))
         if findings:
@@ -315,15 +426,219 @@ def rules(diff_text: str, project: Path,
     return flags
 
 
+def _renames(diff_text: str) -> list[tuple[str, str]]:
+    """``(old, new)`` for every rename the diff's headers announce: git's
+    ``rename from``/``rename to`` pairs, and a ``---``/``+++`` pair naming
+    two different files. :func:`patch.parse` refuses both, so
+    :func:`destructive_flags` runs this header scan only over a diff that
+    failed to parse — a parsed diff has no rename, and a ``-- foo`` body
+    line can then never be mistaken for a header."""
+    out: list[tuple[str, str]] = []
+    pending_from = ''
+    pending_old = ''
+    for line in (diff_text or '').replace('\r\n', '\n').split('\n'):
+        m = _RENAME_RX.match(line)
+        if m:
+            if m.group(1) == 'from':
+                pending_from = m.group(2).strip()
+            elif pending_from:
+                pair = (pending_from, m.group(2).strip())
+                if pair[0] != pair[1] and pair not in out:
+                    out.append(pair)
+                pending_from = ''
+            continue
+        if line.startswith('--- '):
+            pending_old = patch._strip_prefix(line[4:])
+        elif line.startswith('+++ ') and pending_old:
+            new = patch._strip_prefix(line[4:])
+            real = patch._DEV_NULL not in (pending_old, new)
+            if (pending_old != new and real
+                    and (pending_old, new) not in out):
+                out.append((pending_old, new))
+            pending_old = ''
+    return out
+
+
+def is_test_path(rel: str) -> bool:
+    """Whether ``rel`` is a test file: under a ``TEST_DIRS`` (``tests``,
+    ``test``, ``testing``) or ``tests_*`` directory, or named ``test_*.py``
+    / ``*_test.py`` / ``*_tests.py`` / ``conftest.py``."""
+    parts = Path(rel).parts
+    return (any(part in TEST_DIRS or _TEST_DIR_RX.match(part)
+                for part in parts[:-1])
+            or bool(_TEST_NAME_RX.match(Path(rel).name)))
+
+
+def substantive(lines: list) -> int:
+    """How many of ``lines`` are neither blank nor comment-only (what an
+    added line has to be to count as content at all)."""
+    return sum(1 for ln in lines if not _COMMENT_RX.match(ln))
+
+
+def tally(diff_text: str, sections: Optional[list] = None) -> Tally:
+    """The :class:`Tally` of one diff: files deleted or emptied, lines
+    removed gross, files touched. ``sections`` is :func:`_sections`'s
+    list when the caller has it."""
+    if sections is None:
+        sections, _error = _sections(diff_text or '')
+    return Tally(deleted=sum(1 for sec in sections if sec.gone),
+                 removed=sum(len(sec.removed) for sec in sections),
+                 files=len(sections))
+
+
+def _count(n: int, noun: str) -> str:
+    """``'1 file'``, ``'2 files'`` (``noun`` is the plural)."""
+    return f'{n} {noun[:-1] if n == 1 else noun}'
+
+
+def _over(now: int, prior: int, limit: int, noun: str) -> str:
+    """``''`` when ``now + prior`` is within ``limit`` — or when this
+    submit adds nothing (``now`` is 0): a task already over the threshold
+    is not flagged again for a submit that does not remove; else the
+    clause naming the numbers: ``'4 files (more than 3)'`` without a
+    prior, ``'2 files now, 5 in this task (more than 3)'`` with one."""
+    total = now + prior
+    if total <= limit or now <= 0:
+        return ''
+    if prior <= 0:
+        return f'{_count(now, noun)} (more than {limit})'
+    return (f'{_count(now, noun)} now, {total} in this task '
+            f'(more than {limit})')
+
+
+def destructive_flags(diff_text: str,
+                      parsed: Optional[tuple[list, Optional[str]]] = None,
+                      prior: Optional[Tally] = None) -> list:
+    """The ``destructive`` flags of one submit: every rename (``renames
+    old -> new``; renames are looked for only in a diff
+    :func:`patch.parse` refused, since a parsed diff has none), more than
+    ``DESTRUCTIVE_DELETED_FILES`` files deleted or emptied (one flag
+    naming them), more than ``DESTRUCTIVE_REMOVED`` lines removed gross
+    over the whole diff (added lines offset nothing; the flag says how
+    many of them were content), and every deleted or emptied test file
+    (:func:`is_test_path`). With ``prior`` — the :class:`Tally` of the
+    task's earlier applied submits — the two thresholds are also checked
+    against the running total, and the flag names both numbers
+    (``deletes 2 files now, 5 in this task (more than 3)``); once the
+    task is over the removed-lines threshold, a later submit is flagged
+    for it only when it removes at least one substantive (non-blank,
+    non-comment) line itself, and a submit that deletes no file is never
+    flagged for the task's deletions. ``parsed`` is :func:`_sections`'s
+    return when the caller has it. Never raises."""
+    text = diff_text or ''
+    if parsed is None:
+        parsed = _sections(text)
+    sections, error = parsed
+    before = prior or Tally()
+    flags: list = []
+    if error is not None:
+        for old, new in _renames(text):
+            flags.append(Flag(DESTRUCTIVE_KIND, old,
+                              f'renames {old} -> {new}'))
+    gone = [sec.path for sec in sections if sec.gone]
+    clause = _over(len(gone), before.deleted, DESTRUCTIVE_DELETED_FILES,
+                   'files')
+    if clause:
+        flags.append(Flag(DESTRUCTIVE_KIND, '',
+                          f"deletes {clause}: {', '.join(gone)}"))
+    removed = sum(len(sec.removed) for sec in sections)
+    content_removed = substantive([ln for sec in sections
+                                   for ln in sec.removed])
+    if before.removed > DESTRUCTIVE_REMOVED and not content_removed:
+        # The task crossed the line-removal threshold in an earlier
+        # submit; this one removes no content (blank or comment lines at
+        # most), so it is not flagged for it again.
+        clause = ''
+    else:
+        clause = _over(removed, before.removed, DESTRUCTIVE_REMOVED,
+                       'lines')
+    if clause:
+        added = [ln for sec in sections for ln in sec.added]
+        flags.append(Flag(DESTRUCTIVE_KIND, '',
+                          f'removes {clause}; +{len(added)} added, '
+                          f'{substantive(added)} of them content'))
+    for sec in sections:
+        if sec.gone and is_test_path(sec.path):
+            verb = 'deletes' if sec.deleted else 'empties'
+            flags.append(Flag(DESTRUCTIVE_KIND, sec.path,
+                              f'{verb} test file {sec.path}'))
+    return flags
+
+
+# --- code health -------------------------------------------------------------
+
+def health_deltas(diff_text: str, baseline_reader: BaselineReader,
+                  paths: Optional[set] = None,
+                  max_files: int = HEALTH_MAX_FILES
+                  ) -> list[tuple[str, health.FunctionDelta]]:
+    """``(path, delta)`` for every changed or new function of every Python
+    file the diff edits or creates, in diff order (:func:`health.delta`
+    over the baseline the reader returns and the after-text rebuilt with
+    :func:`patch.apply_hunks`). With ``paths`` only those files are
+    measured (and only their baselines read); at most ``max_files``
+    files are measured either way. Deleted files, non-Python files, a
+    diff :func:`patch.parse` refuses, a file whose hunks do not apply to
+    the baseline and a source that does not parse contribute nothing; a
+    reader that raises counts as no baseline. Never raises."""
+    try:
+        parsed = patch.parse(diff_text or '')
+    except patch.PatchError:
+        return []
+    out: list[tuple[str, health.FunctionDelta]] = []
+    measured = 0
+    for fp in parsed:
+        if fp.deleted or not fp.path.endswith('.py'):
+            continue
+        if paths is not None and fp.path not in paths:
+            continue
+        if measured >= max_files:
+            break
+        measured += 1
+        before: Optional[str] = None
+        if not fp.new_file:
+            try:
+                before = baseline_reader(fp.path)
+            except Exception:                            # noqa: BLE001
+                before = None
+        try:
+            after = patch.apply_hunks(before or '', fp.hunks, fp.path)
+        except patch.PatchError:
+            continue
+        out.extend((fp.path, d) for d in health.delta(before, after))
+    return out
+
+
+def health_flags_from(deltas: list) -> list:
+    """One ``health`` flag per ``degraded`` row of ``deltas`` (as
+    :func:`health_deltas` returns them): ``'health: pkg/x.py: f: degraded
+    (lines 55→72 >60)'``. Informational: the kind is in
+    ``BLOCKING_KINDS``, so the verdict is ``unclear`` at most, never
+    ``suspicious``."""
+    return [Flag(HEALTH_KIND, rel, d.describe())
+            for rel, d in deltas if d.verdict == health.DEGRADED]
+
+
+def health_text(deltas: list) -> str:
+    """The ``degraded`` and ``improved`` rows of ``deltas`` (as
+    :func:`health_deltas` returns them), one ``path: name: verdict
+    (metric before→after)`` line each, degraded first; ``''`` when
+    nothing is notable."""
+    rows = [(rel, d) for rel, d in deltas if d.verdict != health.UNCHANGED]
+    rows.sort(key=lambda item: item[1].verdict != health.DEGRADED)
+    return '\n'.join(f'{rel}: {d.describe()}' for rel, d in rows)
+
+
 def has_suspicious(flags: list) -> bool:
     """True when any flag is of a ``SUSPICIOUS_KINDS`` kind."""
     return any(f.kind in SUSPICIOUS_KINDS for f in flags)
 
 
 def deleted_paths(diff_text: str) -> list:
-    """The files ``diff_text`` deletes, in diff order."""
+    """The files ``diff_text`` deletes or empties, in diff order, an
+    emptied one as ``'path (emptied)'``."""
     sections, _error = _sections(diff_text or '')
-    return [rel for rel, _a, _r, deleted in sections if deleted]
+    return [sec.path + (' (emptied)' if sec.emptied else '')
+            for sec in sections if sec.gone]
 
 
 # --- the reviewer's answers --------------------------------------------------
@@ -452,18 +767,20 @@ def decide(flags: list, review: Optional[dict]) -> Verdict:
 
 def packet_text(user_request: str, task: str, intent: str, diff: str,
                 max_diff_chars: int = PACKET_DIFF_CHARS,
-                nonce: Optional[str] = None) -> str:
+                nonce: Optional[str] = None, health_block: str = '') -> str:
     """The reviewer's input: the user's request, the sub-agent task (or a
-    note that the request is the task), the agent's stated intent and the
-    diff (cut at ``max_diff_chars`` with a marker).
+    note that the request is the task), the agent's stated intent, the
+    change summary, the code-health rows (``health_block``, as
+    :func:`health_text` renders them; omitted when empty) and the diff
+    (cut at ``max_diff_chars`` with a marker).
 
     The intent and the diff are the agent's own text, so each is fenced
     in ``<<<INTENT nonce>>> … <<<END nonce>>>`` / ``<<<DIFF nonce>>> …
     <<<END nonce>>>`` with a per-call random ``nonce`` the agent could not
     know when it wrote them; ``GATE_QUESTIONS`` tells the reviewer that
-    what lies inside is untrusted evidence. Between them sits guru's own
-    :func:`stat_text` of the diff, so deleted files are named outside the
-    fence.
+    what lies inside is untrusted evidence. Between them sit guru's own
+    :func:`stat_text` of the diff and the code-health rows, so deleted
+    files and degraded functions are named outside the fence.
     """
     tag = nonce or secrets.token_hex(8)
     body = diff or ''
@@ -480,6 +797,9 @@ def packet_text(user_request: str, task: str, intent: str, diff: str,
         f'<<<END {tag}>>>',
         '', 'Change summary (computed by guru from the diff):',
         stat_text(diff) or '(empty diff)',
+        *(('', 'Code health (computed by guru from the diff and the '
+            'original files; degraded functions need a human):',
+           health_block.strip()) if health_block.strip() else ()),
         '', 'Unified diff:', f'<<<DIFF {tag}>>>', body, f'<<<END {tag}>>>'))
 
 
@@ -494,29 +814,34 @@ def review_question(packet: str) -> decisions.Question:
 # --- diff statistics ---------------------------------------------------------
 
 def stat(diff_text: str) -> list:
-    """``[(path, added, removed, deleted)]`` per file of a unified diff,
-    in diff order (a ``git diff --stat`` computed from the text; a deleted
-    file has ``added == 0`` and ``deleted`` True)."""
+    """``[(path, added, removed, deleted, emptied)]`` per file of a unified
+    diff, in diff order (a ``git diff --stat`` computed from the text; a
+    deleted file has ``added == 0`` and ``deleted`` True; an emptied one
+    ``added == 0`` and ``emptied`` True)."""
     sections, _error = _sections(diff_text or '')
-    return [(rel, len(added), len(removed), deleted)
-            for rel, added, removed, deleted in sections]
+    return [(sec.path, len(sec.added), len(sec.removed), sec.deleted,
+             sec.emptied) for sec in sections]
 
 
 def stat_text(diff_text: str) -> str:
     """``'pkg/x.py | +3 -1'`` rows (``'| +0 -12 deleted'`` for a deleted
-    file) plus a totals line naming the deleted files; ``''`` for an empty
-    diff."""
+    file, ``'| +0 -12 emptied'`` for an emptied one) plus a totals line
+    naming the deleted and emptied files; ``''`` for an empty diff."""
     rows = stat(diff_text)
     if not rows:
         return ''
-    width = max(len(rel) for rel, _a, _r, _d in rows)
-    lines = [f'{rel:<{width}} | +{a} -{r}' + (' deleted' if d else '')
-             for rel, a, r, d in rows]
-    total_a = sum(a for _rel, a, _r, _d in rows)
-    total_r = sum(r for _rel, _a, r, _d in rows)
-    gone = [rel for rel, _a, _r, d in rows if d]
+    width = max(len(rel) for rel, *_rest in rows)
+    lines = [f'{rel:<{width}} | +{a} -{r}'
+             + (' deleted' if d else ' emptied' if e else '')
+             for rel, a, r, d, e in rows]
+    total_a = sum(a for _rel, a, *_rest in rows)
+    total_r = sum(r for _rel, _a, r, *_rest in rows)
+    gone = [rel for rel, _a, _r, d, _e in rows if d]
+    emptied = [rel for rel, _a, _r, _d, e in rows if e]
     lines.append(f'{len(rows)} file(s) changed, {total_a} insertion(s), '
                  f'{total_r} deletion(s)'
                  + (f", {len(gone)} file(s) deleted: {', '.join(gone)}"
-                    if gone else ''))
+                    if gone else '')
+                 + (f", {len(emptied)} file(s) emptied: "
+                    f"{', '.join(emptied)}" if emptied else ''))
     return '\n'.join(lines)

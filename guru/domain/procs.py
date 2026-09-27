@@ -167,6 +167,10 @@ def _environment(cwd: Path, home: str, env_extra: Optional[dict]
     env = {
         'PATH': os.environ.get('PATH') or _DEFAULT_PATH,
         'HOME': home,
+        # The child's temp dir is its scratch HOME too, removed with it: a
+        # project's tests that empty "the" temp dir (guru's own runner
+        # tests, run by the dogfood eval) never touch the shared one.
+        'TMPDIR': home,
         'LANG': os.environ.get('LANG') or _DEFAULT_LANG,
         'PYTHONDONTWRITEBYTECODE': '1',
         'PYTHONPATH': str(cwd),
@@ -229,7 +233,8 @@ def run(argv: list[str], cwd: Path, limits: Optional[Limits] = None,
     a refusal yields ``returncode=-1`` with ``denied`` set — starting with
     ``DENIED_PREFIX`` — and no child started). The child runs in its own
     session with a fresh environment (``PATH``, a temporary ``HOME`` removed
-    afterwards, ``LANG``, ``PYTHONDONTWRITEBYTECODE=1``,
+    afterwards and doubling as ``TMPDIR``, ``LANG``,
+    ``PYTHONDONTWRITEBYTECODE=1``,
     ``PYTHONPATH=<cwd>`` plus ``env_extra`` minus ``PROTECTED_ENV``), the
     rlimits of ``limits`` (via the exec shim) and a wall-clock timeout after
     which its whole process group is killed. stdout/stderr are captured to
