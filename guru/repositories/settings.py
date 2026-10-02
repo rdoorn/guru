@@ -105,7 +105,8 @@ __all__ = ['DecisionsSettings', 'RoutingSettings', 'RungSpec',
            'SandboxSettings', 'ToolsPolicy', 'default_routing_toml',
            'ensure_default_routing', 'ladders_from_settings',
            'cheapest_remote_spec', 'load_decisions', 'load_routing',
-           'load_sandbox', 'load_tools_policy', 'switch_routing']
+           'load_sandbox', 'load_tools_policy', 'migrate_labels_judge',
+           'switch_routing']
 
 MODE_OFF = 'off'
 
@@ -404,13 +405,20 @@ spend_confirm = "ask"       # ask (once per run) | auto | never
 secret_scan = true          # findings force local; remote tool output redacted
 
 """
+# The labels line as guru wrote it before 2026-10-02 (the NLI judge), and
+# as it writes it now: migrate_labels_judge swaps the first for the second
+# only when the line is byte for byte the untouched default.
+LABELS_ENCODER_LINE = ('labels = "encoder"          # complexity tie-breaker'
+                       " for the controller's label")
+LABELS_DECIDE_LINE = ('labels = "decide"           # complexity tie-breaker;'
+                      ' "encoder" = the NLI judge')
 _DECISIONS_TABLE = """
 [decisions]
 mode = "active"             # judges act on the points listed under active
 labels_margin = 0.15        # the labels judge's tier must beat its runner-up
 
 [decisions.points]
-labels = "encoder"          # complexity tie-breaker for the controller's label
+""" + LABELS_DECIDE_LINE + """
 panel = "encoder"           # needs_security: one extra security reviewer
 injection = "injection"     # shadow: fetched pages checked for injection
 
@@ -419,19 +427,19 @@ injection = "injection"     # shadow: fetched pages checked for injection
 panel = false               # shadow until labelled rows say otherwise
 """
 _JUDGE_EXTRA_NOTE = """\
-# The encoder judges need the judge extra (uv sync --extra judge);
-# until it is installed labels stays shadow (verdicts are logged,
-# nothing changes). Set it to true afterwards.
+# The judges need the judge extra (uv sync --extra judge);
+# until it is installed labels stays off (the controller's label
+# routes). Set it to true afterwards.
 """
 
 
 def _judge_extra_available() -> bool:
-    """True when the ``judge`` extra (torch + transformers) is importable;
-    a ``find_spec`` probe, so nothing heavy is loaded."""
+    """True when the ``judge`` extra (torch + transformers + gliner2) is
+    importable; a ``find_spec`` probe, so nothing heavy is loaded."""
     import importlib.util
     try:
         return all(importlib.util.find_spec(name) is not None
-                   for name in ('torch', 'transformers'))
+                   for name in ('torch', 'transformers', 'gliner2'))
     except (ImportError, ValueError):
         return False
 
@@ -578,6 +586,79 @@ def ensure_default_routing(adapters: Optional[list] = None,
         return 'invalid'
     config._apply_settings()
     return 'written'
+
+
+_TABLE_NAME = re.compile(r'^\s*\[(?P<name>[^\[\]]+)\]\s*(#.*)?$')
+
+
+def _labels_spec(data: dict) -> object:
+    points = data.get('decisions', {}).get('points', {})
+    return points.get('labels') if isinstance(points, dict) else None
+
+
+def migrate_labels_judge(path: Optional[Path] = None, *,
+                         judges_available: Optional[bool] = None) -> str:
+    """Move the ``labels`` point from the NLI judge to the decide judge in
+    the settings file (default ``config.GLOBAL_SETTINGS_PATH``) when its
+    ``[decisions.points]`` line is still exactly the one guru wrote
+    (:data:`LABELS_ENCODER_LINE`) and the ``judge`` extra (gliner2
+    included; default: probe it) is installed, so the working NLI
+    tie-breaker is never swapped for a judge that cannot load. A line the
+    user edited, any other table and every other byte (line endings
+    included) are kept; the rewrite is accepted only when the parsed
+    settings differ in ``decisions.points.labels`` alone. Re-applies the
+    settings after writing.
+
+    Measured 2026-10-02 on 325 real tasks: decide 0.83, NLI 0.46
+    (bench/primitives/README.md).
+
+    Returns ``'migrated'``, ``'unchanged'`` (no such line, no file, or the
+    extra missing) or ``'invalid'`` (the file cannot be read, parsed or
+    written).
+    """
+    target = Path(path) if path is not None else config.GLOBAL_SETTINGS_PATH
+    try:
+        text = target.read_bytes().decode('utf-8')
+    except FileNotFoundError:
+        return 'unchanged'
+    except (OSError, UnicodeDecodeError) as e:
+        log.warning('decisions: cannot read %s: %s', target, e)
+        return 'invalid'
+    try:
+        before = tomllib.loads(text)
+    except ValueError:                             # TOMLDecodeError
+        return 'invalid'
+    if _labels_spec(before) != 'encoder':
+        return 'unchanged'
+    if judges_available is None:
+        judges_available = _judge_extra_available()
+    if not judges_available:
+        return 'unchanged'
+    lines = text.splitlines(keepends=True)
+    table, hit = '', None
+    for i, line in enumerate(lines):
+        header = _TABLE_NAME.match(line)
+        if header:
+            table = header.group('name').strip()
+        elif (table == 'decisions.points'
+              and line.rstrip('\r\n') == LABELS_ENCODER_LINE):
+            hit = i
+            break
+    if hit is None:
+        return 'unchanged'
+    lines[hit] = LABELS_DECIDE_LINE + lines[hit][len(LABELS_ENCODER_LINE):]
+    new = ''.join(lines)
+    after = tomllib.loads(new)
+    after['decisions']['points']['labels'] = 'encoder'
+    if after != before:              # the line was not the table's key
+        return 'unchanged'
+    try:
+        target.write_bytes(new.encode('utf-8'))
+    except OSError as e:
+        log.warning('decisions: cannot write %s: %s', target, e)
+        return 'invalid'
+    config._apply_settings()
+    return 'migrated'
 
 
 _TABLE_HEADER = re.compile(r'^\s*\[')

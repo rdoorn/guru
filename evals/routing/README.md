@@ -22,7 +22,8 @@ agent only spawns, checks and joins), `spend_confirm = "auto"` (no prompt;
 `--allow-spend` is still required, see below) and `secret_scan = true`.
 Config 2 adds a `[decisions]` table: `mode = "active"` with the `panel`
 point on the `encoder` judge, the `injection` point on the `injection`
-judge and the `labels` point on the `encoder` judge, no sidecar LLM. Only
+judge and the `labels` point on the `decide` judge (GLiNER2.5-Decide; runs
+before 2026-10-02 used the `encoder` judge there), no sidecar LLM. Only
 `labels` is listed under `[decisions.active]`, so panel and injection stay
 shadow: they log their verdicts next to the heuristic's in the ledger
 `decisions` stream and never change what the run does. `labels` is an

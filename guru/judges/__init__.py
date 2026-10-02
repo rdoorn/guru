@@ -1,9 +1,10 @@
 """Judge implementations for the decision seam, and the settings -> judge
 factory. Specs (``[decisions.points]`` values): ``ollama`` /
-``ollama:<model>``, ``encoder`` / ``encoder:<hf-model>``, ``injection`` /
-``injection:<hf-model>``, ``llm:<Adapter>|<model>`` (the sandbox gate's
-reviewer on a provider adapter; needs the registry from
-:func:`set_registry`).
+``ollama:<model>``, ``encoder`` / ``encoder:<hf-model>`` (zero-shot NLI),
+``decide`` / ``decide:<hf-model>`` (GLiNER2.5-Decide; choice/score
+questions only), ``injection`` / ``injection:<hf-model>``,
+``llm:<Adapter>|<model>`` (the sandbox gate's reviewer on a provider
+adapter; needs the registry from :func:`set_registry`).
 
 Judges load their model lazily, which takes longer than the active-decision
 timeout, so the first active answer would always fall back to the
@@ -19,7 +20,7 @@ from typing import Optional
 
 from guru import config, log
 from guru.domain import decisions
-from guru.judges import encoder, llm, ollama_json
+from guru.judges import decide, encoder, llm, ollama_json
 
 
 def set_registry(registry: object, routing_cfg: object = None) -> None:
@@ -44,6 +45,11 @@ def build(spec: str) -> Optional[decisions.Judge]:
         if kind == 'encoder':
             return encoder.EncoderJudge(arg or encoder.NLI_MODEL)
         return encoder.InjectionJudge(arg or encoder.INJECTION_MODEL)
+    if kind == 'decide':
+        if not decide.available():
+            log.info('judge %r needs the extra: uv sync --extra judge', spec)
+            return None
+        return decide.DecideJudge(arg or decide.DECIDE_MODEL)
     log.info('unknown judge spec %r', spec)
     return None
 

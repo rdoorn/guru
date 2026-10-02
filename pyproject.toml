@@ -16,17 +16,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Encoder judges (guru/judges/encoder.py). Heavy (~1 GB of wheels):
+# Encoder judges (guru/judges/encoder.py, guru/judges/decide.py). Heavy
+# (~1 GB of wheels):
 #   uv sync --extra judge
+# transformers stays below 5: gliner2 2.x (the decide judge) requires it
+# (which also holds huggingface-hub below 1).
 judge = [
     "torch>=2.5",
-    "transformers>=4.45",
+    "transformers>=4.45,<5",
     "sentencepiece>=0.2",
     "protobuf>=5",
+    "gliner2[local]>=2.0,<3",
 ]
 
 [tool.uv]
 exclude-newer = "2026-08-06T00:00:00Z"
+# gliner2 2.0.0 (2026-08-24) is the first release with the GLiNER2.5
+# models' API; only it is allowed past the global cutoff.
+exclude-newer-package = { gliner2 = "2026-08-25T00:00:00Z" }
 
 [dependency-groups]
 dev = [

@@ -138,7 +138,8 @@ BENCH_MODEL_TIMEOUT = 600
 #                                #   override the controller's complexity
 #   [decisions.points]           # decision point -> judge spec
 #   stall = "ollama"             # ollama | ollama:<model> | encoder |
-#   panel = "encoder"            # encoder:<hf-model> | injection
+#   panel = "encoder"            # encoder:<hf-model> | injection |
+#   labels = "decide"            # decide | decide:<hf-model> (choice only)
 #   injection = "injection"
 #   [decisions.active]           # active mode: which points the judge decides
 #   stall = true
