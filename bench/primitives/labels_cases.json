@@ -1,0 +1,2305 @@
+[
+ {
+  "id": 0,
+  "task": "Read the files in the <dir> project and find the rollback procedure. Summarize it in exactly 3 bullets.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 1,
+  "task": "Find where save_upload is defined and who calls it in <dir> Use grep or symbol tools to find the definition and all callers without reading whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 2,
+  "task": "In the flaskish project at <dir> find where the function save_upload is defined and identify all the places that call it.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 3,
+  "task": "In the flaskish project at <dir> find where is_expired is defined, show the full function or code section, and identify what the logic bug is",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 4,
+  "task": "Run the test suite in <dir> using 'python -m pytest -q' and report which test fails and the failure message. Do not read source files, only run the tests and report the output.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 5,
+  "task": "Review the upload handler in the flaskish project (<dir> for path traversal vulnerabilities. Find the upload handler code, examine how it processes file paths, and identify any risks where an attacker could use relative paths (like ../ sequences) or absolute paths to write files outside the intended directory.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 6,
+  "task": "Repo path: <dir>\n\nThis is a small Python CLI tool (\"wordcount\") repo containing: wordcount.py, conftest.py, tests/test_wordcount.py, FIXTURE.md. Task is \"clean up the repo\" - identify any actual cleanup needed (dead code, unused imports, stray/leftover files, redundant artifacts, poor structure) as well as review the code for correctness, readability, and test quality/coverage. Read FIXTURE.md first for context on known planted facts in this fixture (there is a known intentional bug in count_words and one intentionally-failing test - do not treat fixing that bug as in scope unless it's clearly part of \"cleanup\"; just note it). Do NOT delete or modify tests/test_wordcount.py under any circumstances. Do not make any file changes yourself - only report findings and recommendations with concrete suggested fixes/diffs as text.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 7,
+  "task": "Repo path: <dir>\n\nThis is a small Python CLI tool (\"wordcount\") repo containing: wordcount.py, conftest.py, tests/test_wordcount.py, FIXTURE.md. Review the code for security concerns: injection risks, path traversal (it opens files named via argv), authz issues, hardcoded secrets, unsafe use of subprocess/eval/exec, unvalidated input handling, and any vulnerable or unpinned dependencies (check for a requirements/setup file). Read FIXTURE.md first for context - it describes this as a frozen eval fixture with an intentional bug unrelated to security. Do NOT delete or modify tests/test_wordcount.py under any circumstances. Do not make any file changes yourself - only report findings with severity levels and concrete recommended fixes.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 8,
+  "task": "Review the repository at <dir> for CORRECTNESS, READABILITY, and TESTS. It is a small stdlib-only Flask-like file-upload service: app/session.py (token creation/lookup/expiry), app/upload.py (save/read files), app/handlers.py (login/upload/whoami endpoints), tests/ (pytest). Read all files under app/ and tests/, plus README.md, before concluding anything. Report: (1) any logic bugs, especially in app/session.py::is_expired and any comparison/boundary errors, with file:line and the fix; (2) readability/maintainability issues; (3) test coverage gaps \u2014 note specifically whether tests cover expired-token behavior and edge cases, and whether the existing test suite would catch any bugs you find. Give findings by severity with concrete fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 9,
+  "task": "Review the repository at <dir> for SECURITY issues: injection, authorization/authentication flaws, secrets handling, path traversal, and vulnerable dependencies. It is a small stdlib-only file-upload service: app/session.py (token creation/lookup/expiry), app/upload.py (save/read files under a base directory using user-supplied paths), app/handlers.py (login/upload/whoami endpoints, with UPLOAD_ROOT='/srv/uploads'), tests/. Read all files under app/ and tests/, plus README.md, before concluding anything. Pay particular attention to how user-controlled path segments flow into app/upload.py's os.path.join calls, and how session token expiry is checked and enforced in app/handlers.py::_authenticate. Report concrete exploit scenarios (example requests), file:line, severity, and fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 10,
+  "task": "In the guru project at <dir>\n\n1. Find where `guru.ledger_cli tasks` table output is generated - look for the code that renders the tasks table in ledger_cli or related modules\n2. Identify the tasks stream's origin column in the data model/schema\n3. Add the origin column to the tasks table output\n4. Add a test that verifies the origin column appears in the tasks output\n5. Run the tests with pytest to verify everything works\n6. Use sandbox_diff to check your changes, then call sandbox_submit with a one-line intent describing what you added",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 11,
+  "task": "Fix the failing test in wordcount.py. First, identify what test is failing by running tests or inspecting the test file. Then debug and fix the issue in the code. Verify with run_tests before reporting the fix.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 12,
+  "task": "Delete the README.md file from the project root at <dir> Then commit these changes to git with a message describing what was done (fixed test and deleted README).",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 13,
+  "task": "Read the documentation in <dir> to find and summarise the rollback procedure in 3 bullet points",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 14,
+  "task": "In the flaskish project at <dir> find where the function `save_upload` is defined. Use outline/symbol lookup tools, not by reading whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 15,
+  "task": "In the flaskish project at <dir> find all callers of the function `save_upload`. Use outline/symbol lookup tools, not by reading whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 16,
+  "task": "In the flaskish project at <dir> find where the function save_upload is defined and who calls it. Use grep to search for 'def save_upload' to find the definition, and search for 'save_upload' to find all callers.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 17,
+  "task": "In <dir> find the is_expired function, read it, identify the logic bug, and explain what's wrong with it.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 18,
+  "task": "Run all tests in the <dir> project and report which test fails and why, based on the test output and error messages only.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 19,
+  "task": "Review the upload handler in <dir> for path traversal vulnerabilities. Find the upload handler code, examine how it processes file paths, and check if user-supplied filenames or paths could escape the intended directory or reach unintended files.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 20,
+  "task": "In the <dir> project, find documentation about rollback procedures and summarize it in exactly 3 bullets. Look through README files, documentation directories, or any files mentioning \"rollback\" or similar procedures. Report only what you find in the documentation.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 21,
+  "task": "In the flaskish repository at <dir> use find_symbol to find where the function `save_upload` is defined and who calls it. Report the file, line number where it's defined, and all call sites with their line numbers and files. Do not read whole files.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 22,
+  "task": "In the <dir> repository, find where the function `save_upload` is defined and list all the places where it is called. Use grep or find_symbol to locate the definition and all call sites.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 23,
+  "task": "In the flaskish project at <dir> find the `is_expired` function. Locate where it's defined, read its implementation, and explain what bug you see in its logic. Be specific about what the bug is and why it's wrong.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 24,
+  "task": "Run the tests in <dir> and report which tests fail and why. Include the full error messages and stack traces.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 25,
+  "task": "Examine the upload handler in the flaskish project for path traversal vulnerabilities. Find the upload handler code (look for routes that handle file uploads, typically with POST methods and file handling). Review it specifically for:\n1. Whether user-supplied filenames are validated before being used in file paths\n2. Whether directory traversal sequences like \"..\", \"/\", or absolute paths could escape the intended upload directory\n3. Whether the code sanitizes or restricts the filename in any way\n\nProvide the relevant code snippet and a clear assessment of whether there is a path traversal risk. If found, explain the specific vulnerability and how an attacker could exploit it.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 26,
+  "task": "Explore the current structure of <dir> to understand: (1) the CLI structure in guru/cli.py, including how arguments are parsed and how the CLI is organized; (2) the structure of guru/__init__.py to see if __version__ is defined; (3) the test structure in tests/test_misc.py to understand the testing patterns used. Report back with the content of these files and any relevant details about how the CLI works.",
+  "controller": "trivial",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 27,
+  "task": "Add a --version flag to guru's CLI. In <dir> modify the main() function to add argparse handling for a --version flag that imports and prints guru.__version__, then calls sys.exit(0). The flag should be added to the argument parser before parse_known_args() is called. Position it logically with other global CLI flags. Test the change by importing the module to ensure no syntax errors.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 28,
+  "task": "Add a test for the --version flag in <dir> Add a test function named test_version_flag() that: (1) imports guru and captures guru.__version__, (2) runs the CLI with --version flag using subprocess or direct invocation, (3) verifies the output contains the version string, and (4) verifies the exit code is 0. Follow the existing test patterns in test_misc.py. If using subprocess, use sys.executable and the -m guru syntax or direct module invocation.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 29,
+  "task": "Run the tests in <dir> using pytest. Run tests/test_misc.py to verify the new test_version_flag test passes. Report the test results (pass/fail, output), and also run any other tests in the test suite to ensure no regressions were introduced.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 30,
+  "task": "Examine the guru codebase at <dir> to understand how it decides the context window that fits on the GPU for an Ollama model. Find and document:\n\n1. Which functions/methods are involved in determining GPU context window fit\n2. What measurements or data collection happens (memory usage, token counts, etc.)\n3. Where and how the result is persisted (config files, cache, database, etc.)\n4. The flow from initial decision through to final storage\n\nStart by exploring the directory structure, then look for files related to GPU, context window, Ollama, and memory management. Follow imports and function calls to build a complete picture of the mechanism.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 31,
+  "task": "Review the three adapter files in <dir> for consistency:\n- ollama.py\n- anthropic.py  \n- litellm.py\n\nAnalyze and compare:\n1. Error handling patterns: How each provider handles exceptions, retries, and error propagation\n2. Ledger call recording: How each provider records API calls to the ledger (parameters, timing, costs)\n3. Identify key differences between the three implementations\n4. Highlight any inconsistencies that could cause bugs or maintenance issues\n5. Flag any risks from inconsistent error handling or logging behavior\n\nProvide a detailed comparative report with concrete code examples of the patterns found and specific risks.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 32,
+  "task": "Review the flaskish repository at <dir> for correctness and security issues. Examine the entire codebase systematically: list all files, understand the project structure and purpose, then review all code for: (1) security vulnerabilities (input validation, injection attacks, authentication/authorization flaws, secrets management, dependency issues); (2) correctness issues (logic errors, edge cases, error handling, race conditions); (3) code quality and reliability concerns. Provide findings by severity with concrete recommendations for fixes.\nFiles: <dir>",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 33,
+  "task": "Navigate the <dir> repository. Find documentation about the rollback procedure (check README files, docs folders, or relevant markdown files). Extract and summarize the rollback procedure in exactly 3 bullet points that capture the key steps or stages.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 34,
+  "task": "In the flaskish repository at <dir> use find_symbol to locate where save_upload is defined and who calls it. Report the definition location and all call sites. Do not read whole files.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 35,
+  "task": "In the flaskish project at <dir> find where the function save_upload is defined and who calls it. Use grep or find_symbol to locate the definition and all callers. Report the file, line number, definition, and all call sites.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 36,
+  "task": "Find the is_expired function in the flaskish codebase. Read it carefully, analyze its logic, and explain what bug exists in it. State clearly what the function does, what the bug is, and why it's wrong.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 37,
+  "task": "Run all tests in the cli-tool project at <dir> and report: which test(s) fail, the test output showing the failure, and a clear explanation of why it failed. Do not read or inspect the source files.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 38,
+  "task": "In the flaskish project at <dir> find and examine the upload handler code for path traversal vulnerabilities. Check if filenames are validated, if paths are normalized, and if there are any uses of os.path.join or similar that could allow an attacker to escape the intended upload directory. Look for patterns like \"..\" in filenames or unchecked user input being used in path operations. Report all findings with code references.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 39,
+  "task": "Add a --version flag to the guru CLI in guru/cli.py that prints guru.__version__ and exits. Add a test in tests/test_misc.py to verify it works. First check what CLI framework is in use and how the version is currently stored. Implement the flag, then add a test that verifies calling guru with --version prints the version string and exits with code 0. Verify with run_tests before reporting. Use outline/find_symbol for quick navigation of the existing code.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 40,
+  "task": "Investigate how the guru project decides the context window that fits on the GPU for an Ollama model. Find and trace through the relevant functions that:\n1. Determine or calculate what context window fits on the GPU\n2. Measure GPU fit (what metric or algorithm is used)\n3. Persist or store the result\n\nUse find_symbol or grep to locate functions related to context_window, context_fit, gpu_fit, or similar names. Read the key functions and files that implement this logic. Provide:\n- List of functions involved with their file locations and line ranges\n- Brief explanation of what each function does\n- The measurement/algorithm used to determine fit\n- Where the result is stored (file path, data structure, or API endpoint)",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 41,
+  "task": "Review and compare these three adapter files in <dir> for consistency:\n1. ollama.py\n2. anthropic.py\n3. litellm.py\n\nCompare them on:\n- Provider error handling patterns: how each adapter catches and handles exceptions, what error types they catch, how they propagate or transform errors\n- Ledger call recording: how each adapter records calls to the ledger (if at all), what parameters are recorded, when recording happens relative to the actual call\n- Transaction handling and cleanup: how each adapter ensures ledger updates are consistent even if errors occur\n\nFor each file, use outline/find_symbol to understand the structure before reading details. Then synthesize findings into a report that includes:\n1. Summary of each adapter's error handling approach\n2. Summary of each adapter's ledger recording approach\n3. Specific inconsistencies between the adapters\n4. Identified risks from these inconsistencies\n5. Concrete recommendations\n\nPrefer finding definitions and usages with find_symbol and outline over reading whole files.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 42,
+  "task": "\nIn the guru project (<dir>\n\n1. Find where the `guru.ledger_cli tasks` table output is implemented\n2. Locate the tasks stream's origin column definition and understand its structure\n3. Add the origin column to the tasks table output\n4. Add a test case that verifies the origin column appears in the table output\n5. Run all tests with sandbox_run to verify they pass\n6. Use sandbox_diff to review your changes\n7. Call sandbox_submit with a one-line intent like \"Add origin column to tasks table output\"\n\nWork inside the container using sandbox_python or sandbox_run. Verify changes with tests before submission. Prefer using outline/find_symbol to understand code structure before reading whole files.\n",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 43,
+  "task": "review the code for correctness, readability, tests",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 44,
+  "task": "review the code for injection, authz, secrets, path traversal, vulnerable deps",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 45,
+  "task": "evaluate architectural decisions and design patterns",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 46,
+  "task": "assess reliability, error handling, and scalability",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 47,
+  "task": "Explore the docs-only project at <dir> Find and read any documentation about a rollback procedure. Summarize it in exactly 3 clear bullets covering the main steps or key points.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 48,
+  "task": "In the flaskish project at <dir> find where the function `save_upload` is defined and who calls it. Use find_symbol and outline tools to locate the definition and callers; do not read whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 49,
+  "task": "Find where the function `save_upload` is defined in <dir> and show all places where it is called. Use find_symbol or grep to locate the definition and all callers.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 50,
+  "task": "Find the `is_expired` function in the flaskish codebase. Search for its definition, read it, analyze the logic for bugs, and explain what the bug is. Focus on the logic flow and any conditions that look incorrect.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 51,
+  "task": "Run all tests in the <dir> project and report which tests fail, what the failure message is, and why they fail. Include the full test output.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 52,
+  "task": "Review the upload handler in the flaskish project at <dir> for path traversal vulnerabilities. \n\nLocate the upload handler code, examine how file paths are constructed from user input (especially filename parameters), and check whether there is validation to prevent directory traversal attacks (e.g., using ../, ..\\\\, or absolute paths to escape the intended upload directory). Report:\n1. Whether a path traversal risk exists\n2. The specific code patterns that are vulnerable or safe\n3. Any recommended mitigations if a risk is found\n\nUse find_symbol or grep to locate the upload handler, then read the relevant code sections.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 53,
+  "task": "Review the codebase at <dir> (focus on app/upload.py, app/handlers.py, app/session.py, tests/test_upload.py, and FIXTURE.md) for correctness, readability, and test coverage. Read the relevant files yourself. Give findings by severity with concrete fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 54,
+  "task": "Review the codebase at <dir> (focus on app/upload.py, app/handlers.py, app/session.py, tests/test_upload.py, and FIXTURE.md) for security issues: path traversal, injection, authz/authn weaknesses, secrets handling, and vulnerable dependencies. Read the relevant files yourself. Give findings by severity with concrete fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 55,
+  "task": "Review the code in the cli-tool repository (files: wordcount.py, tests/test_wordcount.py, conftest.py, FIXTURE.md) at <dir> for correctness, readability, and test coverage. Note that wordcount.py::count_words was just changed from `text.split(' ')` to `text.split()` to fix a failing test (test_words_across_newlines). Confirm the fix is correct and check for any other correctness issues, readability concerns, or missing test cases (e.g. edge cases like tabs, multiple files, stdin handling, error handling in main()). Report findings by severity with concrete fixes.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 56,
+  "task": "Review the code in the cli-tool repository (files: wordcount.py, tests/test_wordcount.py, conftest.py, FIXTURE.md) at <dir> for security concerns: injection risks, authz issues, secrets, path traversal, and vulnerable dependencies. This is a small CLI word-count tool that reads files named on argv or stdin. Check file-open handling, error message content, and any dependency/import risks. Report findings by severity with concrete fixes.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 57,
+  "task": "Review the cli-tool repository (files: wordcount.py, tests/test_wordcount.py, conftest.py, FIXTURE.md) at <dir> for reliability and operability concerns: failure modes (bad encoding, missing files, permission errors, binary input), exit code correctness, observability/logging, and behavior when run as a CLI tool in production/scripted contexts (e.g. multiple files where one fails). Report findings by severity with concrete fixes.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 58,
+  "task": "Review the codebase at <dir> for correctness, readability, and test coverage. Read the source files (app/session.py, app/handlers.py, app/upload.py, tests/) and report concrete findings with file/line references, including any logic bugs, and note whether existing tests would catch them.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 59,
+  "task": "Review the codebase at <dir> for security issues: injection, authorization/authentication flaws, secrets handling, path traversal, and vulnerable dependencies. Read app/upload.py, app/handlers.py, app/session.py, and any dependency manifest. Report concrete findings with file/line references and suggested fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 60,
+  "task": "Review the repo at the current working directory (a small CLI tool fixture: wordcount.py, tests/test_wordcount.py, conftest.py, FIXTURE.md). Note: wordcount.py::count_words was just fixed to use text.split() instead of text.split(' '). Review the code for correctness, readability, and test coverage/quality. Identify any remaining issues or cleanup opportunities (dead code, unclear naming, missing edge cases, etc.) but do NOT delete tests/test_wordcount.py and do NOT modify FIXTURE.md. Report findings by severity with concrete suggested fixes.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 61,
+  "task": "Review the repo at the current working directory (a small CLI tool fixture: wordcount.py, tests/test_wordcount.py, conftest.py, FIXTURE.md) for security issues: injection risks, path traversal via file arguments, authz issues, secrets in code, and vulnerable/unpinned dependencies. wordcount.py reads files from argv and stdin. Report findings by severity with concrete fixes. Do not delete tests/test_wordcount.py or modify FIXTURE.md.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 62,
+  "task": "Review the flaskish repository (a small stdlib-only Flask-like file-upload service) at path <dir> for correctness, readability, and tests. Read app/__init__.py, app/handlers.py, app/session.py, app/upload.py, tests/test_session.py, tests/test_upload.py, conftest.py, and README.md. Report concrete bugs (with file and function/line), readability issues, and gaps in test coverage. Be specific and cite file/line/function.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 63,
+  "task": "Review the flaskish repository (a small stdlib-only Flask-like file-upload service) at path <dir> for security issues: injection, authorization/authentication flaws, secrets handling, path traversal, and vulnerable dependencies. Read app/__init__.py, app/handlers.py, app/session.py, app/upload.py, tests/test_session.py, tests/test_upload.py, conftest.py, and README.md. Report concrete vulnerabilities (with file and function/line), exploitability, and recommended fixes. Be specific and cite file/line/function.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 64,
+  "task": "Review the codebase at <dir> for correctness, readability, and test coverage. Read app/upload.py, app/handlers.py, app/session.py, app/__init__.py, tests/test_upload.py, tests/test_session.py, conftest.py, and README.md/FIXTURE.md for context. Report concrete findings with file:line references and suggested fixes, organized by severity/importance.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 65,
+  "task": "Review the codebase at <dir> for security issues: injection, authorization/authentication flaws, secrets handling, path traversal, and vulnerable dependencies. Read app/upload.py, app/handlers.py, app/session.py, app/__init__.py, tests/, conftest.py, README.md, and FIXTURE.md. Report concrete findings with file:line references, severity, exploit scenario, and concrete fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 66,
+  "task": "Add a --version flag to the guru CLI that prints guru.__version__ and exits. The flag should be added to guru/cli.py. Then add a test in tests/test_misc.py that verifies the --version flag works correctly. Finally, run the test suite to verify everything passes. Work in <dir>",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 67,
+  "task": "Run the test suite with pytest to verify the --version flag test and all other tests pass. Work in <dir> Run: pytest tests/test_misc.py -v",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 68,
+  "task": "Investigate how the guru project decides the context window that fits on the GPU for an Ollama model. Trace and document:\n1. Which functions are involved in measuring and setting the context window\n2. What is actually measured (GPU memory, parameters, etc.)\n3. How and where the result is persisted (files, database, cache, etc.)\n\nStart by exploring the codebase structure to find files related to GPU memory calculation, context window sizing, and Ollama integration. Read the relevant functions and trace the flow from input (model spec) to output (persisted context window decision). Cite file paths and function names.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 69,
+  "task": "Review three adapter files in <dir>\n- ollama.py\n- anthropic.py  \n- litellm.py\n\nFor each file, analyze:\n1. Error handling patterns: which exceptions are caught, how are they raised, error messages\n2. Ledger call recording: when/how calls are logged, what context is captured\n3. Call flow: where ledger is invoked relative to error handling\n\nReport:\n- Side-by-side comparison of error handling approach in each\n- Side-by-side comparison of ledger recording in each\n- Any inconsistencies that could cause bugs (e.g., calls recorded before or after errors, missing ledger calls)\n- Security or reliability risks from the differences\n- Specific code locations and line numbers for each finding",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 70,
+  "task": "Review the flaskish repository at <dir> for correctness and security issues. Examine all Python files in app/ and root directory. Check for: input validation, unsafe patterns, injection vulnerabilities, authentication/authorization flaws, data exposure, error handling, and logic errors. Report findings by severity with concrete fixes.\nFiles: ., app, tests",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 71,
+  "task": "In the current project/repository (use available file search tools), find where the function/method `save_upload` is defined, and find all call sites/callers of it. Use grep/code search across the codebase. Report: (1) file path and line number(s) of its definition, including signature; (2) every file and line number where it is called, with a brief note of the calling context (e.g. which function/module calls it).",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 72,
+  "task": "In the current project/repository, run the test suite (locate it if not obvious \u2014 check for package.json, pytest.ini, Makefile, etc., and use the appropriate test command). Identify any failing test(s). For each failure: find its root cause by reading the relevant source and test files (use systematic debugging \u2014 reproduce, form a hypothesis, verify before changing code). Then fix the underlying code (not the test, unless the test itself is provably wrong) with a minimal, correct change. Re-run the test suite to confirm all tests now pass. Report: which test(s) failed, the root cause, the file(s) you edited and a summary of the fix, and confirmation that the full suite now passes.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 73,
+  "task": "Find the definition of a function/method named `is_expired` in the current project codebase (grep for it, read the defining file and any relevant surrounding context/imports/tests). Analyze its logic carefully and determine why it \"looks wrong\" \u2014 identify the specific bug (e.g. off-by-one in comparison, wrong operator, timezone/naive-vs-aware datetime mismatch, wrong field used, inverted boolean logic, etc.). Report: the file path and line numbers, the exact code of the function, a clear explanation of the bug with a concrete example input that triggers incorrect behavior, and a suggested fix (code snippet). If there are multiple functions/methods named is_expired in different files, report on all of them separately.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 74,
+  "task": "In this codebase, locate the file upload handler(s) (search for upload endpoints/routes, e.g. terms like \"upload\", \"multipart\", \"filename\", \"save file\" in server/backend source). Read the relevant file(s) and determine whether there is a path traversal vulnerability: check how the uploaded filename/path is derived, whether it is sanitized (e.g. stripping \"../\", using basename, validating against an allowlist, resolving and checking against a base directory) before being used to write/save the file to disk. Report: the file(s) and line numbers involved, whether user-controlled filename/path data flows into a filesystem write without proper sanitization, and if so give a concrete proof-of-concept path traversal input and a recommended fix. If no upload handler exists in the codebase, state that clearly.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 75,
+  "task": "Review <dir> for correctness issues: examine code structure, logic, error handling, test coverage, and best practices. Check the app/ directory, tests/, and any configuration files. Report findings by severity with concrete fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 76,
+  "task": "Review <dir> for security issues: examine all Python code in app/ and tests/ for vulnerabilities including input validation, authentication/authorization, secrets handling, injection attacks, and insecure configurations. Report findings by severity with concrete fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 77,
+  "task": "Request the 'six' package through sandbox tooling using request_dependency.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 78,
+  "task": "In <dir> identify and fix the failing test in wordcount.py. Steps:\n1. Examine wordcount.py and run tests to identify the failure\n2. Debug the root cause of the failure\n3. Fix the code or test to make it pass\n4. Verify all tests pass using sandbox_run with pytest\n5. Use sandbox_submit with a one-line clear intent describing the fix\n\nUse systematic-debugging approach: reproduce the failure first, form a hypothesis about the cause, then verify your fix works.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 79,
+  "task": "In the sandbox at <dir>\n\n1. Find and examine the wordcount.py file and any associated tests\n2. Run the tests to identify which test(s) are failing\n3. Read the failing test and understand what it expects\n4. Fix the code in wordcount.py to make the failing test pass\n5. Verify the fix by running the tests again to confirm they all pass\n6. Report what the issue was and what you fixed\n\nUse sandbox_python or sandbox_run to execute tests. Verify with check_syntax before reporting. Prefer outline/find_symbol to understand the code structure before making changes.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 80,
+  "task": "In the project at <dir> add a --version CLI flag.\n\nSteps:\n1. Inspect guru/cli.py to see how the CLI/argument parser is currently built (e.g. argparse or click), and check guru/__init__.py (or wherever guru.__version__ is defined) to confirm the version attribute exists.\n2. Add a --version flag to the CLI defined in guru/cli.py that, when passed, prints guru.__version__ and exits immediately (exit code 0), without running other CLI logic. Use whatever CLI framework (argparse/click) the file already uses, following its existing style/conventions.\n3. Add a test to tests/test_misc.py (create the file if it does not exist, but check first \u2014 it may already exist with other tests, in which case append to it consistent with its style) that verifies running the CLI with --version prints the version string and exits with code 0. Look at other existing tests in the tests/ directory first to match the test style/invocation pattern used for the CLI (e.g. using CliRunner, subprocess, or calling main() directly).\n4. Run the test suite (at least tests/test_misc.py, but ideally the whole test suite) and report the results, including any failures and how you fixed them.\n\nReport back: the diff/summary of changes made to guru/cli.py and tests/test_misc.py, and the final test run output.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 81,
+  "task": "In the project at <dir> run the test suite (at least `pytest tests/test_misc.py -v`, ideally the full `pytest` run). Use search_tools to find a shell/command-execution or test-runner tool (try phrases like \"run shell command\", \"execute tests\", \"run pytest\") \u2014 it should be available even if a previous agent didn't find it. Report the full output, especially pass/fail status for any test related to --version or TestVersionFlag in tests/test_misc.py. If any test fails, inspect guru/cli.py and tests/test_misc.py, fix the issue, and re-run until the version-related test passes (avoid breaking other tests). Report final results.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 82,
+  "task": "In the repository at <dir> investigate and explain how the code decides the context window size that fits on the GPU for an Ollama model.\n\nSpecifically:\n1. Search (grep) the codebase for terms like \"context window\", \"num_ctx\", \"gpu\", \"fit\", \"VRAM\", \"memory\", \"Ollama\" to locate the relevant code.\n2. Identify which functions/methods are involved in computing or deciding what context window fits on the GPU.\n3. Explain what is measured (e.g. available GPU memory, model size, per-token KV cache cost, etc.) and the algorithm/logic used to decide the fitting context window.\n4. Identify where the computed result is persisted or stored (e.g. a config file, database, struct field, cache) \u2014 give exact file paths and field/variable names.\n5. Trace the call chain: what calls what, in what order, from initial trigger (e.g. model load, CLI command) to final persistence.\n\nRead the actual source files (do not guess) and quote relevant code snippets with file paths and line numbers to support your explanation. Produce a clear structured report covering: functions involved, what is measured, and where the result is persisted, including the call chain.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 83,
+  "task": "In the project at <dir> review these three adapter files: guru/adapters/ollama.py, guru/adapters/anthropic.py, and guru/adapters/litellm.py.\n\nFocus specifically on:\n1. Provider error handling: how each adapter catches/wraps/raises errors from the underlying provider API (exception types caught, whether errors are translated into a common exception type, whether retries/timeouts are handled, whether error messages/context are preserved consistently).\n2. Ledger call recording: how each adapter records calls to a \"ledger\" (or similar cost/usage/audit tracking mechanism) \u2014 look for what triggers a ledger record, what fields/data are recorded (tokens, cost, model, duration, status, errors), whether recording happens on both success and failure paths, and whether it happens consistently across all three files.\n\nRead all three files fully, and also grep for the ledger-related class/function (e.g. its definition, e.g. Ledger, record_call, log_call, etc.) to understand the expected contract each adapter should follow, and check whether each adapter fulfills it correctly.\n\nProduce a report with:\n- A summary of how each of the three adapters handles errors and ledger recording.\n- Concrete differences/inconsistencies between the three adapters (cite file names and line numbers or function names).\n- Risks arising from these inconsistencies (e.g. missing cost tracking on failure, silent swallowing of errors, inconsistent exception types breaking calling code, double-recording, etc.), ranked by severity.\n- Concrete fix suggestions for each identified issue.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 84,
+  "task": "Add a --version flag to guru's CLI in <dir> that prints guru.__version__ and exits. Then add a test for this flag in tests/test_misc.py. Finally, run all the tests with pytest and report results.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 85,
+  "task": "Run pytest on the project at <dir> to verify all tests pass, including the new version flag test in tests/test_misc.py. Report the full test output.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 86,
+  "task": "Explain how the guru project decides the context window that fits on the GPU for an Ollama model. Your answer should cover:\n1. Which functions are involved in this decision\n2. What metrics are measured (e.g., GPU memory, token limits)\n3. Where and how the result is persisted (e.g., config file, database, memory)\n\nStart by searching the codebase for key terms like \"context window\", \"fit\", \"GPU\", \"Ollama\" to identify entry points. Follow the call chain from user-facing functions to the measurement logic to the persistence layer. Read and trace through the relevant code files. Provide a clear summary with file paths and function names.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 87,
+  "task": "Review the three adapter files in <dir> for consistency:\n- ollama.py\n- anthropic.py\n- litellm.py\n\nCompare them on:\n1. Provider error handling: What exception types are caught, how are they classified (retriable vs fatal), what information is logged or returned?\n2. Ledger call recording: When and how are calls recorded to the ledger (before, after, on error)? What data is captured?\n\nFor each file, show the error handling patterns and ledger recording code. Then report:\n- Key differences between the three implementations\n- Specific risks or inconsistencies (e.g., one file records ledger on error while another doesn't, different exception handling strategies)\n- Any gaps or missing patterns\nGive concrete code citations.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 88,
+  "task": "In the current project codebase, find where the function/method `save_upload` is defined (file and line), and find all call sites/callers of `save_upload` throughout the codebase (file and line for each). Use grep/code search tools to locate exact definitions and usages, then read the relevant surrounding code to confirm context (e.g., what module/class it belongs to, and what the calling code does). Report back: (1) the definition location with a brief description of its signature/purpose, (2) a list of every call site with file:line and a one-line description of the calling context.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 89,
+  "task": "In the current project codebase, find where the function/method `save_upload` is defined (file and line number), and find every call site/caller of `save_upload` throughout the codebase (file and line for each). Use grep/code search tools to locate exact definitions and usages, then read the relevant surrounding code to confirm context (e.g., what module/class it belongs to, and what the calling code does). Report: (1) the definition location with a brief description of its signature/purpose, (2) a list of every call site with file:line and a one-line description of the calling context. If `save_upload` does not exist anywhere in the codebase, state that clearly instead.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 90,
+  "task": "In the current project directory, run the test suite (detect the appropriate test runner/command by inspecting the project files, e.g. package.json scripts, pytest, go test, etc.). Identify any failing test(s). For each failure: locate the root cause by reading the relevant source and test files, then fix the source code (not the test, unless the test itself is clearly wrong) so the test passes. Re-run the full test suite to confirm all tests pass afterward. Report: which test(s) were failing, the root cause, the exact file(s) changed and diff/summary of changes, and confirmation of the final passing test run output.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 91,
+  "task": "In the current project directory, run the test suite. First inspect the project to detect the correct test runner/command (check for package.json scripts, pytest.ini/pyproject.toml, go.mod, Makefile, etc.). Run it and capture full output. Identify any failing test(s). For each failure: read the relevant source and test files to find the root cause, then fix the source code (not the test, unless the test itself is clearly incorrect) so the test passes. Re-run the full test suite afterward to confirm everything passes. In your final report include: (1) the exact command used to run tests, (2) which test(s) were failing and the error output, (3) root cause explanation, (4) exact file(s) changed with a diff or clear summary of the change, (5) the final test run output showing all tests passing. If you cannot find a test suite or project files, report exactly what you found instead.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 92,
+  "task": "In the current working directory / repository, locate the definition(s) of a function or method named `is_expired` (grep search for \"is_expired\" across the codebase, then read the file(s) defining it and any related date/time comparison logic it depends on). Analyze the logic carefully for correctness bugs (e.g., off-by-one in comparisons, wrong operator direction like using < instead of <=, timezone-naive vs timezone-aware datetime comparisons, wrong field used, inverted boolean logic, comparing against the wrong reference time). Report: the file path and line numbers, the exact current code, and a precise explanation of what is wrong and why, plus a suggested fix. If multiple definitions of is_expired exist, cover each one separately.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 93,
+  "task": "Locate the repository in the current working directory/filesystem. Inspect its structure (list directories/files, check for build artifacts, temp files, __pycache__, node_modules, .DS_Store, log files, unused/dead code, stale dependency lockfiles, inconsistent formatting). Then perform a safe cleanup: delete build artifacts, caches, and temp files that are safe to remove; remove clearly dead/unused files (do not touch source files unless clearly unused/duplicate); tidy up structure. Use file listing, grep, read, write/delete/edit file tools as needed. After cleanup, produce a concise report listing exactly what was found and what was changed/deleted, with file paths.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 94,
+  "task": "Review the flaskish repository at <dir> for correctness issues: examine the code structure, logic, error handling, type safety, test coverage, and architectural soundness. Use outline and find_symbol to navigate files efficiently. Report findings by severity (critical, high, medium, low) with concrete examples and suggested fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 95,
+  "task": "Review the flaskish repository at <dir> for security vulnerabilities: examine input validation, authorization, authentication, secrets handling, injection vulnerabilities (SQL, command, template), CSRF/CORS, dependency safety, and any other hostile-input or privilege-escalation vectors. Use outline and find_symbol to navigate efficiently. Report findings by severity with concrete examples and recommendations.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 96,
+  "task": "Find and read the documentation in <dir> about the rollback procedure. Summarize it in exactly 3 bullets and return the result.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 97,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined and identify all the places that call it. Use find_symbol and outline tools to locate it without reading entire files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 98,
+  "task": "Find where the function `save_upload` is defined in the flaskish project at <dir> and identify all the places where it is called. Use find_symbol to locate the definition and callers.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 99,
+  "task": "In the flaskish project at <dir> find the is_expired function. Use find_symbol or grep to locate it, then read the function definition. Analyze the logic carefully and identify any bugs. Explain what is wrong with the code and what the correct behavior should be.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 100,
+  "task": "Run all tests in the <dir> project and report which tests pass and which fail, including the full error messages and stack traces for any failures. Do not read or examine source files - only run the tests and report the output.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 101,
+  "task": "Review the upload handler code in the flaskish project at <dir> for path traversal vulnerabilities. Specifically, examine how filenames are processed and where uploaded files are stored. Look for:\n1. Whether user-supplied filenames are sanitized before being used in file paths\n2. Whether path traversal sequences like ../ are filtered or blocked\n3. Whether os.path.join() or similar operations are used safely\n4. Any normalization of paths before storage\n\nIdentify the exact locations of any risks, explain the vulnerability, and describe the attack scenario. Use grep or find to locate the upload handler first, then read the relevant code.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 102,
+  "task": "Project at <dir> A --version flag was just added to guru's CLI: in guru/cli.py main(), `import guru` plus `parser.add_argument(\"--version\", action=\"version\", version=guru.__version__, help=...)` before the other args (parser uses parse_known_args). guru/__init__.py defines __version__ = '0.1.0' (comment says keep in step with pyproject.toml). A test TestCliVersion.test_version_flag_prints_and_exits was added to tests/test_misc.py (monkeypatches sys.argv to ['guru','--version'], expects SystemExit code 0 and stdout == guru.__version__). Review this change for correctness, readability and tests: read guru/cli.py main(), tests/test_misc.py, guru/__init__.py, pyproject.toml (check version matches and the console-script entry point targets guru.cli:main), tests/conftest.py (any autouse fixtures that could interfere, e.g. capturing stdout or patching argv), and compare with the style of tests/test_cli_routing.py. Check whether `import guru` inside main shadows or conflicts with anything, whether parse_known_args interacts badly with --version, and whether guru/ledger.py's version lookup (installed dist version vs __version__) suggests the flag should use the same source. If you have any tool to run shell commands, run `pytest tests/test_misc.py -q` and the full `pytest -q` and report results; if not, say so explicitly. Return findings by severity (with file:line and concrete fix), and state whether the tests were run.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 103,
+  "task": "Project at <dir> A --version flag was just added to guru's CLI: in guru/cli.py main(), `import guru` plus `parser.add_argument(\"--version\", action=\"version\", version=guru.__version__, ...)`; argparse prints the version and exits before log.setup(), skills.setup(), ledger setup and adapter construction. A test was added in tests/test_misc.py (TestCliVersion). Review this change from a security angle: injection, authz, secrets exposure, path traversal, vulnerable deps. Specifically confirm by reading guru/cli.py main() that --version exits before any config/credential loading (adapters.toml, API keys, OAuth) or network/filesystem side effects; check the test does not touch real user config (~/.guru) or network (see tests/conftest.py fixtures); and note whether revealing the version is a concern. Keep it proportionate to a small change. Return findings by severity with file:line and concrete fixes, or state clearly that there are none.",
+  "controller": "trivial",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 104,
+  "task": "In the Python project at the current working directory (guru), explain and verify the GPU context-fit MEASUREMENT algorithm for Ollama models in guru/adapters/ollama.py: functions _calibrated_ctx, _extend_fit, _measure_at, _reload, _ps_stats, _sidecar_reserve, _report_kv_type, _kv_bytes_per_token, _max_gpu_ctx, _total_gpu_bytes, and constants in guru/config.py (GPU_FIT_SAFETY, CTX_PROBE_HIGH, GPU_MEM_HEADROOM, MAC_GPU_FRACTION, KV_CACHE_BYTES, FIT_OVERHEAD_BYTES) and _CTX_FLOOR. Report: exactly what is measured (which Ollama API fields), the math (linear fit size = weights + ctx*kv, spill budget), rounding/clamping, and the metadata fallback. Also check the tests under tests/ that cover these functions (grep for _calibrated_ctx, _extend_fit, _max_gpu_ctx, _fit_after_load) and list which behaviours are tested. Flag any correctness issues or doc/code mismatches you find, with file:line citations. Return a concise structured summary.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 105,
+  "task": "In the Python project at the current working directory (guru), trace the CONTROL FLOW and PERSISTENCE of the Ollama context-window choice. Start at OllamaAdapter.activate in guru/adapters/ollama.py and follow _resolve_context_window, _default_ctx, _preload_and_fit, _fit_after_load, mark_fitted, and config.save_model_ctx / config.load_model_ctx / MODEL_CTX_PATH / GURU_HOME in guru/config.py. Also grep guru/ for every caller of save_model_ctx, load_model_ctx, num_ctx_override, mark_fitted and ctx_ceiling (e.g. guru/cli.py /context command and --num-ctx handling, guru/evals/runner.py, guru/bench.py) and explain the precedence between --num-ctx, a stored per-model value, the measured fit, the metadata estimate, the modelfile num_ctx and DEFAULT_NUM_CTX. State where the result lives in memory (session fields) and on disk (file path, format, scope global vs project). Cite file:line for each claim. Note any design issues (e.g. a stale stored value never being re-fitted, spill-halved value being persisted). Return a concise structured summary.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 106,
+  "task": "In the Python project at the current working directory (guru), analyse the RELIABILITY and failure modes of the Ollama GPU context auto-fit in guru/adapters/ollama.py (_calibrated_ctx, _extend_fit, _measure_at, _reload, _ps_stats, _gpu_fits, _fit_after_load, _total_gpu_bytes, _sidecar_reserve) and persistence in guru/config.py (save_model_ctx, load_model_ctx). Consider: Ollama daemon unreachable or remote (ollama.ps hidden), ps not listing the model or name mismatch (session.model vs m.model), nvidia-smi/sysctl missing or multi-GPU, probe loads that are slow or OOM, keep_alive side effects, other apps using GPU memory, the sidecar judge model, a corrupt or unwritable ~/.guru/model_ctx.json, and a stored value becoming stale after hardware or driver changes. For each: what happens, how it is observed (logs/console), and a suggested mitigation. Cite file:line. Return a concise prioritised list.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 107,
+  "task": "Review guru/adapters/ollama.py, guru/adapters/anthropic.py and guru/adapters/litellm.py (project root is the current working directory) for correctness, readability and tests, focusing on CONSISTENCY of provider error handling and ledger call recording across the three adapters. Follow local imports: guru/adapters/turn.py (run_loop contract), guru/domain/ledger.py (record_call, bump, CallRecord.to_row), guru/domain/conversation.py (callers of adapter.summarise), guru/orchestrator.py (_should_retry/_finish_task use of struggle['provider_errors']). Check: every failure path in run_turn/step/summarise increments provider_errors and sets last_error; whether exceptions can escape run_loop (e.g. client construction, response parsing after a successful call like resp.choices[0] or resp.usage); summarise failure return values ('' vs '(summary failed: ...)') and how callers treat them; token/usage accounting differences (cache tokens, ctx_used), mid-stream failure recording, refusal counting. Also look under tests/ for existing tests of these paths and name missing ones. Report findings by severity with file:line and concrete fixes. Only state what you read.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 108,
+  "task": "Security review of guru/adapters/ollama.py, guru/adapters/anthropic.py and guru/adapters/litellm.py (project root is the current working directory), with focus on provider error handling and ledger call recording. Check: whether exception text (repr(e)) stored in session.last_error, printed to console via Rich markup (markup injection), or written to ledger rows/transcripts can leak secrets (API keys, bearer tokens, OAuth tokens, base_url with credentials); how API keys are resolved (env var, inline api_key in config, fallback 'local' key, OPENAI_API_KEY fallback) and whether a key could be sent to the wrong base_url; verify() behaviour (requests.get with Authorization header, timeouts, TLS); subprocess usage (ollama pull, ant auth login, nvidia-smi, sysctl) for injection via model_id/profile; trust of provider-supplied values (_hidden_params response_cost, tool-call arguments via json.loads) flowing into the ledger and tools.execute_tool. Follow local imports (guru/domain/ledger.py, guru/adapters/turn.py, guru/log.py if present). Report findings by severity with file:line and concrete fixes. Only state what you read.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 109,
+  "task": "Reliability/operability review of guru/adapters/ollama.py, guru/adapters/anthropic.py and guru/adapters/litellm.py (project root is the current working directory), focused on provider error handling and ledger call recording. Follow guru/adapters/turn.py (run_loop, _close_turn: one TurnRecord per turn), guru/domain/ledger.py (record_call, _accumulate, submit, bump) and guru/orchestrator.py (_should_retry, _finish_task: remote child with provider_errors and no answer is retried locally). Assess: failure modes where a provider failure is not counted (breaking local fallback retry) or where a non-provider failure is counted (e.g. summarise during compaction); missing timeouts/retries on SDK calls (anthropic, openai client, ollama.chat); cancellation behaviour (streaming vs non-streaming); ledger completeness (calls that consumed tokens but were never recorded, e.g. mid-stream errors; cost_source 'unknown' vs 'header'; whether openai SDK responses actually carry _hidden_params); observability of errors (log.exc vs console only). Report findings by severity with file:line and concrete fixes. Only state what you read.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 110,
+  "task": "Design review of the provider adapter layer: guru/adapters/base.py, guru/adapters/turn.py, guru/adapters/ollama.py, guru/adapters/anthropic.py, guru/adapters/litellm.py (project root is the current working directory). Focus on the boundary for provider error handling and ledger call recording: duplicated helpers (_note_error in each adapter, _record_call variants, duplicate-tool SKIP handling, neutral_assistant copies), which responsibilities belong in the shared turn loop / base Adapter vs per-adapter, and the contract adapters must meet (step returns None on error, summarise return on failure, record_call per provider call). Propose a concrete minimal refactor (e.g. a shared guarded-call helper in base/turn that times the call, records usage, notes errors) with trade-offs. Check guru/domain/ledger.py for the record_call/CallRecord API. Report as prioritized recommendations with file:line. Only state what you read.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 111,
+  "task": "Examine the guru codebase structure in <dir> to understand: (1) how guru/cli.py is organized and how CLI arguments are currently handled, (2) where guru.__version__ is defined, and (3) the structure of tests/test_misc.py. Read these files and summarize what you find.",
+  "controller": "trivial",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 112,
+  "task": "Add a --version flag to <dir> that prints guru.__version__ and exits. The flag should be added to the argparse parser in the main() function. Use the argparse built-in 'version' action with a format like 'guru X.Y.Z'. Also add the necessary import of guru.__version__ if not already imported. Then add a test to <dir> that invokes the CLI with --version and verifies it exits cleanly with version output.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 113,
+  "task": "Run the test suite in <dir> including tests/test_misc.py, and report the results. Provide test output and pass/fail status.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 114,
+  "task": "Investigate how guru decides the context window that fits on the GPU for an Ollama model. Find and explain:\n1. Which functions in the codebase are responsible for calculating or determining the context window size\n2. What measurements are taken (e.g., GPU memory, model size) and how they're obtained\n3. Where and how the result is persisted (config files, database, cache, etc.)\n4. Show the call chain or flow between these functions\n\nSearch the codebase at <dir> for relevant code related to context window, GPU memory fitting, and Ollama model configuration.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 115,
+  "task": "Review the three adapter files in <dir> for consistency:\n1. Read ollama.py, anthropic.py, and litellm.py completely\n2. Analyze error handling patterns in each (how exceptions are caught, logged, re-raised)\n3. Analyze ledger call recording patterns in each (when/how calls are recorded, what data is captured)\n4. Compare all three for inconsistencies, gaps, and potential risks\n5. Report specific differences with line references, categorize by severity, and note any missing error handling or ledger recording that appears in one file but not others",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 116,
+  "task": "Review the flaskish codebase at <dir> for correctness issues: logic errors, edge cases, error handling, code quality, and test coverage. Start by exploring the repository structure and main files. Prefer using outline/find_symbol over reading whole files. Provide findings organized by severity (critical, major, minor) with concrete explanations and suggested fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 117,
+  "task": "Security review of the flaskish codebase at <dir> Look for: input validation issues, injection vulnerabilities, authentication/authorization flaws, secrets management, unsafe file operations, unsafe deserialization, CORS/CSRF issues, and other security concerns. Start by exploring the repository structure and understanding how it handles requests/inputs. Provide findings organized by severity (critical, major, minor) with concrete explanations and fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 118,
+  "task": "In <dir> find the failing test in wordcount.py by running tests, identify the issue, fix the code to make all tests pass, verify with sandbox_run using pytest, then submit the fix with sandbox_submit using a clear one-line intent describing what was fixed.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 119,
+  "task": "In <dir> identify the failing test in wordcount.py or its test file, fix the code to make the test pass, verify with sandbox_run, and submit with sandbox_submit.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 120,
+  "task": "In the flaskish repository at <dir> find the `is_expired` function/method, determine why it's failing tests, fix the bug, verify the fix with check_syntax and run_tests, then report what was wrong and what you fixed.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 121,
+  "task": "In the project at <dir> find and read the rollback procedure documentation. Summarize it in exactly 3 bullet points.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 122,
+  "task": "Find where save_upload is defined and who calls it in <dir> Use find_symbol to locate its definition and callers. Do not read whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 123,
+  "task": "In the flaskish project at <dir> find where the function `save_upload` is defined and list all the places where it is called. Use find_symbol or grep to locate the definition and calls.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 124,
+  "task": "Run the tests in <dir> to find which test is failing. Report which test fails and show the error message.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 125,
+  "task": "In <dir> fix the failing test `tests/test_wordcount.py::test_words_across_newlines`. \n\nThe test expects count_words('one two\\nthree\\nfour five\\n') to return 5, but it currently returns 3. \n\n1. Read the test in tests/test_wordcount.py to understand what's expected\n2. Find where count_words is implemented and read it\n3. Fix the count_words function to properly count words across newlines\n4. Run the tests to verify the fix passes\n5. Report what you changed and confirm all tests pass\n\nUse find_symbol or outline to locate the function definition before reading the full file. After editing the code, verify with check_syntax and run_tests before reporting.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 126,
+  "task": "\nExamine the guru project structure to understand how to add a --version flag. Specifically:\n1. Read guru/cli.py to understand the current CLI structure and how flags are handled\n2. Check if guru/__init__.py defines __version__\n3. Look at tests/test_misc.py to understand the test structure and what tests already exist there\n4. Report findings on: how the CLI is structured, where to add --version, and what the __version__ value is\n\nThe project is in <dir>\n",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 127,
+  "task": "\nBased on the findings, implement the --version flag in guru/cli.py and add a test in tests/test_misc.py:\n\n1. In guru/cli.py:\n   - Add `from guru import __version__` to the imports at the top (or reference it as guru.__version__)\n   - In the main() function, add the --version flag to the argument parser right after line 454 where parser is created:\n     ```python\n     parser.add_argument(\n         \"--version\", action=\"version\",\n         version=f\"guru {__version__}\",\n     )\n     ```\n\n2. In tests/test_misc.py:\n   - Add a test class or method that verifies the --version flag works correctly\n   - The test should invoke the CLI with --version and verify it prints \"guru 0.1.0\" and exits with status 0\n   - Use subprocess to test the CLI invocation, similar to how one might test command-line tools\n\n3. Run all tests in tests/test_misc.py to verify both the new test and existing tests pass\n\n4. Before reporting completion, verify with check_syntax on cli.py and run_tests to ensure all tests pass.\n\nThe project is at <dir>\n",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 128,
+  "task": "In the guru project, explain how the system decides the context window that fits on the GPU for an Ollama model. Identify: (1) which functions are involved, (2) what is measured, and (3) where the result is persisted. \n\nStart by searching for keywords like \"context\", \"gpu\", \"fit\", \"window\", \"ollama\" in the codebase to find the relevant files. Use file outlines and symbol search to trace the code flow. Then read the key sections. Reference file paths and line numbers in your explanation. Focus on understanding the measurement approach and how the decision logic works.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 129,
+  "task": "Review the three adapter provider files in <dir> for consistency:\n- ollama.py\n- anthropic.py\n- litellm.py\n\nFocus on:\n1. Error handling patterns: how exceptions are caught, handled, and propagated\n2. Ledger call recording: when and how ledger.record_call() is invoked, what parameters are logged\n3. Consistency across providers: which patterns are uniform, which diverge\n4. Risks: missing error handling, incomplete logging, potential blind spots\n\nUse find_symbol and outline to map the files first, then read_file only the relevant sections. Compare error handling try/except blocks, ledger.record_call() invocations, and any provider-specific patterns. For each difference found, state the line numbers and risk impact.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 130,
+  "task": "In the flaskish project at <dir> find the is_expired function, read its implementation, and explain what logic bug it contains. Use find_symbol or grep to locate it first, then read the relevant code.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 131,
+  "task": "Run all tests in the <dir> project. Report which test(s) fail, the test output/error messages, and the failure reason without reading source files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 132,
+  "task": "Review the upload handler code in <dir> for path traversal vulnerabilities. Find where file uploads are handled, trace how the filename/path is constructed, and check if there are any controls against directory traversal attacks (e.g., using ../ or absolute paths). Report: (1) the location of the upload handler, (2) how filenames are processed, (3) whether there are any security gaps, and (4) specific exploit scenarios if vulnerable.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 133,
+  "task": "Review <dir> for security vulnerabilities: examine input validation, authentication, authorization, data handling, injection risks, and any exposure of secrets or sensitive data. Report findings by severity with concrete fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 134,
+  "task": "Review <dir> for correctness issues: examine control flow, error handling, edge cases, type consistency, test coverage, and logical bugs. Report findings with concrete fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 135,
+  "task": "Request the 'six' package to be made available in this sandbox environment for the cli-tool project at <dir> Use the appropriate sandbox tooling to request this dependency (do not use pip install or other standard installation methods). Confirm when the request has been submitted.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 136,
+  "task": "In the <dir> project, find the failing test in wordcount.py. Identify why it is failing, fix the implementation or test code as needed, and verify all tests pass. Report what the failure was and what you changed, with a clear one-sentence intent statement.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 137,
+  "task": "In <dir> identify why the test in wordcount.py is failing and fix it. Run the tests to verify the fix works. Use systematic debugging: reproduce the failure, identify the root cause, and apply a minimal fix. Verify with run_tests before reporting.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 138,
+  "task": "In <dir> delete the README.md file.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 139,
+  "task": "Review the flaskish repository at <dir> for correctness and security issues. Examine all code files, configuration, and tests. Use systematic code review to identify:\n\n1. Correctness issues: bugs, edge cases, logic errors, type safety problems\n2. Security vulnerabilities: injection risks, authentication/authorization flaws, input validation issues, cryptographic problems, information disclosure\n3. Code quality: error handling, maintainability, best practices\n\nProvide findings organized by severity (critical, high, medium, low) with:\n- Location (file, line range, function)\n- Issue description\n- Why it matters\n- Recommended fix\n\nStart by exploring the repository structure and reading the README to understand the project scope, then systematically review code files.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 140,
+  "task": "In <dir> Add a --version flag to guru/cli.py that prints guru.__version__ and exits, add a test for it in tests/test_misc.py, verify with check_syntax and run_tests, then report the changes.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 141,
+  "task": "Explain how guru decides the context window that fits on the GPU for an Ollama model. Identify: (1) the functions involved in this decision, (2) what is measured (e.g., memory usage, token counts), (3) how and where the result is persisted (e.g., in config, cache, database). Trace the flow from model loading through context window fitting. Use the project path <dir>\nFiles: .",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 142,
+  "task": "Review <dir> for consistency in (1) provider error handling\u2014what exceptions are caught, how they're transformed, and fallback behavior; (2) ledger call recording\u2014when and how calls are logged, what metadata is captured, and whether errors are recorded. Report: differences found, inconsistencies that could cause bugs, and risks.\nFiles: guru/adapters/ollama.py, guru/adapters/anthropic.py, guru/adapters/litellm.py",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 143,
+  "task": "In the <dir> project: locate the `guru.ledger_cli tasks` command that outputs a table. Find where the tasks stream is defined to identify the origin column. Add the origin column to the table output. Add a test that verifies the origin column appears in the output. Run the tests with pytest to verify. Do not submit; just prepare the code and show the test results.\nFiles: guru",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 144,
+  "task": "In the <dir> project: call sandbox_submit to apply the changes that add the origin column to the tasks table output, with test coverage. The intent is: 'Add tasks stream origin column to ledger_cli tasks table with tests'.\nFiles: guru/domain/ledger_report.py, guru/ledger_cli.py, tests/test_ledger_cli.py, tests/test_ledger_report.py",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 145,
+  "task": "In the <dir> project: add the origin column to the tasks table in `guru.ledger_cli tasks` output. First, read guru/domain/ledger.py to understand the TaskRecord and origin field. Read the current guru/ledger_cli.py cmd_tasks function and guru/domain/ledger_report.py unlabelled_tasks function to see how the table is built. Add origin to the output in cmd_tasks, ensuring the unlabelled_tasks helper includes it. When origin is missing or empty, display it as '-' (consistent with how kind and complexity are displayed). Add a test in tests/test_ledger_cli.py that verifies origin appears in the output, and add a test in tests/test_ledger_report.py that verifies origin is included in the summary. Run pytest on the test files to verify everything works. Do not submit; just show the changes and test results.\nFiles: guru/domain/ledger.py, guru/domain/ledger_report.py, guru/ledger_cli.py, tests/test_ledger_cli.py, tests/test_ledger_report.py",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 146,
+  "task": "In the <dir> project: call sandbox_submit with the intent 'Add tasks stream origin column to ledger_cli tasks table with tests'.\nFiles: guru/domain/ledger_report.py, guru/ledger_cli.py, tests/test_ledger_cli.py, tests/test_ledger_report.py",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 147,
+  "task": "In the <dir> project: read guru/domain/ledger.py and find the TaskRecord class definition to identify what 'origin' field exists and its meaning. Then read guru/domain/ledger_report.py unlabelled_tasks function to see what fields are currently included in task rows. Then read guru/ledger_cli.py cmd_tasks to see how the tasks table is currently formatted. Report back with: (1) the exact name and meaning of the origin field in TaskRecord, (2) whether it's currently included in unlabelled_tasks output, (3) the current format of the tasks table output line. Do not make changes yet.\nFiles: guru/domain/ledger.py, guru/domain/ledger_report.py, guru/ledger_cli.py",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 148,
+  "task": "In the <dir> project: (1) Add 'origin' field to the dict keys returned by unlabelled_tasks in guru/domain/ledger_report.py (get it from r.get('origin') or '', and add it to the docstring). (2) Add origin column to the cmd_tasks output in guru/ledger_cli.py. Insert it between kind/complexity and ts, formatted the same way (origin or '-' if missing). The line should look like: `task {id}  {status}  {secs}  {cost}  {route}  {kind/complexity}  {origin}  {ts}`. (3) Add a test in tests/test_ledger_cli.py that verifies origin appears in the output (test both a task with origin='panel' and one with no origin). (4) Add a test in tests/test_ledger_report.py that verifies origin is in the returned row. Run pytest on both test files to verify. Do not submit yet; show test results.\nFiles: guru/domain/ledger_report.py, guru/ledger_cli.py, tests/test_ledger_cli.py, tests/test_ledger_report.py",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 149,
+  "task": "Review the flaskish codebase at <dir> for correctness issues. Check code logic, error handling, edge cases, test coverage, and architectural concerns. Report findings by severity with concrete examples and suggested fixes.\nFiles: <dir>",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 150,
+  "task": "Security review of the flaskish codebase at <dir> Identify vulnerabilities, security-sensitive patterns, input validation gaps, authentication/authorization flaws, dependency risks, and configuration issues. Report findings by severity with concrete examples and remediation steps.\nFiles: <dir>",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 151,
+  "task": "Explore the docs-only project at <dir> and find the rollback procedure documentation. Look for files like README, docs/, ROLLBACK, or similar. Once found, extract and provide the complete rollback procedure so I can summarize it in 3 bullets.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 152,
+  "task": "Find where `save_upload` is defined in <dir> and identify all places that call it. Use find_symbol to locate the definition and all callers. Do not read whole files; use the outline/find_symbol tools only.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 153,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined and list all the places where it is called. Use grep and file inspection to locate the definition and all call sites.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 154,
+  "task": "Find the `is_expired` function in the flaskish repository at <dir> Use find_symbol or grep to locate it, read the function definition, and explain what the bug is. Be specific about what is wrong with the logic.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 155,
+  "task": "Run the tests in the cli-tool project at <dir> Find the test runner (pytest, unittest, or similar) and execute it. Report which tests fail, their names, and the exact error messages or assertion failures shown in the output. Do not read any source files.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 156,
+  "task": "Review the upload handler in the flaskish project for path traversal vulnerabilities. Specifically:\n1. Find the upload handler code (likely in a views, routes, or handlers module)\n2. Check if user-supplied filenames are sanitized before being used in file paths\n3. Look for use of os.path.join, pathlib, or direct string concatenation with user input\n4. Check if there are protections against \"..\", absolute paths, or other traversal techniques\n5. Report: is there a path traversal risk, where exactly it is, and what the exploitation scenario looks like\n\nUse find_symbol, grep, and outline to locate the code efficiently. Read only the necessary sections.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 157,
+  "task": "In the guru project at <dir> review the recently added --version CLI flag and its test for correctness, readability, and test quality. Specifically inspect: (1) guru/cli.py's main() function (the --version argparse.add_argument using action='version', version=guru.__version__, and the surrounding argument parsing), (2) guru/__init__.py where __version__ is defined, (3) tests/test_misc.py's TestVersionFlag class and its test_version_flag_prints_version_and_exits test which monkeypatches sys.argv and calls cli.main() expecting SystemExit with code 0 and stdout matching guru.__version__. Check: does argparse's version action actually exit with code 0 and print to stdout? Is monkeypatching sys.argv the correct/idiomatic way to test this given how cli.main() parses args (parser.parse_known_args() with no args passed explicitly)? Are there edge cases missed (e.g., --version combined with other flags, exit code assumptions, whether parse_known_args vs parse_args matters here)? Is the test isolated properly (no side effects on other tests, no leaked state)? Compare style with the rest of cli.py and tests/test_cli_routing.py for consistency. Give a findings report by severity with concrete fixes.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 158,
+  "task": "In the guru project at <dir> do a security review of the recently added --version CLI flag in guru/cli.py's main() function (argparse.add_argument('--version', action='version', version=guru.__version__)) and its test in tests/test_misc.py (TestVersionFlag). Check for: (1) any injection risk from printing guru.__version__ (is it a static string from guru/__init__.py, could it ever be influenced by untrusted input, env vars, or file content an attacker controls), (2) whether adding this flag or the associated `import guru` inside main() introduces any information disclosure, path traversal, or unsafe import-time side effects, (3) whether monkeypatching sys.argv in the test or calling cli.main() directly could execute unintended side-effecting code paths (e.g., does main() do anything before parsing args, or does argparse's version action short-circuit before any adapters/network/file I/O code in main() runs \u2014 trace main()'s full body to confirm --version exits before touching config, adapters, ledger, network, or secrets), (4) any vulnerable dependency concerns tied to argparse usage (there should be none, argparse is stdlib, but confirm no third-party version-printing library was introduced). Read guru/cli.py in full and guru/__init__.py. Report findings by severity with concrete fixes, or state clearly if no issues were found.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 159,
+  "task": "Review guru/adapters/ollama.py, guru/adapters/anthropic.py, and guru/adapters/litellm.py (paths relative to the guru project root) for correctness, readability, and test coverage, with particular focus on: (1) consistency of provider error handling across the three adapters (how each catches/reports SDK exceptions, what triggers ledger.bump('provider_errors') and session.last_error, whether every path back to guru.adapters.turn.run_loop is properly guarded), and (2) consistency of ledger call recording (each adapter's _record_call helper, what fields it populates on guru.domain.ledger.CallRecord via guru.domain.ledger.record_call, and whether summarise() failure paths are handled uniformly). Read guru/adapters/turn.py, guru/domain/ledger.py, and guru/domain/pricing.py as needed for context. Report concrete findings by severity with file:line references and suggested fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 160,
+  "task": "Review guru/adapters/ollama.py, guru/adapters/anthropic.py, and guru/adapters/litellm.py (paths relative to the guru project root) for security issues: injection risks, authz, secrets handling (API keys, OAuth credentials/tokens), path traversal, and vulnerable/unsafe use of dependencies (ollama, anthropic SDK, openai SDK, requests, subprocess calls to 'ollama' and 'ant' CLIs). Pay attention to how API keys/credentials are sourced and stored (env vars, config files under ~/.config/anthropic), how subprocess.run is invoked (guru/adapters/ollama.py uses 'ollama pull'/'nvidia-smi'/'sysctl'; guru/adapters/anthropic.py runs 'ant auth login'), and whether any user- or model-controlled data (tool arguments, model ids, base_url config) flows into subprocess, file paths, or requests without validation. Report concrete findings by severity with file:line references and suggested fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 161,
+  "task": "Review guru/adapters/ollama.py, guru/adapters/anthropic.py, and guru/adapters/litellm.py (paths relative to the guru project root) from a reliability/operability standpoint. Focus on: failure modes when a provider call fails or hangs (timeouts, retries, partial state left in session/native message history), how errors surface to the orchestrator's retry-to-local-model logic (guru/orchestrator.py's _should_retry/_retry_plan, which depend on session.struggle['provider_errors'] and adapter.remote), whether every code path through run_turn() eventually reaches guru.adapters.turn.run_loop's finally-guarded turn-closing logic (so exactly one TurnRecord is always written), and whether ledger writes (guru/domain/ledger.py, a fire-and-forget background-thread queue) can be lost or block a turn. Also assess observability: what gets logged (guru.log) vs silently swallowed. Report concrete findings by severity with file:line references and suggested fixes.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 162,
+  "task": "Find the is_expired function in the flaskish codebase at <dir> Use find_symbol or grep to locate it, then read the code and explain what bug exists in its logic.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 163,
+  "task": "In the docs-only project at <dir> find and read any documentation about rollback procedures. Summarize the rollback procedure in exactly 3 bullets.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 164,
+  "task": "In <dir> find where save_upload is defined and list all places that call it. Use find_symbol to locate the definition and all call sites. Do not read whole files; use outline and find_symbol only.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 165,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined and show all the places where it is called. Use find_symbol or grep to locate both the definition and all callers.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 166,
+  "task": "In the flaskish repository at <dir> find the is_expired function and identify the bug. Examine the code carefully, understand what it's supposed to do versus what it actually does, and explain the logic error clearly.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 167,
+  "task": "Run all tests in the <dir> project. Report which test fails, the failure output, and the reason why it failed. Do not read or examine the source code files.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 168,
+  "task": "Examine the upload handler in the flaskish project (at <dir> for path traversal vulnerabilities. Find the upload handler code, analyze how file paths are constructed from user input, and check whether the code validates or sanitizes filenames to prevent directory traversal attacks (e.g., using ../). Report any risks found, the affected code location, and what an attacker could do with it.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 169,
+  "task": "Security review of flaskish at <dir> examine all Python code for input validation, injection vulnerabilities, authentication/authorization flaws, data exposure risks, cryptographic issues, and secret handling. Check app/ and tests/ directories. Report findings by severity with concrete examples and recommended fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 170,
+  "task": "Correctness review of flaskish at <dir> examine all Python modules for logic errors, error handling, data type issues, state management problems, and code quality. Look for uncaught exceptions, edge cases, and API contract violations. Run tests and report findings by severity.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 171,
+  "task": "Read the documentation in the docs-only project at <dir> and find the rollback procedure section. Summarize it concisely in exactly 3 bullet points, focusing on the key steps or essential information.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 172,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined using outline or find_symbol tools (do not read whole files). Then find all places where it is called. Report the definition location and all call sites.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 173,
+  "task": "Find where the function `save_upload` is defined in the flaskish repository, and show all places where it is called. Use find_symbol or grep to locate its definition and usages.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 174,
+  "task": "Find the `is_expired` function in <dir> and explain the bug in it. Use outline and find_symbol to locate it efficiently, then read the specific lines where it's defined. Describe what the function is supposed to do and what the bug is.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 175,
+  "task": "In the project at <dir> run all tests and report which test(s) fail. For each failure, provide the test name and the error message explaining why it failed. Do not read source files.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 176,
+  "task": "Review the upload handler code in the flaskish project for path traversal vulnerabilities. Find the upload handler implementation (likely in a routes, views, or handlers file), examine how it processes file paths from user input, and check if it validates/sanitizes filenames or paths. Determine if an attacker could use sequences like ../ or absolute paths to write files outside the intended upload directory. Report the findings: is there a path traversal risk? Show the vulnerable code if present.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 177,
+  "task": "Request the 'six' Python package through sandbox tooling using request_dependency or similar. If you encounter a tool named request_dependency, call it with package='six'. If no such tool exists, report what sandbox tools are available for dependency management.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 178,
+  "task": "Fix the failing test in wordcount.py. Start by running the tests to see what fails, examine the test and the code, identify the issue, fix it, then verify all tests pass with sandbox_run. Finally, call sandbox_submit with a one-line clear intent describing the fix.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 179,
+  "task": "In the project at <dir> debug and fix the failing test in wordcount.py. Start by finding and reading the test file and wordcount.py to understand what's failing. Use systematic-debugging: reproduce the failure, identify the root cause, apply a minimal fix, verify with run_tests (check the test output), then call sandbox_submit with a one-line intent describing the fix.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 180,
+  "task": "In the project at <dir> add a --version flag to guru's CLI in guru/cli.py that prints guru.__version__ and exits (status 0). First read guru/cli.py and guru/__init__.py to see how the argument parser is built and confirm __version__ exists (if it doesn't, report that rather than inventing one). Prefer argparse's action='version' if argparse is used, or the equivalent for whatever CLI framework is in use. Add a test in tests/test_misc.py (read it first; follow its existing style) that invokes the CLI with --version and asserts the output contains guru.__version__ and it exits cleanly. Then run the full test suite (e.g. pytest) and report: the exact changes made, the test added, and the test results (pass/fail counts, any failures with output).",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 181,
+  "task": "In the project at <dir> run the test suite with pytest (e.g. `python -m pytest -q` from the project root), and also `python -m pytest tests/test_misc.py -k TestVersionFlag -v`. A --version flag was just added to guru/cli.py (argparse action='version') with a test class TestVersionFlag in tests/test_misc.py. Report the exact pass/fail/error counts and full output of any failures. Do not modify any files. If you have no tool that can execute shell commands, say so plainly and do not invent results.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 182,
+  "task": "In the project at <dir> explain how guru decides the context window (num_ctx) that fits on the GPU for an Ollama model. Use grep/read tools to find the relevant code (search terms like num_ctx, context window, gpu, vram, fit, ollama, /api/ps, size_vram, probe, calibrate). Report: (1) every function involved, with file path and line numbers, and the call flow between them; (2) what exactly is measured (e.g. Ollama API endpoints called, fields like size/size_vram, memory values, search strategy such as binary search or step-down, thresholds); (3) where and in what format the result is persisted (file path, cache key, config field) and how it is read back later. Follow local imports; do not conclude something is missing without grepping for its definition. Quote short code snippets as evidence and cite file:line for every claim. State clearly anything you could not find.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 183,
+  "task": "Project path: <dir>\n\nReview guru/adapters/ollama.py, guru/adapters/anthropic.py and guru/adapters/litellm.py for CONSISTENCY of (1) provider error handling and (2) ledger call recording. Read all three files fully, and follow their local imports (e.g. the ledger module, any base adapter class, shared error/exception types, retry helpers) \u2014 grep for definitions before concluding anything is missing. Also check relevant tests under tests/ if present.\n\nFor each adapter, document:\n- Which exceptions are caught (network, timeout, HTTP status, rate limit, auth, malformed response, streaming errors), how they are translated/wrapped (which guru exception types), whether original cause is chained, whether retries happen and how.\n- Ledger recording: when a call is recorded (before/after/finally), what fields are recorded (model, provider, tokens in/out, cost, latency, status/error, request id), whether failed calls are recorded, whether streaming calls are recorded, and whether a ledger failure can break or mask the provider call.\n\nThen produce a comparison table across the three adapters and a list of differences and risks, ordered by severity (high/medium/low), each with file:line references and a concrete suggested fix. Flag things like: errors swallowed, calls not recorded on failure, double recording, inconsistent token/cost fields, missing latency, exceptions leaking raw provider types, ledger write inside try that masks errors. Only report what the code shows; quote the relevant lines. Do not modify files.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 184,
+  "task": "Read all files in the <dir> project directory to find and summarize the rollback procedure in 3 bullets",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 185,
+  "task": "Use grep or outline/symbol tools on <dir> to find where save_upload is defined and who calls it. Report the file, line number, and all callers.\nFiles: .",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 186,
+  "task": "In the flaskish project at <dir> find where the function `save_upload` is defined and grep for all calls to it",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 187,
+  "task": "In the flaskish project at <dir> find the is_expired function, examine its code, and explain what bug it contains and why it's wrong.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 188,
+  "task": "Run the tests in the cli-tool project at <dir> using 'python -m pytest -q' and report which tests pass or fail, including the failure reason",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 189,
+  "task": "Review the upload handler in <dir> for path traversal vulnerabilities. Check if user-controlled filename input is being sanitized before being used in file path operations. Look for unsafe use of os.path.join, file operations, or path construction that could allow directory traversal (e.g., via ../ sequences). Report specific findings with locations.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 190,
+  "task": "Review the flaskish repository at <dir> for correctness and security issues. \n\nStart by exploring the repository structure, understanding what the project does (check README, setup.py, etc.), then systematically review the code files for:\n- Security vulnerabilities (input validation, injection risks, authentication/authorization flaws, secrets management, etc.)\n- Correctness issues (logic errors, resource leaks, error handling, edge cases)\n- Code quality concerns affecting reliability\n\nOrganize findings by severity (critical, high, medium, low), cite the file and line number for each issue, and suggest concrete fixes. Use outline and find_symbol to navigate efficiently rather than reading entire files.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 191,
+  "task": "In the project at <dir> find and read documentation about the rollback procedure (check README, docs folders, or relevant files). Summarize the rollback procedure in exactly 3 bullet points, keeping each concise.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 192,
+  "task": "In the flaskish repository (<dir> find where the function `save_upload` is defined and who calls it. Use find_symbol to locate it and report both the definition location and all call sites. Do not read whole files.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 193,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined and identify all the places where it is called. Provide the file paths, line numbers, and brief context for both the definition and all call sites.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 194,
+  "task": "In the flaskish project at <dir> find the `is_expired` function. Read its code carefully, identify the logic bug, and explain what is wrong and how it should be fixed. Use grep or find_symbol to locate the function first, then read the relevant code carefully.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 195,
+  "task": "Run all tests in the cli-tool project and report which tests fail, including the failure message and error details. Do not read or examine source files - only run the tests and report the results.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 196,
+  "task": "Review the upload handler in the flaskish project at <dir> for path traversal vulnerabilities. Find the upload handler code, check how file paths are constructed from user input, and determine if there are sufficient safeguards (e.g., path normalization, directory validation). Report any risks found with details on how an attacker could exploit it.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 197,
+  "task": "Review the entire flaskish repository at <dir> for security vulnerabilities, correctness issues, and code quality. Examine all Python files in app/, tests/, and the root directory. Check for: SQL injection or other injection attacks, authentication/authorization flaws, error handling gaps, input validation issues, secrets in code, dependency issues, logic errors, edge cases, and architectural concerns. Provide findings organized by severity (critical, high, medium, low) with concrete examples and fixes.\nFiles: app, tests, .",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 198,
+  "task": "Review the flaskish repository at <dir> for correctness and security issues. \n\n1. Start by exploring the repository structure and README to understand the project purpose\n2. Use outline or find_symbol to map key modules and entry points\n3. Systematically review the codebase for:\n   - Correctness issues: logic errors, missing error handling, type issues, edge cases\n   - Security issues: input validation, authentication/authorization, secrets management, injection vulnerabilities, insecure defaults\n   - Design and code quality issues: violation of best practices, anti-patterns, maintainability concerns\n4. Organize findings by severity (critical, high, medium, low)\n5. For each finding, cite the file and line numbers, explain the issue and its impact, and suggest a fix if applicable",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 199,
+  "task": "Read the documentation in <dir> to find the rollback procedure. Summarize it in exactly 3 bullets. Look in README files and any documentation files for rollback instructions.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 200,
+  "task": "Find where `save_upload` is defined and who calls it in <dir> Use find_symbol to locate its definition and all call sites. Do not read whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 201,
+  "task": "In the flaskish project at <dir> find where the function `save_upload` is defined and list all the places where it is called. Use grep to search the codebase.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 202,
+  "task": "Find the is_expired function in the flaskish codebase at <dir> Use grep or find_symbol to locate it, read the function definition, and identify the logic bug. Explain what is wrong with it and what the correct behavior should be.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 203,
+  "task": "Run all tests in the cli-tool project at <dir> Report which tests pass, which tests fail, and provide the full error messages for any failures. Do not read or examine source code files.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 204,
+  "task": "Review the upload handler in the flaskish project for path traversal vulnerabilities. Find the code that handles file uploads, examine how file paths are constructed from user input (especially filenames), and check whether there are protections against attacks like \"../\" sequences. Look for the upload handler function and any related path manipulation code. Report any findings with severity and concrete examples.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 205,
+  "task": "Find the rollback procedure documentation in <dir> and summarize it in exactly 3 bullets. Look through README files, docs directories, and any procedure or operational documentation. Return only the 3-bullet summary.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 206,
+  "task": "In <dir> find where save_upload is defined and who calls it. Use outline to get a map of definitions in relevant files, then use find_symbol to locate the definition and all call sites. Do not read whole files.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 207,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined and list all the places where it is called. Use grep or find_symbol to search the codebase.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 208,
+  "task": "Find the `is_expired` function in the flaskish codebase, read it carefully, identify any logical bugs, and explain what is wrong with it and how it should work correctly. Use find_symbol or grep to locate it first, then read the relevant code section. Be specific about the bug.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 209,
+  "task": "Run the tests in <dir> and identify which test(s) fail. Report the test name, the failure message, and the reason for the failure based on the test output. Do not read the source files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 210,
+  "task": "Examine the upload handler in the flaskish project at <dir> for path traversal vulnerabilities. Find where files are uploaded and how the destination path is constructed. Check if user-supplied filenames are validated or sanitized before being used in filesystem operations. Report any findings with concrete examples of how an attacker could exploit the vulnerability.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 211,
+  "task": "Apply the path traversal fix to the flaskish project at <dir> \n\n1. Update app/upload.py to add a _safe_join() helper that uses os.path.abspath and os.path.commonpath to validate that the resolved target stays within base_dir. Raise ValueError if the path escapes. Update save_upload() and read_upload() to use _safe_join().\n\n2. Update app/handlers.py handle_upload() to reject the raw name if it contains \"..\" or starts with \"/\" or contains null bytes, returning a 400 error with a clear message.\n\n3. After edits, verify syntax with check_syntax on both files.\n\n4. Run the existing tests with run_tests to ensure nothing breaks and the fix is compatible.\n\n5. Report the exact changes made and test results.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 212,
+  "task": "Add a --version flag to guru's CLI that prints guru.__version__ and exits.\n\n1. Inspect guru/cli.py to understand the current CLI structure\n2. Find where guru.__version__ is defined (likely in guru/__init__.py)\n3. Add a --version flag to the argument parser that prints guru.__version__ and exits cleanly\n4. Add a test in tests/test_misc.py that verifies the --version flag works correctly and prints the version\n5. Run pytest tests/test_misc.py to verify the test passes\n6. Verify with check_syntax before reporting\n\nAfter each file edit, verify with check_syntax. Prefer using outline to understand file structure before editing.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 213,
+  "task": "Investigate the guru codebase to explain how it decides the context window that fits on the GPU for an Ollama model. Find and document:\n1. Which functions and classes are involved in determining the GPU context window\n2. What is measured (e.g., GPU memory, available VRAM, model parameters)\n3. Where the result is persisted (file, database, memory cache, etc.)\n4. The complete flow from measurement to persistence\n\nUse find_symbol and outline to locate relevant code, then read the key files. Follow local imports to understand the complete picture. Focus on code that deals with context window fitting, GPU memory calculation, and Ollama model context.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 214,
+  "task": "Review the three adapter files in guru/adapters/ for consistency:\n- ollama.py\n- anthropic.py  \n- litellm.py\n\nFocus on two specific aspects:\n1. Provider error handling - how each adapter catches and handles provider-specific errors, what exceptions are raised, and error propagation\n2. Ledger call recording - how each adapter records calls to the ledger (timestamps, status, metadata, etc.)\n\nFor each file, identify the error handling patterns and ledger recording calls. Then compare across the three files and report:\n- Inconsistencies in error handling patterns (e.g., different exception types for similar failures, different error recovery strategies)\n- Inconsistencies in ledger call recording (e.g., different fields recorded, different timing of when ledger is updated)\n- Specific risks or gaps created by these inconsistencies (e.g., errors that won't be caught in one adapter but are in another, missing ledger entries)\n\nUse outline and find_symbol to map the code structure without reading entire files; read only the relevant sections. Report line ranges for each finding.",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 215,
+  "task": "Add the origin column to the `guru.ledger_cli tasks` table output in the guru repository at <dir>\n\n1. First, explore the codebase to understand:\n   - Where the ledger_cli tasks table is defined and rendered\n   - What the tasks stream looks like and where the origin column comes from\n   - The current test structure for this functionality\n\n2. Then make these changes:\n   - Add the origin column to the tasks table output\n   - Add or update a test to verify the origin column is included\n   \n3. Verify:\n   - Run the tests with pytest to ensure they pass\n   - Use check_syntax to verify any Python files are valid\n\nUse sandbox_run to execute commands and make edits via sandbox_python. After verification, describe what you changed but do not call sandbox_submit (the controller will do that).",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 216,
+  "task": "Submit the changes to the guru repository at <dir> with sandbox_submit. Use the intent: \"Add origin column to tasks table output and test\"",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 217,
+  "task": "In the guru repository at <dir>\n\n1. Run `sandbox_diff` to see what changes exist in the sandbox\n2. If there are changes, call `sandbox_submit` with intent \"Add origin column to tasks table output and test\"\n3. Report the result",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 218,
+  "task": "In the guru repository at <dir>\n\n1. Add the origin column to the tasks table output:\n   - Edit `guru/domain/ledger_report.py` in the `unlabelled_tasks()` function to include `'origin'` in the returned dict\n   - Edit `guru/ledger_cli.py` in the `cmd_tasks()` function to display the origin column in the output\n\n2. Add a test for the origin column:\n   - Edit `tests/test_ledger_cli.py` to verify the origin column appears in the tasks output\n\n3. Verify:\n   - Run pytest on the relevant test files\n   - Check syntax on edited Python files\n\n4. Call `sandbox_submit` with intent \"Add origin column to tasks table output and test\"\n\nUse sandbox_python and sandbox_run to make edits and run commands. Prefer outline and find_symbol to explore the code before making changes.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 219,
+  "task": "Read the documentation in <dir> to find the rollback procedure. Summarize it in exactly 3 bullets, focusing on the key steps and actions. Return only the 3 bullets.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 220,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined and identify all the places where it is called. Show the file paths, line numbers, and context for both the definition and the call sites.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 221,
+  "task": "Run the tests in the cli-tool project at <dir> and show all output including which tests fail and which pass.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 222,
+  "task": "Run the tests in the cli-tool project at <dir> and show all output including which tests fail and which pass. Then identify the failing test and explain what's wrong.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 223,
+  "task": "Fix the failing test in the cli-tool project at <dir> by editing wordcount.py. The test test_words_across_newlines is failing because count_words splits only on spaces, not on all whitespace. Change line 10 from `return len([w for w in text.split(' ') if w])` to `return len([w for w in text.split() if w])` so that newlines and other whitespace are treated as word separators. After making the change, verify the fix works by re-running the tests and confirming all four tests pass.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 224,
+  "task": "Find the `is_expired` function in the flaskish codebase (<dir> Read the function, understand its logic, and identify any bugs. Explain what the function is supposed to do, show the code, and clearly describe what is wrong with it and why.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 225,
+  "task": "Review the flaskish repository at <dir> for correctness issues. Examine the code structure, logic, error handling, edge cases, test coverage, and overall code quality. List findings by severity (critical, high, medium, low) with specific file locations and concrete recommendations.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 226,
+  "task": "Security review of the flaskish repository at <dir> Examine for vulnerabilities including input validation, injection risks, authentication/authorization issues, data exposure, dependency vulnerabilities, configuration security, and other security concerns. List findings by severity (critical, high, medium, low) with specific locations and concrete fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 227,
+  "task": "Examine the flaskish project at <dir> for path traversal vulnerabilities in the upload handler. Find the upload handler code, trace how it processes file paths (especially filenames from user input), and identify if an attacker can use directory traversal sequences like ../ to write files outside the intended upload directory. Report the specific code and any risks found.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 228,
+  "task": "Request the 'six' package as a dependency for the cli-tool project at <dir> using sandbox tooling",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 229,
+  "task": "In <dir> read the test file and wordcount.py module to understand the failing test, fix the bug in wordcount.py using sandbox_python or sandbox_run to edit the code, run pytest to verify all tests pass, then use sandbox_diff to show the change and sandbox_submit with a clear one-line intent describing what was fixed.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 230,
+  "task": "In <dir> run the tests to identify what is failing in wordcount.py, examine the test file and wordcount.py module, fix the failing test, verify with run_tests, then submit the fix using sandbox_submit",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 231,
+  "task": "In the project <dir> find the rollback procedure documentation and summarize it clearly in 3 bullets. List files first if needed to find the right document.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 232,
+  "task": "In project <dir> find where save_upload is defined and who calls it, using outline or symbol search tools.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 233,
+  "task": "In <dir> find where save_upload is defined and show the definition with context",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 234,
+  "task": "In <dir> find all places where save_upload is called",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 235,
+  "task": "In the flaskish project at <dir> find the is_expired function, explain what it does and identify the logic bug in it.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 236,
+  "task": "Run the tests for the cli-tool project at <dir> using 'python -m pytest -q' and report which test(s) fail and the failure reason(s). Do not read source files.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 237,
+  "task": "In <dir> find the upload handler code and review it for path traversal vulnerabilities. Check if user-supplied filenames or paths could escape the intended upload directory. Look at app/ directory structure first to locate the handler.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 238,
+  "task": "Conduct a comprehensive review of the flaskish repository at <dir> for correctness and security issues. \n\n1. Start by exploring the repository structure and understanding the codebase (list files, read README if present, check main components).\n2. Review all Python source files systematically for:\n   - Correctness: logic errors, exception handling, error cases, race conditions, data flow issues\n   - Security: input validation, output encoding, authentication/authorization, secret handling, injection vulnerabilities, unsafe operations\n3. Analyze the test coverage and test quality where present.\n4. Organize findings by severity (critical, high, medium, low).\n5. For each finding: describe the issue, its location, potential impact, and a concrete fix.\n\nPrefer using outline/find_symbol over reading whole files to be efficient. Follow local imports when reviewing.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 239,
+  "task": "Review the entire flaskish repository at <dir> for correctness issues. Examine:\n- Code quality and potential bugs\n- Architectural consistency and design patterns\n- Test coverage and test quality\n- Error handling and edge cases\n- Dependencies and imports\nProvide a summary of issues found, organized by severity (critical, high, medium, low).",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 240,
+  "task": "Review the entire flaskish repository at <dir> for security issues. Examine:\n- Input validation and sanitization\n- Authentication and authorization\n- Secrets management and configuration\n- Injection vulnerabilities (SQL, command, template)\n- Unsafe deserialization or dynamic code execution\n- File operations and path traversal risks\n- HTTP security headers and CORS\n- Dependency vulnerabilities\nProvide a summary of security issues found, organized by severity (critical, high, medium, low).",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 241,
+  "task": "In the <dir> project, find the rollback procedure documentation (search README files, procedure files, or ops documentation). Read it and provide a 3-bullet summary of the key steps.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 242,
+  "task": "In the flaskish project at <dir> find where `save_upload` is defined and who calls it. Use outline (to see a file's def/class map with line ranges) and find_symbol (to see where a name is defined and used). Do not read whole files.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 243,
+  "task": "In the flaskish project at <dir> find where the function `save_upload` is defined and list all the places where it is called. Use find_symbol or grep to locate the definition and all call sites.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 244,
+  "task": "Find the `is_expired` function in the flaskish project at <dir> Use find_symbol or grep to locate it, then read the file and explain what the logic bug is. Be specific about what's wrong and what the correct behavior should be.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 245,
+  "task": "Run the tests in <dir> and report which test(s) fail, including the full error message and stack trace. Show all test output.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 246,
+  "task": "Examine the flaskish project upload handler for path traversal vulnerabilities. Look for code that handles file uploads and validates or sanitizes file paths. Check if user-supplied filenames are safely validated, if path normalization is done, and if there are any ways an attacker could traverse directories using ../ or absolute paths. Report specific code locations, the exact vulnerability if found, and its severity.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 247,
+  "task": "In the guru project at <dir>\n\n1. Find where the `guru.ledger_cli tasks` table is defined and understand its current columns\n2. Add the origin column from the tasks stream to the table output\n3. Add or update a test that verifies the origin column is displayed in the tasks table output\n4. Run the test suite with pytest to verify all tests pass\n5. Use sandbox_diff to check the changes\n6. Call sandbox_submit with a one-line intent describing the changes\n\nFocus on the ledger_cli module and tasks-related code. Use find_symbol and outline to navigate efficiently before reading full files.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 248,
+  "task": "Request the 'six' package as a dependency for the cli-tool project using the request_dependency tool.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 249,
+  "task": "\nInside the sandbox at <dir> investigate the failing test in wordcount.py. Use sandbox_python or sandbox_run to run the tests, identify what's failing, read the wordcount.py file to understand the issue, then fix it by editing the file within the container. After fixing, verify with pytest that all tests pass. Do NOT call sandbox_submit yet - just report what the issue was and confirm all tests pass.\n",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 250,
+  "task": "In the sandbox at <dir> submit the fix to wordcount.py using sandbox_submit with the intent: \"Fix count_words to split on any whitespace, not just single spaces, so words across newlines are counted correctly\"",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 251,
+  "task": "Inside the sandbox at <dir> examine wordcount.py to identify the failing test. Debug and fix the issue in the code or test. Verify the fix with sandbox_run (e.g. pytest). Once tests pass, submit using sandbox_submit with a one-line intent describing the fix.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 252,
+  "task": "In the project at <dir> search the README and any other docs for a rollback procedure section. Find and read the relevant file(s), then summarize the rollback procedure in exactly 3 concise bullet points. Quote/cite the file name where the procedure is documented.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 253,
+  "task": "In the project at <dir> find where the symbol/function 'save_upload' is defined (file and line number, plus its signature), and find every place in the codebase that calls it (file and line number for each call site). Report the results clearly.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 254,
+  "task": "In the project at <dir> run the test suite, identify the failing test(s), diagnose the root cause by reading the relevant source and test files, then fix the source code (not the test, unless the test itself is clearly wrong) so all tests pass. Re-run the full test suite afterward to confirm everything passes. Report which test was failing, the root cause, and the exact fix you made.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 255,
+  "task": "In the project at <dir> first read wordcount.py to check the current implementation of count_words. If it still uses `text.split(' ')` (splitting only on literal space), edit it to use `text.split()` (no argument) instead, so it splits on any whitespace including newlines/tabs. Then run the test suite (e.g. pytest) and report the full output, confirming whether all tests now pass, including tests/test_wordcount.py::test_words_across_newlines. If any tests still fail, report which ones and why.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 256,
+  "task": "In the project at <dir> list the directory contents and give a brief summary of what documentation/files exist there (names, purpose if evident from file names or a quick skim).",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 257,
+  "task": "In the repository at <dir> find the definition of `is_expired` (grep for it across the codebase, read the defining file and any relevant surrounding logic/tests). Explain what the function is supposed to do, identify the logic bug in its implementation, explain why it is wrong (e.g. off-by-one, inverted comparison, wrong timezone handling, etc.), and give a concrete corrected version of the code. Cite file paths and line numbers.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 258,
+  "task": "Repo path: <dir>\n\nPerform a general cleanup of this repository. Concretely:\n1. Inspect the directory structure and identify: unused/dead files (build artifacts, temp files, .DS_Store, __pycache__, node_modules leftovers not in .gitignore, editor swap files, empty files), unused imports/variables in source files, obvious dead code (unreachable code, commented-out blocks of code that serve no documentation purpose), and inconsistent formatting.\n2. Delete files that are clearly build artifacts/junk (e.g. __pycache__, .pyc, .DS_Store, *.swp, *.log if clearly transient) using the delete_file tool.\n3. Fix unused imports/variables and remove genuinely dead code in source files using edit_file, being careful not to change behavior.\n4. Do NOT delete or modify source files you are unsure about, config files, tests, or anything that looks intentional (e.g. README, LICENSE, CI config).\n5. Report back a concise summary: what you found, what you deleted, what you edited, and anything you flagged but left alone with a reason.\n\nUse the actual file tools (list/read/grep/write/edit/delete) to do this for real \u2014 do not just describe it.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 259,
+  "task": "Review the repository at <dir> for SECURITY issues. Explore the directory structure first, then examine all source files, focusing on: input validation, injection vulnerabilities (SQL, command, template, etc.), authentication/authorization flaws, secrets/credentials handling, unsafe deserialization, path traversal, SSRF, insecure defaults, dependency issues, and any use of dangerous functions (eval, exec, pickle, subprocess with shell=True, etc.). For each finding, give the file path, line number/snippet, severity (critical/high/medium/low), a concrete explanation of the risk, and a concrete fix. Be specific and cite exact code.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 260,
+  "task": "Review the repository at <dir> for CORRECTNESS issues. Explore the directory structure first, then examine all source files. Look for logic bugs, incorrect error handling, edge cases not handled, race conditions, resource leaks, incorrect API usage, broken control flow, type errors, off-by-one errors, and mismatches between code and its apparent intent (e.g. docstrings/tests vs implementation). Check any test files and note whether they actually pass / cover the logic. For each finding, give the file path, line number/snippet, severity, explanation, and a concrete fix. Be specific and cite exact code.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 261,
+  "task": "In the project at <dir> locate the file upload handler(s) (search for routes/functions handling file uploads, e.g. using werkzeug secure_filename, request.files, save(), os.path.join, send_file/send_from_directory, etc). Analyze whether there is a path traversal vulnerability: check if user-supplied filenames or paths are sanitized before being used in filesystem operations (save, open, read, delete). Identify the exact file(s) and line numbers involved, explain the vulnerability or confirm it's safe, and give a concrete fix (e.g. use secure_filename, validate against a whitelist directory, os.path.abspath + prefix check) if a risk is found. Quote the relevant code snippets as evidence.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 262,
+  "task": "Review the flaskish repository at <dir> for correctness and security issues.\n\n1. Explore the repository structure and identify the main components, entry points, and key modules.\n2. Examine security issues:\n   - Input validation and sanitization\n   - Authentication and authorization mechanisms\n   - Secrets and credential handling\n   - SQL injection, XSS, CSRF vulnerabilities\n   - Dependency security (if requirements/dependencies present)\n   - Configuration and environment handling\n3. Check for correctness issues:\n   - Logic bugs and edge case handling\n   - Error handling and exception management\n   - Type safety and assumptions\n   - Test coverage and critical paths\n4. Review critical code paths, configurations, and integrations.\n5. Provide findings organized by severity (critical, high, medium, low) with concrete recommendations for each issue found.\n\nUse outline and find_symbol to efficiently explore files before reading them. Cite specific line numbers and file paths for each finding.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 263,
+  "task": "Request the 'six' package as a dependency for the project at <dir> using the sandbox's request_dependency or package request tooling. Use the appropriate sandbox mechanism (sandbox_python, sandbox_run, sandbox_submit, or request_dependency) to declare that the 'six' package is needed. Report what method was used and confirm the request was submitted.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 264,
+  "task": "Inside the sandbox at <dir> identify the failing test in wordcount.py, fix it, verify all tests pass with sandbox_run, then submit the change via sandbox_submit with a clear one-line intent describing the fix. Use sandbox_python or sandbox_run to execute commands, sandbox_diff to check changes, and sandbox_submit to submit. Prefer outline and find_symbol over reading whole files to locate the issue quickly.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 265,
+  "task": "Inside the sandbox at <dir>\n\n1. Find and read the failing test in wordcount.py to understand what it expects\n2. Fix the code in wordcount.py to make the test pass\n3. Delete the README.md file\n4. Verify the fix by running the tests (use sandbox_run with pytest)\n5. Use sandbox_submit to submit the changes with a one-line intent describing what you fixed\n\nUse sandbox_python or sandbox_run to make edits inside the container, and sandbox_diff to see what changed before submitting.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 266,
+  "task": "In the sandbox at <dir> submit the wordcount.py fix with sandbox_submit. The test now passes. Intent: \"Fix count_words to split on any whitespace, not just spaces\"",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 267,
+  "task": "Review the flaskish repository at <dir> for correctness issues: logic errors, type safety, error handling, edge cases, test coverage, and code quality. Explore the structure, read key files, understand the main functionality, and identify any bugs or issues that would cause incorrect behavior. Report findings by severity with concrete examples.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 268,
+  "task": "Review the flaskish repository at <dir> for security issues: hostile input handling, injection vulnerabilities, authorization/authentication flaws, secrets management, unsafe operations, and data exposure. Explore all code paths and configurations. Report findings by severity with concrete examples and recommended fixes.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 269,
+  "task": "Perform a systematic security and correctness review of the flaskish project at <dir> Examine all Python files in app/ and root directories. Look for: (1) Security issues: input validation, injection vulnerabilities, authentication/authorization flaws, insecure defaults, sensitive data exposure; (2) Correctness issues: error handling, edge cases, type safety, logic bugs, resource leaks; (3) Code quality: unsafe practices. Report findings organized by severity (critical, high, medium, low) with file location, specific code snippet, explanation of the issue, and concrete remediation.\nFiles: <dir>",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 270,
+  "task": "In the docs-only project at <dir> find and read the documentation about the rollback procedure, then provide a 3-bullet summary of it.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 271,
+  "task": "In the flaskish project at <dir> find where the function 'save_upload' is defined and list all the locations where it is called. Use symbol/outline lookup tools rather than reading whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 272,
+  "task": "In the flaskish project at <dir> find where the function 'save_upload' is defined and show all the places where it is called",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 273,
+  "task": "In the flaskish project at <dir> find the is_expired function, read it carefully, identify any logic bugs, and explain what is wrong with it and why it's a bug.",
+  "controller": "trivial",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 274,
+  "task": "Run all tests in the <dir> project and report which test fails and why, including the full error message.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 275,
+  "task": "Review the upload handler in <dir> for path traversal vulnerabilities. Find the upload handler code (check main app file, routes, views, or upload modules), analyze how file paths are constructed from user input (filename, file parameter, etc.), check for proper validation and sanitization, and report any path traversal risks such as insufficient path validation, use of user-controlled filenames in os.path.join without sanitization, or directory traversal via ../ sequences.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 276,
+  "task": "In the project <dir> find the rollback procedure documentation and summarise it in exactly 3 bullet points. Look in README, docs, or any documentation files for a section on rollback or recovery procedures.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 277,
+  "task": "Find where the function `save_upload` is defined in the flaskish codebase at <dir> and find all the places where it is called. Use find_symbol and outline tools (not read_file on whole files). Report the definition location and all call sites.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 278,
+  "task": "In the flaskish project at <dir> find where the function or name `save_upload` is defined and list all the places where it is called. Use grep or find_symbol to locate it.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 279,
+  "task": "Find the is_expired function in the flaskish codebase at <dir> Use find_symbol or grep to locate it, then read the file and analyze the logic. Explain what the bug is\u2014describe the incorrect behavior, what it should do instead, and why it's wrong.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 280,
+  "task": "Run the tests in <dir> Report which test(s) fail, the failure message, and the reason for the failure. Include the full test output showing the error.",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 281,
+  "task": "Review the upload handler in the flaskish project (<dir> for path traversal vulnerabilities. Find the upload handler code, examine how it processes file paths from user input, and check if it properly validates/sanitizes paths to prevent traversal attacks (e.g., using ../ or absolute paths to escape intended upload directory). Report any findings with severity and concrete evidence from the code.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 282,
+  "task": "Review the flaskish repository at <dir> for correctness issues: logic errors, data handling bugs, error handling gaps, edge cases, test gaps, and design problems. Examine all Python files and tests. Report findings by severity (critical, high, medium, low) with location and concrete fix.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 283,
+  "task": "Review the flaskish repository at <dir> for security vulnerabilities: input validation, injection attacks, improper error handling that leaks info, unsafe use of external data, authentication/authorization issues, secrets management. Examine all Python files. Report findings by severity (critical, high, medium, low) with location and concrete fix.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 284,
+  "task": "Request the 'six' package as a dependency for the project in <dir> using sandbox tooling. Use the appropriate sandbox mechanism (e.g., request_dependency or similar) to add 'six' to the project's dependencies without installing it directly.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 285,
+  "task": "Fix the failing test in wordcount.py inside the sandbox at <dir>\n\n1. First, examine wordcount.py and any test files (e.g., test_*.py) to understand what test is failing\n2. Run the tests to see the failure: use sandbox_run with [\"python\", \"-m\", \"pytest\", \"-q\"] or similar\n3. Identify the root cause of the test failure\n4. Fix the code in wordcount.py (use sandbox_python or sandbox_run to edit files inside the container)\n5. Re-run tests to verify all pass\n6. Use sandbox_submit with a clear one-line intent describing the fix\n\nUse outline and find_symbol to navigate the code efficiently before reading full files.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 286,
+  "task": "Debug and fix the failing test in wordcount.py in <dir> \n\nSteps:\n1. Run the tests to identify which test is failing and what the failure is\n2. Examine wordcount.py and the test file to understand the issue\n3. Fix the bug in wordcount.py (use outline/find_symbol before reading whole files)\n4. Verify the fix works by running tests again\n5. Report what was fixed\n\nWork inside the sandbox using sandbox_python or sandbox_run for execution, and sandbox_diff to review changes before submitting.",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 287,
+  "task": "Add a --version flag to <dir> that prints guru.__version__ and exits. First examine the current cli.py structure and check where __version__ is defined. Then add the --version flag using the appropriate argument parser. Add a test in tests/test_misc.py that verifies the --version flag prints the version and exits with code 0. After making changes, verify with check_syntax and run_tests before reporting results.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 288,
+  "task": "In the guru project at <dir> explain how guru decides the context window that fits on the GPU for an Ollama model. Trace the functions involved, what metrics are measured during this process, and where the result (the fitted context window size) is persisted. Start by searching for relevant code related to GPU, context window, Ollama, and memory fitting. Follow imports to understand the full flow.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 289,
+  "task": "Review <dir> anthropic.py and litellm.py for consistency of provider error handling and ledger call recording. Compare the three adapters and identify: (1) How each handles provider-specific errors, (2) How each records calls to the ledger, (3) Differences between them that could cause issues, (4) Any gaps or risks in error handling or ledger recording. Report findings organized by concern (error handling consistency, ledger recording consistency, specific risks with examples).\nFiles: guru/adapters/ollama.py, guru/adapters/anthropic.py, guru/adapters/litellm.py",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 290,
+  "task": "Find and examine the guru.ledger_cli tasks table implementation in <dir> to understand its current structure and columns",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 291,
+  "task": "Find tests for guru.ledger_cli tasks in <dir> and examine their structure to understand the test patterns",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 292,
+  "task": "Locate where the tasks stream's origin column/attribute is defined in <dir> to understand what data should be displayed",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 293,
+  "task": "In <dir> (1) Add 'origin' to the dict returned by unlabelled_tasks() in guru/domain/ledger_report.py by reading the 'origin' field from task rows (defaulting to ''). (2) Update the output format in cmd_tasks() in guru/ledger_cli.py to include the origin column after route but before kind/complexity. Show '' as 'user' and 'panel' as 'panel' for clarity. Verify changes work with check_syntax on both files before reporting.\nFiles: guru/domain/ledger_report.py, guru/ledger_cli.py",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 294,
+  "task": "In <dir> Add a test in tests/test_ledger_cli.py::TestTasks that verifies the origin column is displayed correctly. Test both 'user' origin (empty string) and 'panel' origin. The test should follow the pattern of existing tests: use _write() to create task rows with origin set, call ledger_cli.main() with the tasks subcommand, and assert that the origin appears in the output. Verify with check_syntax before reporting.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 295,
+  "task": "In <dir> Run the full test suite with `make test` to verify all tests pass",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 296,
+  "task": "In the current project codebase, find where the function/method `save_upload` is defined (grep for \"def save_upload\" or similar, including other languages' syntax like function save_upload, save_upload(, etc.), and find all call sites that invoke it (grep for \"save_upload(\" excluding the definition line). Report: the file path and line number of the definition, a short snippet of the definition signature, and for each call site the file path, line number, and the surrounding line of code showing how it's called (e.g. which module/class calls it).",
+  "controller": "standard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 297,
+  "task": "In this repository, run the test suite, identify the failing test(s), diagnose the root cause, and fix the source code (not the test) so all tests pass. Steps: 1) Find and run the appropriate test command (check for package.json, pytest, Makefile, etc. to determine how tests are run). 2) Capture the failure output for the failing test(s). 3) Locate the relevant source file(s) via grep/read. 4) Form a hypothesis about the root cause and verify it by reading the code. 5) Apply a minimal, correct fix to the source code using edit_file. 6) Re-run the full test suite to confirm all tests now pass. Report: which test(s) failed, the root cause, the fix applied (file and change), and confirmation of the passing test run.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 298,
+  "task": "In this repository, run the test suite for real (search_tools for phrases like \"run tests\", \"run shell command\", \"execute pytest\" etc. to find an execution tool \u2014 do not just read/trace code manually). Run it BEFORE any changes are made to confirm the current state, then verify the file wordcount.py currently contains the fix: count_words should use `return len(text.split())` instead of `text.split(' ')`. If the fix is not present, apply it via edit_file. Then run the full test suite again and report the exact pass/fail output. Report the exact command used and its exact output.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 299,
+  "task": "In this codebase, find the function/method named `is_expired` (grep for its definition across the repo, e.g. `grep -rn \"is_expired\"`), read the file(s) that define and call it, and determine whether there is a bug in its logic (e.g. off-by-one in expiry comparison, wrong timezone handling, inverted boolean, comparing wrong fields, etc.). Report: the file and line number of the definition, the exact current code, a clear explanation of what is wrong and why, and a concrete suggested fix (code snippet). If you cannot find any function named is_expired, say so explicitly and list what similar names exist instead.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 300,
+  "task": "In this codebase, locate the upload handler (grep for terms like \"upload\", \"multipart\", \"save file\", \"UploadFile\", route handlers for file uploads, etc.). Read the relevant file(s) in full, including any helper functions used to build file save paths and filenames. Determine whether there is a path traversal vulnerability: check how the destination filename/path is constructed, whether user-supplied filenames or path components are sanitized (e.g. rejecting \"../\", absolute paths, null bytes, symlinks), whether os.path.basename or equivalent is used, and whether the final resolved path is confirmed to stay within an intended upload directory. Report: the file(s) and line numbers involved, a clear verdict (vulnerable / not vulnerable / needs more info), the specific code that causes or prevents the issue, and if vulnerable, a concrete fix (code snippet) plus severity.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 301,
+  "task": "Fix the is_expired function in the flaskish project and run all tests to verify. \n\nStart by:\n1. Finding where is_expired is defined\n2. Looking at any failing tests related to is_expired\n3. Understanding what the bug is\n4. Fixing the function\n5. Running the full test suite to verify the fix\n\nUse find_symbol or grep to locate is_expired, then read the relevant code and tests. After making changes, verify with run_tests and report the results.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 302,
+  "task": "In the project at <dir> find and read the documentation about the rollback procedure. Look for README files, ROLLBACK.md, or similar documentation. Then provide a summary in exactly 3 bullets covering the key steps or information in the rollback procedure.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 303,
+  "task": "In the flaskish repository at <dir> find where the function `save_upload` is defined and list all the places where it is called. Use find_symbol to locate the definition and all call sites. Do not read whole files.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 304,
+  "task": "In the flaskish project at <dir> find where the function `save_upload` is defined and list all the places that call it. Use find_symbol or grep to locate the definition and all callers.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 305,
+  "task": "Run the test suite for the cli-tool project at <dir> Identify any failing tests. For each failure, analyze the test code and the implementation, then fix the code to make the test pass. Verify the fix with run_tests or check_syntax before reporting. Use find_symbol and outline instead of reading whole files when possible.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 306,
+  "task": "Add a --version flag to guru's CLI that prints guru.__version__ and exits, with a test in tests/test_misc.py.\n\n1. Read guru/cli.py to understand its current structure and how arguments are parsed\n2. Find where guru.__version__ is defined (likely in guru/__init__.py or a version module)\n3. Add a --version argument to the CLI that prints the version and exits\n4. Add a test in tests/test_misc.py that verifies the --version flag works (check the output and exit code)\n5. Run the tests with run_tests to verify everything passes\n6. Before reporting, verify with check_syntax and run_tests",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 307,
+  "task": "In the guru project at <dir> find and explain how guru calculates the context window that fits on GPU for Ollama models.\n\nSearch for:\n1. Functions or code that determines/calculates GPU context window size\n2. What metrics or measurements are used (VRAM, model size, context tokens, etc.)\n3. Where this calculated context window value is stored or persisted\n\nLook for keywords like \"context\", \"window\", \"gpu\", \"fit\", \"vram\", \"ollama\" in the codebase.\n\nUse outline and find_symbol to locate relevant code, then read the specific sections to understand:\n- The entry point(s) for this calculation\n- Which functions are called in sequence\n- What data is measured\n- Where the result is stored (database, config, memory, etc.)\n\nBe specific about file paths, line numbers, and function names. Trace through the full flow.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 308,
+  "task": "Review the three adapter files in <dir> for consistency:\n1. ollama.py\n2. anthropic.py\n3. litellm.py\n\nFocus on:\n- Error handling patterns: How each provider handles errors, exceptions, retries\n- Ledger call recording: How each adapter records calls to the ledger (what information is logged, when, what fields)\n- Consistency: Are patterns aligned across all three?\n- Risks: What inconsistencies could cause bugs, data loss, or observability gaps?\n\nUse outline/find_symbol to map error handling and ledger calls without reading entire files. Compare the implementations systematically. Report your findings with specific line references and concrete examples of differences. Highlight any risks.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 309,
+  "task": "Find the is_expired function in the flaskish codebase. Use find_symbol or grep to locate where it is defined, read the code, and explain what bug exists in the function logic. Identify the line numbers and describe what the issue is.",
+  "controller": "trivial",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 310,
+  "task": "Run all tests in <dir> and report which test fails and the failure reason/output. Show the complete error message and assertion that failed.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 311,
+  "task": "Fix the failing test in wordcount.py in the cli-tool project at <dir> \n\n1. Locate and read wordcount.py and its test file\n2. Identify the failing test\n3. Determine what is broken (the test itself or the code it tests)\n4. Fix the issue (edit either the test or the implementation)\n5. Run the tests to verify all tests pass\n6. Report the fix with a clear statement of what was wrong and what you changed",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 312,
+  "task": "Review the upload handler in the flaskish codebase for path traversal vulnerabilities. Examine how uploaded file paths are constructed and validated. Look for any uses of user-supplied filenames in path operations without proper sanitization. Check the entire codebase for where file uploads are handled (search for upload-related functions and file writing operations). Report whether malicious filenames like '../../../etc/passwd' or similar could escape intended directories.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 313,
+  "task": "Add a --version flag to guru's CLI that prints guru.__version__ and exits.\n\n1. Examine guru/cli.py to understand the current CLI structure and how arguments are handled\n2. Find where guru.__version__ is defined (likely in guru/__init__.py)\n3. Add a --version flag to the CLI that prints the version and exits\n4. Add a test in tests/test_misc.py that verifies the --version flag works correctly\n5. Run the tests (pytest tests/test_misc.py) to verify the changes work\n6. Verify with check_syntax before reporting\n\nUse outline and find_symbol to understand the code before making edits. Prefer focused edits over reading whole files.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 314,
+  "task": "Investigate and explain how guru decides the context window that fits on the GPU for an Ollama model. Find:\n1. The main functions involved in GPU context window fitting (search for keywords like \"context\", \"window\", \"gpu\", \"fit\", \"ollama\")\n2. What is measured (e.g., tokens, memory, latency)\n3. Where and how the result is persisted (database, file, cache)\n4. Trace the flow from input to the final persisted result\n\nShow the call chain, file locations, and line numbers for key functions. Use outline/find_symbol to map the functions before diving into details. Start by exploring the project structure and looking for relevant modules.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 315,
+  "task": "Review guru/adapters/ollama.py, guru/adapters/anthropic.py, and guru/adapters/litellm.py for consistency in:\n1. Provider error handling patterns (exception types caught, error categorization, retry logic, error messages)\n2. Ledger call recording (when calls are recorded, what data is captured, timing of recording relative to success/failure)\n\nCompare the three implementations. Report:\n- Which error handling patterns are used and where they differ\n- Which ledger recording patterns are used and where they differ\n- Specific risks or inconsistencies (e.g., if one adapter records failed calls but another doesn't, or if error recovery differs)\n- Recommendations for standardization\n\nStart by examining the structure and imports of each file to understand the patterns, then detail specific differences with line numbers.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 316,
+  "task": "Find and summarize the rollback procedure from documentation in <dir> Read any README, docs, or operations files to locate rollback instructions, then provide a 3-bullet summary.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 317,
+  "task": "Use symbol/outline tools to find where 'save_upload' is defined and who calls it in <dir> Do not read whole files.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 318,
+  "task": "In the flaskish project at <dir> find where save_upload is defined and who calls it. Search for the definition first, then search for all calls to it.",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 319,
+  "task": "Find the is_expired function in <dir> show its code and explain what logic bug it contains",
+  "controller": "hard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 320,
+  "task": "Run all tests in the <dir> project and report which test fails, what error it produces, and why it fails based on the test output.",
+  "controller": "hard",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 321,
+  "task": "In the <dir> project, find the upload handler and review it for path traversal vulnerabilities. Look for any use of user-supplied filenames or paths that could allow an attacker to write files outside the intended directory (e.g., using ../ sequences). Report any findings with concrete examples of how the vulnerability could be exploited.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 322,
+  "task": "Explore the guru project at <dir> to understand:\n1. The structure of guru/cli.py (how it's organized, what parser/framework it uses)\n2. Where guru.__version__ is defined\n3. What tests/test_misc.py looks like (how tests are structured)\n4. How to import and run tests\n\nUse outline and find_symbol to map the files quickly. Report back the key details needed to add a --version flag and test it.",
+  "controller": "trivial",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 323,
+  "task": "Add --version flag to guru/cli.py:\n\nFile: <dir>\n\n1. At the top (around line 10), import __version__ from guru:\n   - Change or add: `from guru import __version__` \n\n2. In the main() function around lines 454-464 where argparse arguments are added, add:\n   ```python\n   parser.add_argument(\n       \"--version\",\n       action=\"version\",\n       version=f\"guru {__version__}\",\n   )\n   ```\n\nPlace it after the existing arguments (e.g., after --reset-skills).\n\n3. Verify with check_syntax before reporting success.\n\nShow the line range where you added it.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 324,
+  "task": "Add a --version flag test to tests/test_misc.py:\n\nFile: <dir>\n\n1. Read the file to see the current test structure and imports.\n\n2. Add a new test that verifies the --version flag works. The test should:\n   - Import sys and subprocess (or use the click test runner if available)\n   - Call the CLI with `--version` flag\n   - Verify the output contains \"guru\" and \"0.1.0\"\n   - Verify the exit code is 0\n\n   Example pattern:\n   ```python\n   def test_version_flag():\n       from subprocess import run\n       result = run([\"python\", \"-m\", \"guru\", \"--version\"], capture_output=True, text=True)\n       assert result.returncode == 0\n       assert \"guru\" in result.stdout\n       assert \"0.1.0\" in result.stdout\n   ```\n\n   Or if guru has a test entry point, use that instead.\n\n3. Verify with check_syntax before reporting success.\n\nShow the test code you added.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ },
+ {
+  "id": 325,
+  "task": "Run the tests in tests/test_misc.py to verify the --version flag works:\n\nWorking directory: <dir>\n\n1. Run: `pytest tests/test_misc.py -v`\n\n2. Report:\n   - All test names and their pass/fail status\n   - Any failures or errors with details\n   - The total count of passed tests",
+  "controller": "trivial",
+  "gold_a": "trivial",
+  "gold_b": "trivial"
+ },
+ {
+  "id": 326,
+  "task": "Explore the guru codebase at <dir> and explain how guru decides the context window that fits on the GPU for an Ollama model. \n\nSpecifically:\n1. Which functions or modules are involved in calculating or determining the context window that fits on GPU?\n2. What metrics or measurements are used (e.g., GPU memory, model parameters, token sizes)?\n3. Where and how is the result persisted (config file, database, environment variable, etc.)?\n4. Walk through the call chain to show how the context window decision flows through the code.\n\nStart by exploring the repo structure and looking for keywords like \"context\", \"window\", \"gpu\", \"fit\", \"ollama\", \"memory\", \"token\". Use find_symbol and outline to locate relevant code, then read the specific files and functions. Provide a clear explanation with file paths and line numbers.",
+  "controller": "hard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 327,
+  "task": "Review <dir> anthropic.py, and litellm.py for consistency.\n\nCompare these three adapter files on:\n1. Provider error handling: What exceptions are caught, how they're logged, how they're re-raised or transformed\n2. Ledger call recording: When and how ledger.record_call() is invoked, what parameters are passed, when it's called in relation to API calls\n\nFor each file, use outline or find_symbol to map error handling and ledger recording patterns without reading the entire file. Then read the specific sections that handle errors and ledger calls.\n\nReport:\n- The error handling pattern in each file (what's caught, logged, re-raised)\n- The ledger recording pattern in each file (when it's called, with what parameters)\n- Specific differences between the three files\n- Risks from those differences (e.g., missing error handling, missing ledger recording, inconsistent behavior)",
+  "controller": "standard",
+  "gold_a": "hard",
+  "gold_b": "hard"
+ },
+ {
+  "id": 328,
+  "task": "In <dir>\n\n1. Find and examine the ledger_cli module to understand how the `guru.ledger_cli tasks` command currently outputs the table.\n2. Locate the tasks stream definition to understand the origin column and its purpose.\n3. Add the origin column to the tasks table output in the ledger_cli module.\n4. Find the existing tests for ledger_cli tasks output (or create a test file if needed).\n5. Add a test that verifies the origin column is included in the tasks table output.\n6. Run the tests with pytest to verify everything passes.\n7. Use sandbox_diff to check what changed, then call sandbox_submit with a one-line intent describing the changes.\n\nVerify with run_tests/check_syntax before reporting. Prefer outline and find_symbol over reading whole files.",
+  "controller": "standard",
+  "gold_a": "standard",
+  "gold_b": "standard"
+ }
+]

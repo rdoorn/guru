@@ -8,7 +8,7 @@ import pytest
 
 from guru import config
 from guru.domain import decisions
-from guru.judges import encoder, ollama_json
+from guru.judges import decide, encoder, ollama_json
 import guru.judges as judges
 
 
@@ -193,6 +193,136 @@ class TestAvailability:
             encoder._factory('zero-shot-classification', 'm')()
 
 
+class FakeExtractor:
+    """Stands in for a gliner2 extractor: returns ``scores`` per label in
+    the multi-label + softmax shape the judge asks for."""
+
+    def __init__(self, scores: dict) -> None:
+        self.scores, self.calls = scores, []
+
+    def classify_text(self, text, tasks, include_confidence=False):
+        self.calls.append((text, tasks, include_confidence))
+        [(name, spec)] = tasks.items()
+        return {name: [{'label': lab, 'confidence': self.scores[lab]}
+                       for lab in spec['labels']]}
+
+
+def _tiers():
+    return {'trivial': 'This task is trivial: lookups.',
+            'standard': 'This task is standard: one bug.',
+            'hard': 'This task is hard: architecture.'}
+
+
+class TestDecideJudge:
+    def test_choice_returns_the_full_distribution(self) -> None:
+        fake = FakeExtractor({'trivial': 0.1, 'standard': 0.2, 'hard': 0.7})
+        j = decide.DecideJudge(extractor_factory=lambda: fake)
+        q = decisions.Question(id='complexity', kind=decisions.CHOICE,
+                               instructions='How hard?', state='Task: x',
+                               options=_tiers())
+        [a] = j.ask([q])
+        assert a.chosen == 'hard'
+        assert a.dist == {'trivial': 0.1, 'standard': 0.2, 'hard': 0.7}
+        assert a.confidence == round((3 * 0.7 - 1) / 2, 4)
+        assert a.judge == 'decide:GLiNER2.5-Decide'
+        text, tasks, conf = fake.calls[0]
+        spec = tasks['complexity']
+        # label descriptions, the instructions as prompt, one softmax over
+        # every label (multi-label with threshold 0 returns them all)
+        assert spec['labels'] == _tiers() and spec['prompt'] == 'How hard?'
+        assert spec['multi_label'] is True and spec['class_act'] == 'softmax'
+        assert spec['cls_threshold'] == 0.0 and conf is True
+        assert text == 'Task: x'
+
+    def test_score_answers_the_level_index(self) -> None:
+        fake = FakeExtractor({'wrong': 0.6, 'partial': 0.3, 'good': 0.1})
+        j = decide.DecideJudge(extractor_factory=lambda: fake)
+        q = decisions.Question(id='j', kind=decisions.SCORE, instructions='?',
+                               state='x', options={'wrong': 'W',
+                                                   'partial': 'P',
+                                                   'good': 'G'})
+        [a] = j.ask([q])
+        assert a.chosen == 0
+
+    def test_noul_is_declined(self) -> None:
+        j = decide.DecideJudge(extractor_factory=lambda: FakeExtractor({}))
+        with pytest.raises(ValueError, match='choice/score'):
+            j.ask([_q()])
+
+    def test_long_state_is_truncated(self) -> None:
+        fake = FakeExtractor({'a': 0.5, 'b': 0.5})
+        j = decide.DecideJudge(extractor_factory=lambda: fake)
+        q = decisions.Question(id='c', kind=decisions.CHOICE, instructions='?',
+                               state='x' * 10000, options={'a': 'A', 'b': 'B'})
+        j.ask([q])
+        assert len(fake.calls[0][0]) == decide.MAX_CHARS
+
+    def test_extractor_loaded_once(self) -> None:
+        loads = []
+
+        def factory():
+            loads.append(1)
+            return FakeExtractor({'a': 0.9, 'b': 0.1})
+        j = decide.DecideJudge(extractor_factory=factory)
+        q = decisions.Question(id='c', kind=decisions.CHOICE, instructions='?',
+                               state='x', options={'a': 'A', 'b': 'B'})
+        j.ask([q])
+        j.ask([q])
+        assert loads == [1]
+
+    def test_warm_up_classifies_once_and_never_raises(self) -> None:
+        fake = FakeExtractor({'a': 0.5, 'b': 0.5})
+        j = decide.DecideJudge(extractor_factory=lambda: fake)
+        assert j.warm_up() >= 0 and len(fake.calls) == 1
+
+        def broken():
+            raise RuntimeError('no weights')
+        assert decide.DecideJudge(extractor_factory=broken).warm_up() >= 0
+
+    def test_inference_is_serialised(self) -> None:
+        # warm-up, active and shadow workers share one model: one forward
+        # pass at a time
+        active, peak = [], []
+
+        class Slow(FakeExtractor):
+            def classify_text(self, *a, **kw):
+                active.append(1)
+                peak.append(len(active))
+                threading.Event().wait(0.02)
+                active.pop()
+                return super().classify_text(*a, **kw)
+        fake = Slow({'a': 0.5, 'b': 0.5})
+        j = decide.DecideJudge(extractor_factory=lambda: fake)
+        q = decisions.Question(id='c', kind=decisions.CHOICE, instructions='?',
+                               state='x', options={'a': 'A', 'b': 'B'})
+        ts = [threading.Thread(target=j.ask, args=([q],)) for _ in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        assert max(peak) == 1 and len(fake.calls) == 4
+
+    def test_custom_model_names_the_judge(self) -> None:
+        j = decide.DecideJudge('org/Other-Decide',
+                               extractor_factory=lambda: None)
+        assert j.name == 'decide:Other-Decide'
+
+    def test_available_needs_gliner2_and_the_encoder_stack(
+            self, monkeypatch) -> None:
+        monkeypatch.setattr(encoder, 'available', lambda: True)
+        monkeypatch.setattr(decide, '_import_extractor', lambda: None)
+        assert decide.available() is False
+        monkeypatch.setattr(decide, '_import_extractor', lambda: object())
+        assert decide.available() is True
+        monkeypatch.setattr(encoder, 'available', lambda: False)
+        assert decide.available() is False
+
+    def test_factory_explains_missing_extra(self, monkeypatch) -> None:
+        monkeypatch.setattr(decide, '_import_extractor', lambda: None)
+        with pytest.raises(RuntimeError, match='uv sync --extra judge'):
+            decide._factory('m')()
+
+
 class TestBuildFromSettings:
     def setup_method(self) -> None:
         decisions.clear_judges()
@@ -209,6 +339,17 @@ class TestBuildFromSettings:
         assert isinstance(judges.build('encoder'), encoder.EncoderJudge)
         assert isinstance(judges.build('injection'), encoder.InjectionJudge)
         assert judges.build('nope') is None
+
+    def test_decide_spec(self, monkeypatch) -> None:
+        monkeypatch.setattr(decide, 'available', lambda: True)
+        j = judges.build('decide')
+        assert isinstance(j, decide.DecideJudge)
+        assert j.name == 'decide:GLiNER2.5-Decide'
+        assert judges.build('decide:org/X').name == 'decide:X'
+
+    def test_decide_unavailable_returns_none(self, monkeypatch) -> None:
+        monkeypatch.setattr(decide, 'available', lambda: False)
+        assert judges.build('decide') is None
 
     def test_encoder_unavailable_returns_none(self, monkeypatch) -> None:
         monkeypatch.setattr(encoder, 'available', lambda: False)

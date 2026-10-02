@@ -175,7 +175,7 @@ labels_margin = 0.15            # active labels: judge's top tier must beat the
 stall = "ollama"                # small decoder, JSON-constrained answer
 panel = "encoder"               # zero-shot NLI encoder (needs the extra)
 injection = "injection"         # prompt-injection classifier (needs the extra)
-labels = "encoder"              # the controller's kind/complexity labels
+labels = "decide"               # the controller's kind/complexity labels
 [decisions.active]              # active mode only: which points the judge decides
 stall = true
 labels = true
@@ -187,7 +187,7 @@ One point acts on a judge's verdict: `labels`, a margin-gated
 *tie-breaker* for the complexity label
 a controller puts on a spawned task — the judge's tier routes the task
 only when it differs from the controller's and beats the runner-up by
-`labels_margin`; the task row's `reason` then says
+`labels_margin` (0.15); the task row's `reason` then says
 `labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
 lost on margin leaves a row with `fallback_reason = "margin"` (the kind
 label is only observed). `panel` asks the same judge `needs_security` over
@@ -202,11 +202,23 @@ rows, judge beats the heuristic, acceptable false-positive rate) and the
 labelling procedure are in `docs/review-loop.md`.
 
 Judge specs are `ollama` or `ollama:<model>`, `encoder` or
-`encoder:<hf-model>` (default `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`)
-and `injection` or `injection:<hf-model>` (default
-`protectai/deberta-v3-base-prompt-injection-v2`). The encoder and injection
-judges need `uv sync --extra judge` (torch + transformers, about 1 GB);
-without it they are skipped with a log line and the heuristic runs alone.
+`encoder:<hf-model>` (zero-shot NLI, default
+`MoritzLaurer/deberta-v3-base-zeroshot-v2.0`), `decide` or
+`decide:<hf-model>` (schema classifier for choice/score questions,
+default `fastino/GLiNER2.5-Decide`) and `injection` or
+`injection:<hf-model>` (default
+`protectai/deberta-v3-base-prompt-injection-v2`). `labels` defaults to
+`decide`: on 325 real sub-agent tasks it picked the complexity tier right
+0.83 of the time against 0.46 for `encoder`, and as the tie-breaker it
+lifts routed accuracy from 0.60 to 0.83; `labels = "encoder"` switches
+back. A settings file that still carries the untouched
+`labels = "encoder"` line guru wrote earlier is moved to `decide` at
+startup, with a notice, once the `judge` extra (now including gliner2) is
+installed; until then it keeps the working NLI judge. `decide` declines yes/no questions, so `panel` and
+`stall` stay on `encoder` / `ollama`. The encoder, decide and injection
+judges need `uv sync --extra judge` (torch + transformers<5 + gliner2,
+about 1.5 GB); without it they are skipped with a log line and the
+heuristic runs alone.
 Design and measurements: `docs/plans/2026-09-23-routing-framework-design.md`,
 `bench/primitives/README.md`.
 
@@ -294,7 +306,7 @@ max_complexity = "hard"
 mode = "active"
 labels_margin = 0.15
 [decisions.points]
-labels = "encoder"          # complexity tie-breaker for the controller's label
+labels = "decide"           # complexity tie-breaker; "encoder" = the NLI judge
 panel = "encoder"           # needs_security: one extra security reviewer
 injection = "injection"     # shadow: fetched pages checked for injection
 [decisions.active]

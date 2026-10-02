@@ -856,6 +856,11 @@ def main() -> None:
         ui.console.print(
             "[yellow]routing: wrote the default Claude-tier configuration to"
             " settings.toml; /routing to inspect or turn off[/yellow]")
+    if routing_settings.migrate_labels_judge() == 'migrated':
+        ui.console.print(
+            '[yellow]decisions: the labels judge moved from "encoder" (NLI)'
+            ' to "decide" in settings.toml (0.83 vs 0.46 on real tasks);'
+            ' set labels = "encoder" to go back[/yellow]')
     routing = load_routing()
     judges.set_registry(REGISTRY, routing)     # llm: judges, gate reviewer
     installed = judges.install()

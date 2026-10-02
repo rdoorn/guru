@@ -1,0 +1,8034 @@
+{
+ "load_ms": {
+  "fastino/GLiNER2.5-Decide": 7932,
+  "fastino/GLiNER2.5-multi-Decide": 6270
+ },
+ "summary": [
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.5,
+   "mean_ms": 86,
+   "mean_conf_correct": 0.51,
+   "mean_conf_wrong": 0.43
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 72,
+   "mean_conf_correct": 0.65,
+   "mean_conf_wrong": 0.58
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.75,
+   "mean_ms": 72,
+   "mean_conf_correct": 0.57,
+   "mean_conf_wrong": 0.61
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.57,
+   "mean_ms": 73,
+   "mean_conf_correct": 0.67,
+   "mean_conf_wrong": 0.67
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.5,
+   "mean_ms": 80,
+   "mean_conf_correct": 0.85,
+   "mean_conf_wrong": 0.81
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.33,
+   "mean_ms": 80,
+   "mean_conf_correct": 0.45,
+   "mean_conf_wrong": 0.45
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.67,
+   "mean_ms": 121,
+   "mean_conf_correct": 0.6,
+   "mean_conf_wrong": 0.52
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.5,
+   "mean_ms": 112,
+   "mean_conf_correct": 0.45,
+   "mean_conf_wrong": 0.41
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 118,
+   "mean_conf_correct": 0.73,
+   "mean_conf_wrong": 0.56
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 1.0,
+   "mean_ms": 115,
+   "mean_conf_correct": 0.7,
+   "mean_conf_wrong": null
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.29,
+   "mean_ms": 111,
+   "mean_conf_correct": 0.85,
+   "mean_conf_wrong": 0.64
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.58,
+   "mean_ms": 122,
+   "mean_conf_correct": 0.55,
+   "mean_conf_wrong": 0.54
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 1.0,
+   "mean_ms": 139,
+   "mean_conf_correct": 0.81,
+   "mean_conf_wrong": null
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.17,
+   "mean_ms": 2074,
+   "mean_conf_correct": 0.21,
+   "mean_conf_wrong": 0.18
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.5,
+   "mean_ms": 92,
+   "mean_conf_correct": 0.55,
+   "mean_conf_wrong": 0.49
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 98,
+   "mean_conf_correct": 0.73,
+   "mean_conf_wrong": 0.7
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 98,
+   "mean_conf_correct": 0.8,
+   "mean_conf_wrong": 0.54
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 1.0,
+   "mean_ms": 102,
+   "mean_conf_correct": 0.76,
+   "mean_conf_wrong": null
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.5,
+   "mean_ms": 112,
+   "mean_conf_correct": 0.87,
+   "mean_conf_wrong": 0.79
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.33,
+   "mean_ms": 104,
+   "mean_conf_correct": 0.7,
+   "mean_conf_wrong": 0.63
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.58,
+   "mean_ms": 119,
+   "mean_conf_correct": 0.62,
+   "mean_conf_wrong": 0.47
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.5,
+   "mean_ms": 108,
+   "mean_conf_correct": 0.45,
+   "mean_conf_wrong": 0.41
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.75,
+   "mean_ms": 107,
+   "mean_conf_correct": 0.63,
+   "mean_conf_wrong": 0.55
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 1.0,
+   "mean_ms": 108,
+   "mean_conf_correct": 0.74,
+   "mean_conf_wrong": null
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 1.0,
+   "mean_ms": 109,
+   "mean_conf_correct": 0.76,
+   "mean_conf_wrong": null
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.83,
+   "mean_ms": 113,
+   "mean_conf_correct": 0.79,
+   "mean_conf_wrong": 0.56
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 1.0,
+   "mean_ms": 129,
+   "mean_conf_correct": 0.81,
+   "mean_conf_wrong": null
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.17,
+   "mean_ms": 2014,
+   "mean_conf_correct": 0.21,
+   "mean_conf_wrong": 0.18
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.2,
+   "mean_ms": 32,
+   "mean_conf_correct": 0.67,
+   "mean_conf_wrong": 0.48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.75,
+   "mean_ms": 27,
+   "mean_conf_correct": 0.69,
+   "mean_conf_wrong": 0.68
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.75,
+   "mean_ms": 30,
+   "mean_conf_correct": 0.72,
+   "mean_conf_wrong": 0.68
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.71,
+   "mean_ms": 28,
+   "mean_conf_correct": 0.66,
+   "mean_conf_wrong": 0.66
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.33,
+   "mean_ms": 29,
+   "mean_conf_correct": 0.86,
+   "mean_conf_wrong": 0.69
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.42,
+   "mean_ms": 31,
+   "mean_conf_correct": 0.46,
+   "mean_conf_wrong": 0.46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.42,
+   "mean_ms": 48,
+   "mean_conf_correct": 0.59,
+   "mean_conf_wrong": 0.35
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.2,
+   "mean_ms": 75,
+   "mean_conf_correct": 0.58,
+   "mean_conf_wrong": 0.46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.25,
+   "mean_ms": 42,
+   "mean_conf_correct": 0.76,
+   "mean_conf_wrong": 0.68
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.25,
+   "mean_ms": 44,
+   "mean_conf_correct": 0.83,
+   "mean_conf_wrong": 0.78
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.29,
+   "mean_ms": 45,
+   "mean_conf_correct": 0.76,
+   "mean_conf_wrong": 0.71
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.5,
+   "mean_ms": 46,
+   "mean_conf_correct": 0.63,
+   "mean_conf_wrong": 0.64
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.58,
+   "mean_ms": 50,
+   "mean_conf_correct": 0.51,
+   "mean_conf_wrong": 0.5
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.08,
+   "mean_ms": 1079,
+   "mean_conf_correct": 0.12,
+   "mean_conf_wrong": 0.13
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.2,
+   "mean_ms": 34,
+   "mean_conf_correct": 0.68,
+   "mean_conf_wrong": 0.52
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.38,
+   "mean_ms": 41,
+   "mean_conf_correct": 0.67,
+   "mean_conf_wrong": 0.55
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.75,
+   "mean_ms": 38,
+   "mean_conf_correct": 0.59,
+   "mean_conf_wrong": 0.51
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.71,
+   "mean_ms": 37,
+   "mean_conf_correct": 0.59,
+   "mean_conf_wrong": 0.52
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.5,
+   "mean_ms": 56,
+   "mean_conf_correct": 0.8,
+   "mean_conf_wrong": 0.82
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.58,
+   "mean_ms": 40,
+   "mean_conf_correct": 0.5,
+   "mean_conf_wrong": 0.49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.42,
+   "mean_ms": 48,
+   "mean_conf_correct": 0.55,
+   "mean_conf_wrong": 0.34
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "n": 10,
+   "accuracy": 0.2,
+   "mean_ms": 42,
+   "mean_conf_correct": 0.58,
+   "mean_conf_wrong": 0.46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 46,
+   "mean_conf_correct": 0.68,
+   "mean_conf_wrong": 0.51
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "n": 8,
+   "accuracy": 0.88,
+   "mean_ms": 46,
+   "mean_conf_correct": 0.75,
+   "mean_conf_wrong": 0.69
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "n": 7,
+   "accuracy": 0.86,
+   "mean_ms": 49,
+   "mean_conf_correct": 0.76,
+   "mean_conf_wrong": 0.74
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "n": 12,
+   "accuracy": 0.58,
+   "mean_ms": 45,
+   "mean_conf_correct": 0.67,
+   "mean_conf_wrong": 0.63
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "n": 12,
+   "accuracy": 0.58,
+   "mean_ms": 52,
+   "mean_conf_correct": 0.51,
+   "mean_conf_wrong": 0.5
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "n": 12,
+   "accuracy": 0.08,
+   "mean_ms": 1028,
+   "mean_conf_correct": 0.12,
+   "mean_conf_wrong": 0.13
+  }
+ ],
+ "outcomes": [
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.315
+   },
+   "correct": false,
+   "conf": 0.685,
+   "ms": 102
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.146
+   },
+   "correct": false,
+   "conf": 0.854,
+   "ms": 80
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.226
+   },
+   "correct": false,
+   "conf": 0.774,
+   "ms": 74
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.226
+   },
+   "correct": false,
+   "conf": 0.774,
+   "ms": 80
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.155
+   },
+   "correct": false,
+   "conf": 0.845,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.064
+   },
+   "correct": false,
+   "conf": 0.936,
+   "ms": 80
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.336
+   },
+   "correct": true,
+   "conf": 0.664,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.014
+   },
+   "correct": true,
+   "conf": 0.986,
+   "ms": 88
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.035
+   },
+   "correct": true,
+   "conf": 0.965,
+   "ms": 79
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.101
+   },
+   "correct": true,
+   "conf": 0.899,
+   "ms": 87
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.274
+   },
+   "correct": true,
+   "conf": 0.726,
+   "ms": 81
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.113
+   },
+   "correct": true,
+   "conf": 0.887,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.461,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.481,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.389,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.474,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.527,
+   "ms": 89
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.394,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.475,
+   "ms": 74
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.531,
+   "ms": 88
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.408,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.398,
+   "ms": 73
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.454,
+   "ms": 89
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.419,
+   "ms": 88
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "web_search",
+   "predicted": "web_search",
+   "correct": true,
+   "conf": 0.189,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.648,
+   "ms": 125
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "fetch_github_releases",
+   "predicted": "fetch_github_releases",
+   "correct": true,
+   "conf": 0.407,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "list_dir",
+   "predicted": "list_dir",
+   "correct": true,
+   "conf": 0.948,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "outline",
+   "predicted": "outline",
+   "correct": false,
+   "conf": 0.962,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": true,
+   "conf": 0.467,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.306,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "write_file",
+   "predicted": "write_file",
+   "correct": true,
+   "conf": 0.922,
+   "ms": 152
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "edit_file",
+   "predicted": "edit_file",
+   "correct": true,
+   "conf": 0.228,
+   "ms": 126
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "conf": 0.986,
+   "ms": 133
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "search_code",
+   "predicted": "search_code",
+   "correct": true,
+   "conf": 0.65,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.172,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.47
+   },
+   "correct": false,
+   "conf": 0.53,
+   "ms": 73
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.332
+   },
+   "correct": true,
+   "conf": 0.668,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.443
+   },
+   "correct": true,
+   "conf": 0.557,
+   "ms": 70
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.3
+   },
+   "correct": false,
+   "conf": 0.7,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.405
+   },
+   "correct": true,
+   "conf": 0.595,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.445
+   },
+   "correct": true,
+   "conf": 0.555,
+   "ms": 74
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.469
+   },
+   "correct": true,
+   "conf": 0.531,
+   "ms": 75
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.493
+   },
+   "correct": true,
+   "conf": 0.507,
+   "ms": 73
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.343
+   },
+   "correct": true,
+   "conf": 0.657,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.245
+   },
+   "correct": true,
+   "conf": 0.755,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.358
+   },
+   "correct": true,
+   "conf": 0.642,
+   "ms": 70
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.296
+   },
+   "correct": true,
+   "conf": 0.704,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.378
+   },
+   "correct": true,
+   "conf": 0.622,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.415
+   },
+   "correct": false,
+   "conf": 0.585,
+   "ms": 73
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.365
+   },
+   "correct": true,
+   "conf": 0.635,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.508
+   },
+   "correct": true,
+   "conf": 0.508,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.328
+   },
+   "correct": true,
+   "conf": 0.672,
+   "ms": 71
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.222
+   },
+   "correct": false,
+   "conf": 0.778,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.617
+   },
+   "correct": false,
+   "conf": 0.617,
+   "ms": 70
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.285
+   },
+   "correct": true,
+   "conf": 0.715,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.373
+   },
+   "correct": false,
+   "conf": 0.627,
+   "ms": 72
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.341
+   },
+   "correct": true,
+   "conf": 0.659,
+   "ms": 73
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.352
+   },
+   "correct": true,
+   "conf": 0.648,
+   "ms": 81
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.406,
+   "ms": 95
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.404,
+   "ms": 88
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.482,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.4,
+   "ms": 96
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.521,
+   "ms": 76
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.511,
+   "ms": 74
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.462,
+   "ms": 92
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.749,
+   "ms": 90
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.353,
+   "ms": 73
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.405,
+   "ms": 76
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.348
+   },
+   "correct": false,
+   "conf": 0.652,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.178
+   },
+   "correct": false,
+   "conf": 0.822,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.083
+   },
+   "correct": false,
+   "conf": 0.917,
+   "ms": 109
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.184
+   },
+   "correct": false,
+   "conf": 0.816,
+   "ms": 108
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.26
+   },
+   "correct": false,
+   "conf": 0.74,
+   "ms": 108
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.189
+   },
+   "correct": false,
+   "conf": 0.811,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.079
+   },
+   "correct": true,
+   "conf": 0.921,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.104
+   },
+   "correct": true,
+   "conf": 0.896,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.162
+   },
+   "correct": true,
+   "conf": 0.838,
+   "ms": 121
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.151
+   },
+   "correct": true,
+   "conf": 0.849,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.121
+   },
+   "correct": true,
+   "conf": 0.879,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.163
+   },
+   "correct": true,
+   "conf": 0.837,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.697,
+   "ms": 101
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.651,
+   "ms": 100
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.746,
+   "ms": 102
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.712,
+   "ms": 99
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.712,
+   "ms": 111
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.649,
+   "ms": 103
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.721,
+   "ms": 99
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.726,
+   "ms": 102
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.627,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.429,
+   "ms": 103
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.655,
+   "ms": 110
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.51,
+   "ms": 109
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "web_fetch",
+   "predicted": "web_fetch",
+   "correct": false,
+   "conf": 0.243,
+   "ms": 124
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.581,
+   "ms": 124
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "fetch_github_releases",
+   "predicted": "fetch_github_releases",
+   "correct": true,
+   "conf": 0.427,
+   "ms": 125
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "list_dir",
+   "predicted": "list_dir",
+   "correct": true,
+   "conf": 0.933,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "outline",
+   "predicted": "outline",
+   "correct": false,
+   "conf": 0.963,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": true,
+   "conf": 0.373,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.245,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "write_file",
+   "predicted": "write_file",
+   "correct": true,
+   "conf": 0.911,
+   "ms": 121
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "web_fetch",
+   "predicted": "web_fetch",
+   "correct": false,
+   "conf": 0.33,
+   "ms": 120
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "conf": 0.992,
+   "ms": 122
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "search_code",
+   "predicted": "search_code",
+   "correct": true,
+   "conf": 0.576,
+   "ms": 123
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "web_search",
+   "predicted": "web_search",
+   "correct": true,
+   "conf": 0.147,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.464
+   },
+   "correct": false,
+   "conf": 0.536,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.211
+   },
+   "correct": true,
+   "conf": 0.789,
+   "ms": 96
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.129
+   },
+   "correct": true,
+   "conf": 0.871,
+   "ms": 95
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.822
+   },
+   "correct": true,
+   "conf": 0.822,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.263
+   },
+   "correct": true,
+   "conf": 0.737,
+   "ms": 96
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.189
+   },
+   "correct": true,
+   "conf": 0.811,
+   "ms": 96
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.185
+   },
+   "correct": true,
+   "conf": 0.815,
+   "ms": 102
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.237
+   },
+   "correct": true,
+   "conf": 0.763,
+   "ms": 109
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.439
+   },
+   "correct": true,
+   "conf": 0.561,
+   "ms": 98
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.301
+   },
+   "correct": true,
+   "conf": 0.699,
+   "ms": 99
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.083
+   },
+   "correct": true,
+   "conf": 0.917,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.45
+   },
+   "correct": true,
+   "conf": 0.55,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.699
+   },
+   "correct": false,
+   "conf": 0.699,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.7
+   },
+   "correct": true,
+   "conf": 0.7,
+   "ms": 98
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.234
+   },
+   "correct": true,
+   "conf": 0.766,
+   "ms": 100
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.94
+   },
+   "correct": true,
+   "conf": 0.94,
+   "ms": 101
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.195
+   },
+   "correct": true,
+   "conf": 0.805,
+   "ms": 100
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.521
+   },
+   "correct": true,
+   "conf": 0.521,
+   "ms": 99
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.084
+   },
+   "correct": true,
+   "conf": 0.916,
+   "ms": 98
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.246
+   },
+   "correct": true,
+   "conf": 0.754,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.651
+   },
+   "correct": true,
+   "conf": 0.651,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.129
+   },
+   "correct": true,
+   "conf": 0.871,
+   "ms": 93
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.208
+   },
+   "correct": true,
+   "conf": 0.792,
+   "ms": 103
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.414,
+   "ms": 97
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.454,
+   "ms": 89
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.481,
+   "ms": 96
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.567,
+   "ms": 94
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.623,
+   "ms": 89
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.615,
+   "ms": 88
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.427,
+   "ms": 94
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.723,
+   "ms": 98
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.407,
+   "ms": 89
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.485,
+   "ms": 88
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.459
+   },
+   "correct": false,
+   "conf": 0.541,
+   "ms": 122
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.479
+   },
+   "correct": false,
+   "conf": 0.521,
+   "ms": 122
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.429
+   },
+   "correct": false,
+   "conf": 0.571,
+   "ms": 120
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.519
+   },
+   "correct": true,
+   "conf": 0.519,
+   "ms": 125
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.591
+   },
+   "correct": true,
+   "conf": 0.591,
+   "ms": 124
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.501
+   },
+   "correct": true,
+   "conf": 0.501,
+   "ms": 122
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.423
+   },
+   "correct": true,
+   "conf": 0.577,
+   "ms": 119
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.408
+   },
+   "correct": true,
+   "conf": 0.592,
+   "ms": 128
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.437
+   },
+   "correct": true,
+   "conf": 0.563,
+   "ms": 120
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.504
+   },
+   "correct": false,
+   "conf": 0.504,
+   "ms": 123
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.476
+   },
+   "correct": true,
+   "conf": 0.524,
+   "ms": 120
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.564
+   },
+   "correct": false,
+   "conf": 0.564,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.953,
+   "ms": 121
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.906,
+   "ms": 121
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.503,
+   "ms": 122
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.868,
+   "ms": 136
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.771,
+   "ms": 215
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.822,
+   "ms": 131
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.847,
+   "ms": 134
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.578,
+   "ms": 133
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.723,
+   "ms": 136
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.966,
+   "ms": 156
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.793,
+   "ms": 135
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.969,
+   "ms": 130
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.148,
+   "ms": 2300
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.16,
+   "ms": 2857
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.137,
+   "ms": 1958
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "list_dir",
+   "predicted": "list_dir",
+   "correct": true,
+   "conf": 0.152,
+   "ms": 2095
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.166,
+   "ms": 1895
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.193,
+   "ms": 1907
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.203,
+   "ms": 1930
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.144,
+   "ms": 1925
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.232,
+   "ms": 1964
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "conf": 0.271,
+   "ms": 1990
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "find_symbol",
+   "predicted": "find_symbol",
+   "correct": false,
+   "conf": 0.173,
+   "ms": 2033
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.202,
+   "ms": 2038
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.577
+   },
+   "correct": true,
+   "conf": 0.577,
+   "ms": 121
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.279
+   },
+   "correct": true,
+   "conf": 0.721,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.263
+   },
+   "correct": true,
+   "conf": 0.737,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.752
+   },
+   "correct": true,
+   "conf": 0.752,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.352
+   },
+   "correct": true,
+   "conf": 0.648,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.253
+   },
+   "correct": true,
+   "conf": 0.747,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.274
+   },
+   "correct": true,
+   "conf": 0.726,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.302
+   },
+   "correct": true,
+   "conf": 0.698,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.374
+   },
+   "correct": true,
+   "conf": 0.626,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.346
+   },
+   "correct": true,
+   "conf": 0.654,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.199
+   },
+   "correct": true,
+   "conf": 0.801,
+   "ms": 129
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.32
+   },
+   "correct": true,
+   "conf": 0.68,
+   "ms": 121
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.563
+   },
+   "correct": false,
+   "conf": 0.563,
+   "ms": 116
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.723
+   },
+   "correct": true,
+   "conf": 0.723,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.303
+   },
+   "correct": true,
+   "conf": 0.697,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.905
+   },
+   "correct": true,
+   "conf": 0.905,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.638
+   },
+   "correct": false,
+   "conf": 0.638,
+   "ms": 108
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.856
+   },
+   "correct": true,
+   "conf": 0.856,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.626
+   },
+   "correct": false,
+   "conf": 0.626,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.647
+   },
+   "correct": false,
+   "conf": 0.647,
+   "ms": 124
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.845
+   },
+   "correct": true,
+   "conf": 0.845,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.625
+   },
+   "correct": false,
+   "conf": 0.625,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.684
+   },
+   "correct": false,
+   "conf": 0.684,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.386,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.419,
+   "ms": 105
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.478,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.512,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.424,
+   "ms": 105
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.421,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.375,
+   "ms": 122
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.572,
+   "ms": 119
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.361,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.369,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.753
+   },
+   "correct": true,
+   "conf": 0.753,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.641
+   },
+   "correct": true,
+   "conf": 0.641,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.871
+   },
+   "correct": true,
+   "conf": 0.871,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.948
+   },
+   "correct": true,
+   "conf": 0.948,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.84
+   },
+   "correct": true,
+   "conf": 0.84,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.733
+   },
+   "correct": true,
+   "conf": 0.733,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.533
+   },
+   "correct": false,
+   "conf": 0.533,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.166
+   },
+   "correct": true,
+   "conf": 0.834,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.242
+   },
+   "correct": true,
+   "conf": 0.758,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.385
+   },
+   "correct": true,
+   "conf": 0.615,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.063
+   },
+   "correct": true,
+   "conf": 0.937,
+   "ms": 114
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.593
+   },
+   "correct": false,
+   "conf": 0.593,
+   "ms": 113
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.953,
+   "ms": 126
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.906,
+   "ms": 128
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.503,
+   "ms": 125
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.868,
+   "ms": 124
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.771,
+   "ms": 131
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.822,
+   "ms": 128
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.847,
+   "ms": 133
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.578,
+   "ms": 126
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.723,
+   "ms": 127
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.966,
+   "ms": 129
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.793,
+   "ms": 137
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.969,
+   "ms": 129
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.148,
+   "ms": 2111
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.16,
+   "ms": 2505
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.137,
+   "ms": 1806
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "list_dir",
+   "predicted": "list_dir",
+   "correct": true,
+   "conf": 0.152,
+   "ms": 1959
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.166,
+   "ms": 1951
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.193,
+   "ms": 1861
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.203,
+   "ms": 1925
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.144,
+   "ms": 2202
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.232,
+   "ms": 1981
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "conf": 0.271,
+   "ms": 1942
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "find_symbol",
+   "predicted": "find_symbol",
+   "correct": false,
+   "conf": 0.173,
+   "ms": 2041
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "code_health",
+   "predicted": "code_health",
+   "correct": false,
+   "conf": 0.202,
+   "ms": 1887
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.616
+   },
+   "correct": true,
+   "conf": 0.616,
+   "ms": 121
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.131
+   },
+   "correct": true,
+   "conf": 0.869,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.216
+   },
+   "correct": true,
+   "conf": 0.784,
+   "ms": 105
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.665
+   },
+   "correct": true,
+   "conf": 0.665,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.249
+   },
+   "correct": true,
+   "conf": 0.751,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.221
+   },
+   "correct": true,
+   "conf": 0.779,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.315
+   },
+   "correct": true,
+   "conf": 0.685,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.255
+   },
+   "correct": true,
+   "conf": 0.745,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.512
+   },
+   "correct": false,
+   "conf": 0.512,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.496
+   },
+   "correct": true,
+   "conf": 0.504,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.29
+   },
+   "correct": true,
+   "conf": 0.71,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.474
+   },
+   "correct": true,
+   "conf": 0.526,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.581
+   },
+   "correct": false,
+   "conf": 0.581,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.695
+   },
+   "correct": true,
+   "conf": 0.695,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.494
+   },
+   "correct": true,
+   "conf": 0.506,
+   "ms": 105
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.824
+   },
+   "correct": true,
+   "conf": 0.824,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.202
+   },
+   "correct": true,
+   "conf": 0.798,
+   "ms": 105
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.657
+   },
+   "correct": true,
+   "conf": 0.657,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.24
+   },
+   "correct": true,
+   "conf": 0.76,
+   "ms": 106
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.188
+   },
+   "correct": true,
+   "conf": 0.812,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.719
+   },
+   "correct": true,
+   "conf": 0.719,
+   "ms": 115
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.214
+   },
+   "correct": true,
+   "conf": 0.786,
+   "ms": 110
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.192
+   },
+   "correct": true,
+   "conf": 0.808,
+   "ms": 117
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.386,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.419,
+   "ms": 103
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.478,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.512,
+   "ms": 111
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.424,
+   "ms": 103
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.421,
+   "ms": 103
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.375,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.572,
+   "ms": 112
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.361,
+   "ms": 110
+  },
+  {
+   "model": "fastino/GLiNER2.5-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": true,
+   "conf": 0.369,
+   "ms": 107
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.231
+   },
+   "correct": false,
+   "conf": 0.769,
+   "ms": 32
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.272
+   },
+   "correct": false,
+   "conf": 0.728,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.38
+   },
+   "correct": false,
+   "conf": 0.62,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.394
+   },
+   "correct": false,
+   "conf": 0.606,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.231
+   },
+   "correct": false,
+   "conf": 0.769,
+   "ms": 27
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.289
+   },
+   "correct": false,
+   "conf": 0.711,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.588
+   },
+   "correct": false,
+   "conf": 0.588,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.013
+   },
+   "correct": true,
+   "conf": 0.987,
+   "ms": 35
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.076
+   },
+   "correct": true,
+   "conf": 0.924,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.696
+   },
+   "correct": false,
+   "conf": 0.696,
+   "ms": 32
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.356
+   },
+   "correct": true,
+   "conf": 0.644,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.103
+   },
+   "correct": true,
+   "conf": 0.897,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.443,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.425,
+   "ms": 27
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.426,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.473,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.438,
+   "ms": 35
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.437,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.506,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.416,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "large",
+   "predicted": "large",
+   "correct": true,
+   "conf": 0.473,
+   "ms": 32
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.508,
+   "ms": 32
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.498,
+   "ms": 34
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.427,
+   "ms": 32
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.112,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.873,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "request_dependency",
+   "predicted": "request_dependency",
+   "correct": false,
+   "conf": 0.16,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "list_dir",
+   "predicted": "list_dir",
+   "correct": true,
+   "conf": 0.692,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "outline",
+   "predicted": "outline",
+   "correct": false,
+   "conf": 0.773,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "sandbox_python",
+   "predicted": "sandbox_python",
+   "correct": false,
+   "conf": 0.302,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.105,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "write_file",
+   "predicted": "write_file",
+   "correct": true,
+   "conf": 0.811,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "edit_file",
+   "predicted": "edit_file",
+   "correct": true,
+   "conf": 0.263,
+   "ms": 52
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "conf": 0.955,
+   "ms": 67
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "search_code",
+   "predicted": "search_code",
+   "correct": true,
+   "conf": 0.246,
+   "ms": 51
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.107,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.328
+   },
+   "correct": false,
+   "conf": 0.672,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.28
+   },
+   "correct": true,
+   "conf": 0.72,
+   "ms": 36
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.275
+   },
+   "correct": true,
+   "conf": 0.725,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.309
+   },
+   "correct": false,
+   "conf": 0.691,
+   "ms": 32
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.298
+   },
+   "correct": true,
+   "conf": 0.702,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.301
+   },
+   "correct": true,
+   "conf": 0.699,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.232
+   },
+   "correct": true,
+   "conf": 0.768,
+   "ms": 27
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.272
+   },
+   "correct": true,
+   "conf": 0.728,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.358
+   },
+   "correct": true,
+   "conf": 0.642,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.327
+   },
+   "correct": true,
+   "conf": 0.673,
+   "ms": 29
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.282
+   },
+   "correct": true,
+   "conf": 0.718,
+   "ms": 25
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.306
+   },
+   "correct": true,
+   "conf": 0.694,
+   "ms": 29
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.332
+   },
+   "correct": true,
+   "conf": 0.668,
+   "ms": 29
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.339
+   },
+   "correct": false,
+   "conf": 0.661,
+   "ms": 25
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.244
+   },
+   "correct": true,
+   "conf": 0.756,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.292
+   },
+   "correct": false,
+   "conf": 0.708,
+   "ms": 25
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.399
+   },
+   "correct": true,
+   "conf": 0.601,
+   "ms": 29
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.353
+   },
+   "correct": false,
+   "conf": 0.647,
+   "ms": 29
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.336
+   },
+   "correct": true,
+   "conf": 0.664,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.363
+   },
+   "correct": true,
+   "conf": 0.637,
+   "ms": 29
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.33
+   },
+   "correct": false,
+   "conf": 0.67,
+   "ms": 29
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.275
+   },
+   "correct": true,
+   "conf": 0.725,
+   "ms": 26
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.352
+   },
+   "correct": true,
+   "conf": 0.648,
+   "ms": 25
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.408,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.468,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.43,
+   "ms": 37
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "good",
+   "predicted": 2,
+   "correct": false,
+   "conf": 0.695,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.486,
+   "ms": 32
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.477,
+   "ms": 30
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.651,
+   "ms": 37
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.69,
+   "ms": 33
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.463,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "bare",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.446,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.26
+   },
+   "correct": false,
+   "conf": 0.74,
+   "ms": 48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.189
+   },
+   "correct": false,
+   "conf": 0.811,
+   "ms": 43
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.121
+   },
+   "correct": false,
+   "conf": 0.879,
+   "ms": 43
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.133
+   },
+   "correct": false,
+   "conf": 0.867,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.189
+   },
+   "correct": false,
+   "conf": 0.811,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.172
+   },
+   "correct": false,
+   "conf": 0.828,
+   "ms": 120
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.132
+   },
+   "correct": true,
+   "conf": 0.868,
+   "ms": 60
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.293
+   },
+   "correct": true,
+   "conf": 0.707,
+   "ms": 52
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.251
+   },
+   "correct": true,
+   "conf": 0.749,
+   "ms": 55
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.129
+   },
+   "correct": true,
+   "conf": 0.871,
+   "ms": 56
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.105
+   },
+   "correct": true,
+   "conf": 0.895,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.272
+   },
+   "correct": true,
+   "conf": 0.728,
+   "ms": 56
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.566,
+   "ms": 40
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.477,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.562,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.558,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.459,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.441,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.451,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.469,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.499,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.496,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.484,
+   "ms": 40
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.529,
+   "ms": 40
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.125,
+   "ms": 48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.839,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "request_dependency",
+   "predicted": "request_dependency",
+   "correct": false,
+   "conf": 0.179,
+   "ms": 48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "list_dir",
+   "predicted": "list_dir",
+   "correct": true,
+   "conf": 0.505,
+   "ms": 48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "outline",
+   "predicted": "outline",
+   "correct": false,
+   "conf": 0.682,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "sandbox_python",
+   "predicted": "sandbox_python",
+   "correct": false,
+   "conf": 0.337,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.128,
+   "ms": 52
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "write_file",
+   "predicted": "write_file",
+   "correct": true,
+   "conf": 0.774,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "edit_file",
+   "predicted": "edit_file",
+   "correct": true,
+   "conf": 0.29,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "delete_file",
+   "predicted": "delete_file",
+   "correct": true,
+   "conf": 0.941,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "search_code",
+   "predicted": "search_code",
+   "correct": true,
+   "conf": 0.235,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.123,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.521
+   },
+   "correct": true,
+   "conf": 0.521,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.411
+   },
+   "correct": true,
+   "conf": 0.589,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.512
+   },
+   "correct": false,
+   "conf": 0.512,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.489
+   },
+   "correct": false,
+   "conf": 0.511,
+   "ms": 37
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.414
+   },
+   "correct": true,
+   "conf": 0.586,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.415
+   },
+   "correct": true,
+   "conf": 0.585,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.386
+   },
+   "correct": true,
+   "conf": 0.614,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.383
+   },
+   "correct": true,
+   "conf": 0.617,
+   "ms": 37
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.581
+   },
+   "correct": false,
+   "conf": 0.581,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.557
+   },
+   "correct": false,
+   "conf": 0.557,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.508
+   },
+   "correct": false,
+   "conf": 0.508,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.553
+   },
+   "correct": false,
+   "conf": 0.553,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.567
+   },
+   "correct": false,
+   "conf": 0.567,
+   "ms": 40
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.635
+   },
+   "correct": true,
+   "conf": 0.635,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.493
+   },
+   "correct": true,
+   "conf": 0.507,
+   "ms": 36
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.853
+   },
+   "correct": true,
+   "conf": 0.853,
+   "ms": 40
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.511
+   },
+   "correct": false,
+   "conf": 0.511,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.647
+   },
+   "correct": true,
+   "conf": 0.647,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.488
+   },
+   "correct": true,
+   "conf": 0.512,
+   "ms": 36
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.533
+   },
+   "correct": false,
+   "conf": 0.533,
+   "ms": 37
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.605
+   },
+   "correct": true,
+   "conf": 0.605,
+   "ms": 37
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.382
+   },
+   "correct": true,
+   "conf": 0.618,
+   "ms": 37
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.454
+   },
+   "correct": true,
+   "conf": 0.546,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "wrong",
+   "predicted": 0,
+   "correct": false,
+   "conf": 0.428,
+   "ms": 36
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.478,
+   "ms": 35
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.47,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "good",
+   "predicted": 2,
+   "correct": false,
+   "conf": 0.701,
+   "ms": 34
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.56,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.536,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.619,
+   "ms": 38
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.731,
+   "ms": 35
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.507,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "prompt",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.46,
+   "ms": 31
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.383
+   },
+   "correct": false,
+   "conf": 0.617,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.383
+   },
+   "correct": false,
+   "conf": 0.617,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.329
+   },
+   "correct": false,
+   "conf": 0.671,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.346
+   },
+   "correct": false,
+   "conf": 0.654,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.392
+   },
+   "correct": false,
+   "conf": 0.608,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.356
+   },
+   "correct": false,
+   "conf": 0.644,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.313
+   },
+   "correct": true,
+   "conf": 0.687,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.405
+   },
+   "correct": true,
+   "conf": 0.595,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.396
+   },
+   "correct": true,
+   "conf": 0.604,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.351
+   },
+   "correct": true,
+   "conf": 0.649,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.346
+   },
+   "correct": true,
+   "conf": 0.654,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.437
+   },
+   "correct": true,
+   "conf": 0.563,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.486,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.456,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.508,
+   "ms": 48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.59,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.506,
+   "ms": 55
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.593,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.482,
+   "ms": 48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.476,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.44,
+   "ms": 52
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.53,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.518,
+   "ms": 54
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.529,
+   "ms": 54
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.126,
+   "ms": 1163
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.16,
+   "ms": 1584
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.123,
+   "ms": 1396
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.112,
+   "ms": 1066
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.128,
+   "ms": 1035
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "sandbox_python",
+   "predicted": "sandbox_python",
+   "correct": false,
+   "conf": 0.164,
+   "ms": 925
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.117,
+   "ms": 937
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "edit_file",
+   "predicted": "edit_file",
+   "correct": false,
+   "conf": 0.117,
+   "ms": 1151
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "edit_file",
+   "predicted": "edit_file",
+   "correct": true,
+   "conf": 0.118,
+   "ms": 1002
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "sandbox_python",
+   "predicted": "sandbox_python",
+   "correct": false,
+   "conf": 0.107,
+   "ms": 864
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.117,
+   "ms": 888
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.119,
+   "ms": 936
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.836
+   },
+   "correct": true,
+   "conf": 0.836,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.814
+   },
+   "correct": false,
+   "conf": 0.814,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.772
+   },
+   "correct": false,
+   "conf": 0.772,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.825
+   },
+   "correct": true,
+   "conf": 0.825,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.787
+   },
+   "correct": false,
+   "conf": 0.787,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.757
+   },
+   "correct": false,
+   "conf": 0.757,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.776
+   },
+   "correct": false,
+   "conf": 0.776,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.793
+   },
+   "correct": false,
+   "conf": 0.793,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.708
+   },
+   "correct": false,
+   "conf": 0.708,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.71
+   },
+   "correct": false,
+   "conf": 0.71,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.643
+   },
+   "correct": false,
+   "conf": 0.643,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.69
+   },
+   "correct": false,
+   "conf": 0.69,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.712
+   },
+   "correct": false,
+   "conf": 0.712,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.712
+   },
+   "correct": true,
+   "conf": 0.712,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.635
+   },
+   "correct": false,
+   "conf": 0.635,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.803
+   },
+   "correct": true,
+   "conf": 0.803,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.757
+   },
+   "correct": false,
+   "conf": 0.757,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.782
+   },
+   "correct": true,
+   "conf": 0.782,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.685
+   },
+   "correct": false,
+   "conf": 0.685,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.728
+   },
+   "correct": false,
+   "conf": 0.728,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.747
+   },
+   "correct": true,
+   "conf": 0.747,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.684
+   },
+   "correct": false,
+   "conf": 0.684,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.698
+   },
+   "correct": false,
+   "conf": 0.698,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.445,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.465,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.451,
+   "ms": 56
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "good",
+   "predicted": 2,
+   "correct": false,
+   "conf": 0.589,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.43,
+   "ms": 40
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.423,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.548,
+   "ms": 48
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.621,
+   "ms": 74
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.438,
+   "ms": 254
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "described",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "good",
+   "predicted": 2,
+   "correct": false,
+   "conf": 0.432,
+   "ms": 111
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 0,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.346
+   },
+   "correct": false,
+   "conf": 0.654,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 1,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.398
+   },
+   "correct": false,
+   "conf": 0.602,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 2,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.508
+   },
+   "correct": true,
+   "conf": 0.508,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 3,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.64
+   },
+   "correct": true,
+   "conf": 0.64,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 4,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.502
+   },
+   "correct": true,
+   "conf": 0.502,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 5,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.322
+   },
+   "correct": false,
+   "conf": 0.678,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 6,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.597
+   },
+   "correct": false,
+   "conf": 0.597,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.048
+   },
+   "correct": true,
+   "conf": 0.952,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 8,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.218
+   },
+   "correct": true,
+   "conf": 0.782,
+   "ms": 56
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 9,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.601
+   },
+   "correct": false,
+   "conf": 0.601,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 10,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.465
+   },
+   "correct": true,
+   "conf": 0.535,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "stall",
+   "case": 11,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.209
+   },
+   "correct": true,
+   "conf": 0.791,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 0,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.486,
+   "ms": 51
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 1,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.456,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 2,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.508,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 3,
+   "expected": "small",
+   "label": "small",
+   "predicted": "small",
+   "correct": true,
+   "conf": 0.59,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 4,
+   "expected": "medium",
+   "label": "small",
+   "predicted": "small",
+   "correct": false,
+   "conf": 0.506,
+   "ms": 58
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 5,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.593,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 6,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.482,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 7,
+   "expected": "medium",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": true,
+   "conf": 0.476,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 8,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.44,
+   "ms": 54
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 9,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.53,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 10,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.518,
+   "ms": 55
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tier",
+   "case": 11,
+   "expected": "large",
+   "label": "medium",
+   "predicted": "medium",
+   "correct": false,
+   "conf": 0.529,
+   "ms": 55
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 0,
+   "expected": "web_search",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.126,
+   "ms": 872
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 1,
+   "expected": "web_fetch",
+   "label": "read_file",
+   "predicted": "read_file",
+   "correct": false,
+   "conf": 0.16,
+   "ms": 1051
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 2,
+   "expected": "fetch_github_releases",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.123,
+   "ms": 1726
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 3,
+   "expected": "list_dir",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.112,
+   "ms": 1100
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 4,
+   "expected": "list_tree",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.128,
+   "ms": 1065
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 5,
+   "expected": "read_file",
+   "label": "sandbox_python",
+   "predicted": "sandbox_python",
+   "correct": false,
+   "conf": 0.164,
+   "ms": 930
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 6,
+   "expected": "search_code",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.117,
+   "ms": 873
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 7,
+   "expected": "write_file",
+   "label": "edit_file",
+   "predicted": "edit_file",
+   "correct": false,
+   "conf": 0.117,
+   "ms": 988
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 8,
+   "expected": "edit_file",
+   "label": "edit_file",
+   "predicted": "edit_file",
+   "correct": true,
+   "conf": 0.118,
+   "ms": 941
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 9,
+   "expected": "delete_file",
+   "label": "sandbox_python",
+   "predicted": "sandbox_python",
+   "correct": false,
+   "conf": 0.107,
+   "ms": 935
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 10,
+   "expected": "search_code",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.117,
+   "ms": 931
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "tool",
+   "case": 11,
+   "expected": "web_search",
+   "label": "sandbox_submit",
+   "predicted": "sandbox_submit",
+   "correct": false,
+   "conf": 0.119,
+   "ms": 930
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 0,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.536
+   },
+   "correct": true,
+   "conf": 0.536,
+   "ms": 50
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.139
+   },
+   "correct": true,
+   "conf": 0.861,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.337
+   },
+   "correct": true,
+   "conf": 0.663,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 3,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.311
+   },
+   "correct": false,
+   "conf": 0.689,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 4,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.209
+   },
+   "correct": true,
+   "conf": 0.791,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 5,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.183
+   },
+   "correct": true,
+   "conf": 0.817,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.238
+   },
+   "correct": true,
+   "conf": 0.762,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sec",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.149
+   },
+   "correct": true,
+   "conf": 0.851,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.243
+   },
+   "correct": true,
+   "conf": 0.757,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 1,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.375
+   },
+   "correct": true,
+   "conf": 0.625,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.241
+   },
+   "correct": true,
+   "conf": 0.759,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.282
+   },
+   "correct": true,
+   "conf": 0.718,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 4,
+   "expected": false,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.508
+   },
+   "correct": false,
+   "conf": 0.508,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 5,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.504
+   },
+   "correct": true,
+   "conf": 0.504,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.319
+   },
+   "correct": true,
+   "conf": 0.681,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_arch",
+   "case": 7,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.721
+   },
+   "correct": true,
+   "conf": 0.721,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 0,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.175
+   },
+   "correct": true,
+   "conf": 0.825,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 1,
+   "expected": true,
+   "label": "yes",
+   "predicted": {
+    "yes": true,
+    "p_yes": 0.532
+   },
+   "correct": true,
+   "conf": 0.532,
+   "ms": 45
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 2,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.22
+   },
+   "correct": true,
+   "conf": 0.78,
+   "ms": 46
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 3,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.306
+   },
+   "correct": true,
+   "conf": 0.694,
+   "ms": 51
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 4,
+   "expected": true,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.26
+   },
+   "correct": false,
+   "conf": 0.74,
+   "ms": 51
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 6,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.21
+   },
+   "correct": true,
+   "conf": 0.79,
+   "ms": 52
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "panel_sre",
+   "case": 7,
+   "expected": false,
+   "label": "no",
+   "predicted": {
+    "yes": false,
+    "p_yes": 0.079
+   },
+   "correct": true,
+   "conf": 0.921,
+   "ms": 47
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 0,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.445,
+   "ms": 43
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 1,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.465,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 2,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.451,
+   "ms": 49
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 3,
+   "expected": 1,
+   "label": "good",
+   "predicted": 2,
+   "correct": false,
+   "conf": 0.589,
+   "ms": 43
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 4,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.43,
+   "ms": 40
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 5,
+   "expected": 0,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.423,
+   "ms": 39
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 6,
+   "expected": 2,
+   "label": "good",
+   "predicted": 2,
+   "correct": true,
+   "conf": 0.548,
+   "ms": 44
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 7,
+   "expected": 1,
+   "label": "partial",
+   "predicted": 1,
+   "correct": true,
+   "conf": 0.621,
+   "ms": 42
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 8,
+   "expected": 2,
+   "label": "partial",
+   "predicted": 1,
+   "correct": false,
+   "conf": 0.438,
+   "ms": 41
+  },
+  {
+   "model": "fastino/GLiNER2.5-multi-Decide",
+   "variant": "reframed",
+   "task": "judge",
+   "case": 9,
+   "expected": 0,
+   "label": "good",
+   "predicted": 2,
+   "correct": false,
+   "conf": 0.432,
+   "ms": 40
+  }
+ ]
+}

@@ -82,7 +82,7 @@ class TestDefaultRoutingToml:
     def test_judges_active_when_the_extra_is_available(self) -> None:
         d = rs.load_decisions(self._parse()['decisions'])
         assert d.mode == 'active' and d.labels_margin == 0.15
-        assert d.points == {'labels': 'encoder', 'panel': 'encoder',
+        assert d.points == {'labels': 'decide', 'panel': 'encoder',
                             'injection': 'injection'}
         # panel stays shadow until labelled rows say otherwise
         assert d.active == {'labels': True, 'panel': False}
@@ -103,6 +103,22 @@ class TestDefaultRoutingToml:
         d = rs.load_decisions(tomllib.loads(text)['decisions'])
         assert d.active == {'labels': False, 'panel': False}
         assert 'uv sync --extra judge' in text
+
+    def test_labels_comment_names_the_nli_alternative(self) -> None:
+        text = rs.default_routing_toml('X', 'litellm', judges_available=True)
+        line = next(ln for ln in text.splitlines()
+                    if ln.startswith('labels = "decide"'))
+        assert '"encoder"' in line
+
+    def test_extra_probe_needs_gliner2(self, monkeypatch) -> None:
+        import importlib.util
+        present = {'torch', 'transformers'}
+        monkeypatch.setattr(importlib.util, 'find_spec',
+                            lambda name: object() if name in present
+                            else None)
+        assert rs._judge_extra_available() is False
+        present.add('gliner2')
+        assert rs._judge_extra_available() is True
 
     def test_extra_probe_is_used_when_not_told(self, monkeypatch) -> None:
         monkeypatch.setattr(rs, '_judge_extra_available', lambda: False)
@@ -132,6 +148,108 @@ class TestDefaultRoutingToml:
     def test_header_comment_explains_the_switch(self) -> None:
         text = rs.default_routing_toml('X', 'litellm', judges_available=True)
         assert '/routing off' in text and 'never rewrites' in text
+
+
+OLD_LABELS = ('labels = "encoder"          # complexity tie-breaker for the'
+              " controller's label")
+
+
+def _old_block() -> str:
+    """The [decisions] block guru wrote before labels moved to decide."""
+    return ('[routing]\nmode = "local-and-remote"\n\n'
+            '[decisions]\nmode = "active"\n\n'
+            f'[decisions.points]\n{OLD_LABELS}\n'
+            'panel = "encoder"           # needs_security\n\n'
+            '[decisions.active]\nlabels = true\n')
+
+
+class TestMigrateLabelsJudge:
+    @pytest.fixture(autouse=True)
+    def _extra(self, monkeypatch):
+        monkeypatch.setattr(rs, '_judge_extra_available', lambda: True)
+
+    def test_untouched_default_moves_to_decide(self, settings_file) -> None:
+        settings_file.write_text(_old_block())
+        assert rs.migrate_labels_judge() == 'migrated'
+        text = settings_file.read_text()
+        assert OLD_LABELS not in text
+        d = rs.load_decisions(tomllib.loads(text)['decisions'])
+        assert d.points['labels'] == 'decide'
+        assert d.points['panel'] == 'encoder'
+        assert d.active == {'labels': True}
+        # every other line is kept byte for byte
+        assert text.replace(rs.LABELS_DECIDE_LINE, OLD_LABELS) == \
+            _old_block()
+
+    def test_new_line_matches_the_written_default(self) -> None:
+        text = rs.default_routing_toml('X', 'litellm', judges_available=True)
+        assert rs.LABELS_DECIDE_LINE in text.splitlines()
+
+    def test_idempotent(self, settings_file) -> None:
+        settings_file.write_text(_old_block())
+        rs.migrate_labels_judge()
+        once = settings_file.read_text()
+        assert rs.migrate_labels_judge() == 'unchanged'
+        assert settings_file.read_text() == once
+
+    def test_edited_line_is_left_alone(self, settings_file) -> None:
+        for line in ('labels = "encoder"', 'labels = "encoder"  # mine',
+                     'labels = "encoder:org/Other"'):
+            text = _old_block().replace(OLD_LABELS, line)
+            settings_file.write_text(text)
+            assert rs.migrate_labels_judge() == 'unchanged'
+            assert settings_file.read_text() == text
+
+    def test_same_line_outside_decisions_points_is_left_alone(
+            self, settings_file) -> None:
+        text = f'[other]\n{OLD_LABELS}\n'
+        settings_file.write_text(text)
+        assert rs.migrate_labels_judge() == 'unchanged'
+        assert settings_file.read_text() == text
+
+    def test_missing_or_invalid_file(self, settings_file) -> None:
+        assert rs.migrate_labels_judge() == 'unchanged'
+        settings_file.write_text('[decisions.points\n' + OLD_LABELS)
+        assert rs.migrate_labels_judge() == 'invalid'
+
+    def test_without_the_extra_the_nli_judge_is_kept(
+            self, settings_file, monkeypatch) -> None:
+        # decide would not load; the working encoder tie-breaker stays
+        monkeypatch.setattr(rs, '_judge_extra_available', lambda: False)
+        settings_file.write_text(_old_block())
+        assert rs.migrate_labels_judge() == 'unchanged'
+        assert settings_file.read_text() == _old_block()
+
+    def test_crlf_line_endings_are_kept(self, settings_file) -> None:
+        crlf = _old_block().replace('\n', '\r\n').encode()
+        settings_file.write_bytes(crlf)
+        assert rs.migrate_labels_judge() == 'migrated'
+        assert settings_file.read_bytes() == crlf.replace(
+            OLD_LABELS.encode(), rs.LABELS_DECIDE_LINE.encode())
+
+    def test_array_of_tables_header_is_not_the_table(
+            self, settings_file) -> None:
+        text = f'[[decisions.points]]\n{OLD_LABELS}\n'
+        settings_file.write_text(text)
+        assert rs.migrate_labels_judge() == 'unchanged'
+        assert settings_file.read_text() == text
+
+    def test_line_inside_a_multiline_string_is_left_alone(
+            self, settings_file) -> None:
+        text = (f'[notes]\ntext = """\n[decisions.points]\n{OLD_LABELS}\n'
+                '"""\n')
+        settings_file.write_text(text)
+        assert rs.migrate_labels_judge() == 'unchanged'
+        assert settings_file.read_text() == text
+
+    def test_reapplies_settings_after_migrating(self, settings_file,
+                                                monkeypatch) -> None:
+        settings_file.write_text(_old_block())
+        applied = []
+        monkeypatch.setattr(config, '_apply_settings',
+                            lambda: applied.append(1))
+        rs.migrate_labels_judge()
+        assert applied == [1]
 
 
 class TestEnsureDefaultRouting:

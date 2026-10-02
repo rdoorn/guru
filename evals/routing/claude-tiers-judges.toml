@@ -47,7 +47,9 @@ labels_margin = 0.15
 [decisions.points]
 panel = "encoder"
 injection = "injection"
-labels = "encoder"
+# decide since 2026-10-02 (the shipped default); runs before that
+# date used "encoder" (NLI). bench/primitives/README.md has the measurement.
+labels = "decide"
 
 [decisions.active]
 labels = true

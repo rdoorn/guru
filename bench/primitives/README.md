@@ -142,3 +142,79 @@ What this means:
 Injection-screen detail: every injection (including an HTML-comment one and
 a "AI reading this" one) scored 1.00; a bare Python snippet was a false
 positive at 0.59, so score code and prose differently or skip code.
+
+## Addendum (2026-10-02): fastino GLiNER2.5-Decide (`probe_decide.py`)
+
+Schema classifiers (no generation): text + a label set per head, optional
+prompt and per-label descriptions, several heads in one forward pass.
+Vendor claim: 60.2% on their own `fastino/fast-decisions` set vs JevK5 57.6%;
+the 0.3B multilingual model scores 56.7%, i.e. below Jev. Run on CPU (the
+library default), same 69 cases. Variants: `bare` (label names),
+`prompt` (+ instructions), `described` (+ label descriptions), `reframed`
+(gates as named labels, the three panels as one multi-label head).
+
+| task | NLI-base | qwen3:4b json | Decide 340M best (variant) | multi-Decide 287M best |
+|---|---|---|---|---|
+| stall | 0.67 | 0.92 | 0.83 (reframed) | 0.58 |
+| tier | 0.50 | 0.75 | **1.00** (described / reframed; 4/4/4, conf 0.81) | 0.58 |
+| tool (11-way) | 0.42 | 0.83 | 0.67 (bare); 0.17 at 2 s with descriptions | 0.42 |
+| panel_sec | 0.88 | 1.00 | 1.00 (reframed; yes 0.62–0.67, no ≤ 0.32) | 0.88 |
+| panel_arch | 1.00 | – | 0.75 (reframed; 8/8 at threshold 0.6) | 0.88 |
+| panel_sre | 0.86 | – | 1.00 (reframed; yes 0.66–0.72, no ≤ 0.24) | 0.86 |
+| judge (answer quality) | 0.60 | – | 0.50 | 0.20 |
+| latency | 13–160 ms (mps) | ~250 ms | ~110 ms per call on CPU (one call covers all panels) | ~45 ms CPU |
+
+Findings:
+
+1. Framing decides everything. As a yes/no answerer (`bare`/`prompt`) it
+   says "no" to nearly everything; panel accuracy there is the base rate.
+   Used as the model card intends (named labels, one multi-label head) it is
+   discriminative, with a usable gap between positives and negatives.
+2. Tier routing is the first encoder win: 12/12 with described labels where
+   NLI got 0.50. The 12 cases are easy by design; this needs labelled real
+   requests before it can be trusted.
+3. Long label descriptions break it: 11 tool descriptions cost 2 s and drop
+   accuracy to 0.17. Keep label sets short.
+4. It cannot judge answer correctness (17*3 = 54 rated as fine); that stays
+   with an LLM.
+5. The multilingual 287M model is not usable here.
+6. Packaging: `gliner2` 2.x needs `transformers<5`. Resolved by pinning
+   `transformers<5` in the `judge` extra and allowing only `gliner2` past
+   the `exclude-newer` cutoff (`exclude-newer-package`).
+
+Reproduce: `uv sync --extra judge`, then
+`.venv/bin/python -m bench.primitives.probe_decide`.
+
+## Addendum (2026-10-02): `labels` point on real tasks (`probe_labels.py`)
+
+325 unique controller-written sub-agent tasks from the eval-run ledgers
+(`labels_cases.json`), gold-labelled trivial / standard / hard against
+`routing.COMPLEXITY_DESCRIPTIONS` by two independent annotators (329 tasks,
+98.8% agreement; the 4 disagreements are dropped). Both annotators were the
+same LLM family reading the same rubric, so the agreement overstates how
+objective the labels are. Both judges get guru's own question
+(`decisions.label_questions`); NLI runs through `EncoderJudge` unchanged.
+
+| judge | accuracy | recall trivial / standard / hard | routed accuracy at margin 0.15 (controller alone 0.603) | overrides (fixed / broke) | p50 / p95 ms, MPS | p50 / p95 ms, CPU | load |
+|---|---|---|---|---|---|---|---|
+| NLI deberta-v3-base | 0.462 | 0.07 / 0.65 / 0.73 | 0.631 | 31 (20 / 11) | 82 / 200 | 482 / 1195 | 1.5 s |
+| GLiNER2.5-Decide 340M | **0.828** | 0.69 / 0.85 / 0.98 | **0.825** | 111 (87 / 15) | 142 / 310 | 197 / 296 | 8 s |
+
+Margin sweep for Decide (routed accuracy / overrides that broke a correct
+label): 0.00 0.828 / 26, 0.15 0.825 / 15, 0.30 0.818 / 9, 0.45 0.794 / 6.
+The existing default 0.15 stays.
+
+Findings:
+
+1. Decide is the better `labels` judge by a wide margin: as a tie-breaker it
+   lifts routed accuracy from 0.60 to 0.83; NLI lifts it to 0.63.
+2. NLI almost never says `trivial` (recall 0.07), which is why it rarely
+   helps: the controller over-labels and NLI cannot pull tasks down.
+3. Speed is not a deciding factor: both are well inside the 1500 ms active
+   timeout. NLI is faster on MPS, Decide on CPU. Decide's 8 s load needs
+   the existing background warm-up.
+4. Adopted: `labels` defaults to the `decide` judge (`guru/judges/decide.py`);
+   `labels = "encoder"` keeps the NLI judge. Through guru's own judge class
+   the result reproduces exactly (0.828, p50 153 ms on MPS; NLI 0.462 on
+   transformers 4.57). Reproduce: `.venv/bin/python -m
+   bench.primitives.probe_labels`.
