@@ -895,6 +895,17 @@ def _start(args: argparse.Namespace,
     return routing
 
 
+def _run_startup(
+        args: argparse.Namespace) -> routing_settings.RoutingSettings:
+    """Report the startup steps on the terminal and run them."""
+    # The bound Console itself: rich's Live uses it as a context manager,
+    # which the ui.console proxy (attribute delegation only) is not.
+    progress = startup.RichProgress(ui.current_console())
+    progress.header()
+    with startup.use(progress):
+        return _start(args, progress)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="guru — local LLM agent")
     parser.add_argument("--model", default=None)
@@ -914,10 +925,7 @@ def main() -> None:
     # Before anything imports transformers: its log handler keeps the
     # sys.stderr it sees, and the judge warm-up's output must reach the log.
     quiet.install()
-    progress = startup.RichProgress(ui.console)
-    progress.header()
-    with startup.use(progress):
-        routing = _start(args, progress)
+    routing = _run_startup(args)
 
     session.messages = [
         {"role": "system", "content": config.build_system_prompt()}]

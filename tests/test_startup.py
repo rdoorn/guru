@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import re
 
 import pytest
 from rich.console import Console
@@ -126,3 +127,51 @@ def test_a_step_leaves_sys_streams_alone() -> None:
     before = (sys.stdout, sys.stderr)
     with startup.RichProgress(con).step('x'):
         assert (sys.stdout, sys.stderr) == before
+
+
+class TestRunStartup:
+    """``cli._run_startup`` as ``main()`` runs it: through ``ui.console``
+    (the context proxy) on a terminal console, external I/O faked."""
+
+    def test_steps_run_and_report(self, monkeypatch, tmp_path) -> None:
+        import argparse
+
+        from guru import cli, config, session, skills, ui
+        from guru.adapters.ollama import OllamaAdapter
+
+        adapter = OllamaAdapter()
+        monkeypatch.setattr(adapter, 'placement', lambda: 'GPU')
+
+        def restore(explicit) -> bool:
+            session.adapter = adapter
+            session.model = 'm:1'
+            session.num_ctx = 8192
+            return True
+
+        monkeypatch.setattr(skills, 'setup', lambda reset=False: None)
+        monkeypatch.setattr(config, 'LEDGER_DIR', tmp_path)
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
+        monkeypatch.setattr(cli, '_build_adapters', lambda: [adapter])
+        monkeypatch.setattr(cli, 'ADAPTER_CONFIGS', [], raising=False)
+        monkeypatch.setattr(cli.routing_settings, 'ensure_default_routing',
+                            lambda cfgs: 'present')
+        monkeypatch.setattr(cli.routing_settings, 'migrate_labels_judge',
+                            lambda: 'unchanged')
+        monkeypatch.setattr(cli, '_restore_last', restore)
+        for name in ('adapter', 'model', 'num_ctx', 'num_ctx_override'):
+            monkeypatch.setattr(session, name, getattr(session, name, None))
+
+        buf = io.StringIO()
+        con = Console(file=buf, force_terminal=True, width=120)
+        token = ui.use_console(con)
+        try:
+            cli._run_startup(argparse.Namespace(reset_skills=False,
+                                                num_ctx=0, model=None))
+        finally:
+            ui.reset_console(token)
+        out = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', buf.getvalue())
+        for title in ('settings, skills, ledger', 'adapters', 'main model',
+                      'judges'):
+            assert f'✓ {title}' in out
+        assert 'm:1 · Ollama (local, localhost:11434) · ctx 8,192 · GPU' in out
+        assert 'none (decisions off)' in out
