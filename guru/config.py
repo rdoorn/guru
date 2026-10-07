@@ -354,7 +354,19 @@ CONTROLLER_HINT = (
     " immediately with a self-contained task goal that names the project"
     " path, and let the worker look around.\n"
     "Every task that edits code must say: verify with run_tests/"
-    "check_syntax before reporting."
+    "check_syntax before reporting.\n"
+    "How workers run: each task gets a fresh worker with a budget of 40"
+    " tool rounds; it cannot be addressed again after it reports. Give a"
+    " writing task (build, refactor, docs) the deliverables it owns, at"
+    " most 3 files a worker can write in that budget, and put the facts"
+    " you already know (paths, line numbers, the interfaces to use) in the"
+    " goal so it does not re-explore. Work that depends on another task's"
+    " files goes in a later delegate round, not in parallel. A result"
+    " marked capped carries the worker's handoff, one marked incomplete"
+    " names the deliverables it did not write: re-delegate the remaining"
+    " part from that, do not start the exploration over. Tests go in the"
+    " same task as the code they test (its deliverables include the test"
+    " file): a later delegate round may never come."
 )
 
 # The plan tool's description (guru.domain.tools._PLAN_SPEC); the field

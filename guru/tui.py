@@ -41,6 +41,9 @@ from guru.judges import quiet
 from guru.orchestrator import Orchestrator
 from guru.tui_io import _app_cols, _BufferWriter, _MainWriter, _status_from
 
+# Sub-agent endings worth a look before the tab goes away.
+_KEEP_OUTCOMES = frozenset(('capped', 'incomplete', 'error'))
+
 _CTX_COLOUR = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 _CHROME_ROWS = 5   # 2 rules + prompt + status + tabs
 
@@ -187,6 +190,11 @@ def run(registry=None, routing=None) -> None:
         def run_on_loop(self, fn):
             return _on_loop(fn)
 
+        def retire(self, agent) -> None:
+            # Off the tab bar once finished; an unusual ending stays until
+            # its tab has been looked at (the transcript is in the ledger).
+            manager.retire(agent, keep=agent.outcome in _KEEP_OUTCOMES)
+
     orch = _TuiOrchestrator(manager, registry=registry, routing=routing)
     # The main agent is set up by the same helper every other delegation-
     # capable agent uses (fresh conversation + hint + tool set, controller
@@ -199,10 +207,10 @@ def run(registry=None, routing=None) -> None:
 
     def _new_agent() -> None:
         base = manager.active.state
-        agent = manager.add(f"agent{len(manager.agents)}")
+        agent = manager.add()
         orch.configure(agent, base, can_spawn=True, controller=controller)
         agent.append(f"[{agent.title}] new agent · model {agent.state.model}")
-        manager.active_index = len(manager.agents) - 1
+        manager.select(len(manager.agents) - 1)
 
     orch.install_handlers()
 
@@ -273,14 +281,15 @@ def run(registry=None, routing=None) -> None:
     @tui_kb.add('s-right', eager=True)
     def _tui_next(event) -> None:
         if manager.active_index < len(manager.agents) - 1:
-            manager.active_index += 1
+            manager.select(manager.active_index + 1)
 
     @tui_kb.add('s-left', eager=True)
     def _tui_prev(event) -> None:
         # Off the first sub-agent (index 1), drop back to the [main] view.
         if manager.active_index > 1:
-            manager.active_index -= 1
+            manager.select(manager.active_index - 1)
         else:
+            manager.select(0)
             state['view'] = 'main'
             event.app.exit()
 
@@ -594,7 +603,7 @@ def run(registry=None, routing=None) -> None:
             if res is _ENTER_TUI:
                 if len(manager.agents) > 1:
                     if manager.active_index < 1:
-                        manager.active_index = 1
+                        manager.select(1)
                     state['view'] = 'tui'
                     return
                 main.console.print(

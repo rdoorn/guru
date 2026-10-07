@@ -27,11 +27,12 @@ if TYPE_CHECKING:                     # avoid an import cycle at runtime
 STRUGGLE_KEYS: tuple[str, ...] = (
     'stall_nudges', 'delegation_nudges', 'over_read', 'compactions',
     'tool_errors', 'sha_mismatches', 'provider_errors', 'refusals',
-    'redactions', 'protocol_violation')
+    'redactions', 'protocol_violation', 'budget_nudges')
 # ``stall_nudges`` is kept so old rows keep their column; the turn loop no
 # longer nudges (the turn contract in guru.adapters.turn) and it reads 0.
 # ``protocol_violation`` counts a text-only reply where a tool call was
 # forced, and a controller plan that was malformed twice.
+# ``budget_nudges`` counts the round-budget checkpoint and last-call notes.
 
 
 class SessionState:
@@ -104,6 +105,17 @@ class SessionState:
         # consecutive all-running `check` calls. Both reset at turn start.
         self.turn_waiting: bool = False
         self.check_polls: int = 0
+        # Round budget (guru.adapters.turn): ``capped`` is set when the
+        # last turn hit the round cap; ``round_note`` is the budget footer
+        # the next tool result carries (consumed by turn.tool_result).
+        self.capped: bool = False
+        self.round_note: str = ''
+        # True while a worker's spent-budget round runs: every call but
+        # final_answer is refused unrun (turn.tool_result).
+        self.budget_spent: bool = False
+        # True while a writing worker past READ_STOP_AT with nothing
+        # changed runs a round: its read tools are refused unrun.
+        self.reads_closed: bool = False
 
 
 _default = SessionState()

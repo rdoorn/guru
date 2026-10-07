@@ -1,0 +1,34 @@
+# Dogfood case (2026-10-07): the user's usage-dashboard request, phase-1
+# slice. In the real session the controller split it into three parallel
+# build workers; all three read for 40 rounds, wrote nothing and cost
+# ~$4.14. Pinned to main at the time of the request; run with the
+# Claude-tier routing and Opus as the controller, as in that session:
+#   --model 'SBP Litellm|aws/claude-5-5-opus'
+#   --routing evals/routing/claude-tiers.toml --allow-spend
+# The run's diff lands in evals/runs/<run_id>/diffs/ (apply it on the
+# pinned ref to keep the result on a branch).
+name = "guru-usage-store"
+prompt = """have a look a guru, i'd like a web interface on guru, in which i can view the usage of models, their cost, what topic they were working on, and what project. a dashboard that shows an overview of what was used where in some nice graphs, and tables. just listening on localhost on a specific port for guru. guru writes the data in a local database (sqllite or something simple on disk, in a ~/.guru/ folder or something. keep in mind we could be running multiple guru's, show where your listening, and check if anoyher guru is already listening, then we don't listen again unless some other guru stops serving. so any guru could serve, but there can be only one.
+
+Implement phase 1 of that now, nothing else: the on-disk usage store. Every model call guru makes is recorded in a SQLite database under ~/.guru/ (stdlib sqlite3, safe for several guru processes writing at once) with adapter, model, tokens, cost, the project and the topic/task it was working on, wired into the existing ledger call recording, with tests. No web server or dashboard yet; run the tests before you report."""
+mode = "auto"
+timeout_s = 2400
+tags = ["real", "build", "dogfood"]
+
+[fixture_git]
+path = "."
+ref = "9875ff4a8cfc443189b0375c3258e024af6d43c3"
+
+[expect.behaviour]
+tools_used_any = ["write_file", "edit_file", "apply_patch"]
+tools_used_all = ["run_tests"]
+task_status_none = ["capped", "incomplete", "error"]
+max_cost_usd = 20.0
+max_seconds = 2400
+
+[expect.content]
+files_changed_any = ["guru/domain/ledger.py", "guru/repositories/jsonl_ledger.py"]
+fixture_tests_pass = true
+
+[expect.rubric]
+text = "A new SQLite-backed usage store under ~/.guru (stdlib sqlite3; WAL or an equivalent busy timeout so concurrent guru processes can write) records one row per model call with adapter, model, token counts, cost, project and topic/task; the existing ledger call path (guru/domain/ledger.py record_call or the JSONL repository) writes to it without breaking when the DB is unavailable; new tests cover the schema, a write and a read-back with a temporary database; no web server or dashboard code; the answer reports the test run's result rather than a guess."

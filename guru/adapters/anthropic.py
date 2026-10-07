@@ -533,12 +533,7 @@ class AnthropicAdapter(Adapter):
             # All tool_results for a round must go back in ONE user turn.
             results = []
             for name, args, block, duplicate in pending:
-                if duplicate:
-                    ui.console.print(
-                        f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = turn.DUPLICATE_RESULT.format(name=name)
-                else:
-                    content = tools.execute_tool(name, args)
+                content = turn.tool_result(name, args, duplicate)
                 results.append({
                     'type': 'tool_result',
                     'tool_use_id': block.id,

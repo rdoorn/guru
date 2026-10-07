@@ -60,6 +60,11 @@ class Expect:
     # | ``suspicious``): exactly this one, or any of a list.
     gate_verdict: str = ''
     gate_verdict_any: list[str] = field(default_factory=list)
+    # Spend cap in USD: the bench cancels the run when the case's calls
+    # pass it, and the check fails over it (or when the cost is unknown).
+    max_cost_usd: Optional[float] = None
+    # Sub-task statuses that fail the case (e.g. capped, incomplete).
+    task_status_none: list[str] = field(default_factory=list)
     rubric: str = ''
 
 
@@ -120,6 +125,7 @@ _EXPECT_TYPES: dict[str, type] = {
     'answer_regex': list, 'files_changed': list, 'files_changed_any': list,
     'files_unchanged': list,
     'fixture_tests_pass': bool, 'gate_verdict': str, 'gate_verdict_any': list,
+    'max_cost_usd': float, 'task_status_none': list,
 }
 _EXPECT_SECTIONS = ('behaviour', 'content', 'rubric')
 assert set(_EXPECT_TYPES) | {'rubric'} == {f.name for f in fields(Expect)}

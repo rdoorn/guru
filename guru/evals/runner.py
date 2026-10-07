@@ -354,6 +354,25 @@ def files_changed(repo: Path) -> list[str]:
     return sorted(paths)
 
 
+def save_diff(repo: Path, out_dir: Path, name: str) -> str:
+    """Write what the run changed in ``repo`` (tracked and untracked,
+    binary-safe) as ``out_dir/diffs/<name>.patch`` (``<name>-2.patch`` and
+    so on for a repeat) and return its path; '' when nothing changed. Apply
+    it on the fixture's pinned ref to keep the result on a branch."""
+    _git(repo, 'add', '-A')
+    patch = _git(repo, 'diff', '--cached', '--binary')
+    if not patch.strip():
+        return ''
+    diffs = out_dir / 'diffs'
+    diffs.mkdir(parents=True, exist_ok=True)
+    path, n = diffs / f'{name}.patch', 1
+    while path.exists():
+        n += 1
+        path = diffs / f'{name}-{n}.patch'
+    path.write_text(patch, encoding='utf-8')
+    return str(path)
+
+
 def _fixture_env(repo: Path) -> dict:
     """The environment for the fixture's pytest: ``PYTHONPATH`` starts with
     the copy, so a copied package (a git fixture of a real project, which
@@ -652,6 +671,7 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         token = session.use(base)
         t0 = time.monotonic()
         run = bench.BenchRun(base, registry=registry, routing=settings)
+        run.max_cost_usd = case.expect.max_cost_usd
         try:
             agents = asyncio.run(run.run(case.prompt, timeout=case.timeout_s))
         finally:
@@ -661,6 +681,9 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         if not _drain_workers(agents, WORKER_DRAIN_S):
             box.leaked = True
             error = 'workers still running after timeout'
+        elif run.over_budget_usd is not None:
+            error = (f'over budget: ${run.over_budget_usd:.2f} >'
+                     f' ${case.expect.max_cost_usd:.2f}')
         elif run.worker_errors:
             # A turn that raised (run 94fdc1bb11a5: the mailbox synthesis
             # turn died on a vanished cwd) is a failed case, not a case
@@ -798,6 +821,7 @@ def run_case(case: Case, base_state: session.SessionState,
     changed: list[str] = []
     tests_pass: Optional[bool] = None
     tests_tail = ''
+    diff_path = ''
     sandbox: Optional[dict] = None
     try:
         copy = prepare_fixture(case.fixture_git or case.fixture, workdir,
@@ -814,6 +838,12 @@ def run_case(case: Case, base_state: session.SessionState,
                 verbs.cleanup_all()      # the verbs' task copies
         _check_copy(copy, inode)         # the checks must see THIS copy
         changed = files_changed(copy)
+        if changed:              # before the fixture's pytest writes files
+            try:
+                diff_path = save_diff(copy, out_dir, case.name)
+            except Exception:                        # noqa: BLE001
+                # An artefact, not a verdict: the case is still judged.
+                log.exc(f'saving the diff of {case.name} failed')
         if case.expect.fixture_tests_pass is not None:
             tests_pass, tests_tail = fixture_tests_result(copy)
     except Exception as e:                           # noqa: BLE001
@@ -830,9 +860,14 @@ def run_case(case: Case, base_state: session.SessionState,
                            'ref': case.fixture_git.ref}
     tpath = out_dir / 'transcripts' / f'{case.name}.json.gz'
     _save_transcript(agents, tpath)
-    results = checks.evaluate(case.expect, obs)
     calls = repo.rows('calls')[rows_before:]
     tool_events = repo.rows('tool_events')[tools_before:]
+    obs.cost_usd = _cost(calls)
+    obs.task_statuses = [r.get('status', '') for r in
+                         repo.rows('tasks')[tasks_before:]
+                         if r.get('status') != 'running']
+    obs.diff_path = diff_path
+    results = checks.evaluate(case.expect, obs)
     return CaseResult(
         case=case.name, passed=checks.passed(results),
         checks=[asdict(r) for r in results], observed=asdict(obs),

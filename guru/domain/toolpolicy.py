@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 __all__ = ['ALWAYS_ON_TOOLS', 'KIND_HIDDEN_TOOLS', 'ToolsPolicy',
-           'WRITE_TOOLS', 'active_policy', 'for_kind', 'is_enabled',
-           'kind_refusal', 'set_policy']
+           'WRITE_KINDS', 'WRITE_TOOLS', 'active_policy', 'for_kind',
+           'is_enabled', 'kind_refusal', 'set_policy']
 
 # Tools every agent has regardless of the project tool policy: discovery,
 # method selection, the delegation mailbox and the turn contract's own
@@ -33,6 +33,12 @@ WRITE_TOOLS = frozenset((
     'write_file', 'edit_file', 'apply_patch', 'delete_file',
     'sandbox_run', 'sandbox_python', 'sandbox_submit',
     'request_dependency'))
+
+# Task kinds whose job is to change files: they start with the file-change
+# tools active (no search_tools hop) and get the round-budget checkpoint
+# when half the budget is spent with nothing changed. Dogfood 2026-10-07:
+# three build workers read for 40 rounds and wrote nothing.
+WRITE_KINDS = frozenset(('build', 'refactor', 'debug', 'docs'))
 
 # Per task kind (``guru.domain.routing.KINDS``): the registry tools a task
 # of that kind neither sees nor may call (structural round, Package C

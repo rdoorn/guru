@@ -3197,3 +3197,91 @@ class TestBriefStorePerCase:
         with runner._sandbox(copy, config.MODE_AUTO, repo):
             assert briefs.root().name == runner.BRIEFS_DIRNAME
         assert briefs.BRIEFS_DIR_ENV not in os.environ
+
+
+class TestBudgetDiffAndStatuses:
+    """The run's spend cap, the saved patch and the sub-task statuses."""
+
+    def test_diff_is_saved_and_observed(self, tmp_path: Path, canned,
+                                        monkeypatch) -> None:
+        orig = bench.BenchRun.run
+
+        async def writing_run(self, prompt, timeout=None):
+            Path('NEW.md').write_text('hello\n')
+            return await orig(self, prompt, timeout)
+
+        monkeypatch.setattr(bench.BenchRun, 'run', writing_run)
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+        path = Path(res.observed['diff_path'])
+        assert path == tmp_path / 'o' / 'diffs' / 'review.patch'
+        assert '+hello' in path.read_text()
+        res2 = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+        assert res2.observed['diff_path'].endswith('review-2.patch')
+
+    def test_no_change_no_patch(self, tmp_path: Path, canned) -> None:
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+        assert res.observed['diff_path'] == ''
+        assert not (tmp_path / 'o' / 'diffs').exists()
+
+    def test_cap_reaches_the_bench_and_over_budget_fails(
+            self, tmp_path: Path, monkeypatch) -> None:
+        seen: dict = {}
+
+        async def spending_run(self, prompt, timeout=None):
+            seen['cap'] = self.max_cost_usd
+            self.over_budget_usd = 25.0
+            return _canned_agents()
+
+        monkeypatch.setattr(bench.BenchRun, 'run', spending_run)
+        base = _base()
+        res = runner.run_case(_case(max_cost_usd=20.0), base, [base.adapter],
+                              tmp_path / 'o')
+        assert seen['cap'] == 20.0
+        assert res.observed['error'] == 'over budget: $25.00 > $20.00'
+        assert res.passed is False
+
+
+def test_bench_cancels_past_the_cap(monkeypatch) -> None:
+    import asyncio
+
+    st = session.SessionState()
+    run = bench.BenchRun(st)
+    run.max_cost_usd = 1.0
+    aborted: list = []
+
+    def launch(agent) -> None:
+        agent.busy = True
+        agent.state.cost_usd = 1.5
+
+    async def abort(grace: float = 30.0) -> None:
+        aborted.append(True)
+        for a in run.manager.agents:
+            a.busy = False
+
+    monkeypatch.setattr(run, 'configure', lambda *a, **k: None)
+    monkeypatch.setattr(run, 'launch', launch)
+    monkeypatch.setattr(run, '_abort', abort)
+    asyncio.run(run.run('p', timeout=5))
+    assert aborted == [True] and run.over_budget_usd == 1.5
+
+
+def test_a_failing_diff_save_does_not_fail_the_case(
+        tmp_path: Path, canned, monkeypatch) -> None:
+    orig = bench.BenchRun.run
+
+    async def writing_run(self, prompt, timeout=None):
+        Path('NEW.md').write_text('hello\n')
+        return await orig(self, prompt, timeout)
+
+    def broken(*a, **k):
+        raise subprocess.CalledProcessError(128, 'git add')
+
+    monkeypatch.setattr(bench.BenchRun, 'run', writing_run)
+    monkeypatch.setattr(runner, 'save_diff', broken)
+    base = _base()
+    res = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+    assert res.observed['error'] == ''
+    assert res.observed['diff_path'] == ''
+    assert res.observed['files_changed'] == ['NEW.md']

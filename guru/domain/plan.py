@@ -36,11 +36,12 @@ with what they know.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from guru.domain import routing
+from guru.domain import routing, toolpolicy
 
 OUTCOMES = ('answer', 'delegate')
 
@@ -86,6 +87,15 @@ MAX_DELEGATE_ROUNDS = 3
 # (:func:`coverage_concerns`): a single-concern request never re-asks,
 # nor does one that merely happens to contain two vocabulary words.
 COVERAGE_MIN_CONCERNS = 2
+
+# Task ownership (dogfood 2026-10-07: three parallel build workers each got
+# two plan phases and were kept apart by "DO NOT edit X" prose; all three
+# read for 40 rounds and wrote nothing). A task of a kind that produces
+# files names the files it creates or changes; it owns them, a worker can
+# write that many inside its round budget, and no two tasks of one plan
+# share one. Soft problems: re-asked once, then the plan runs.
+DELIVERABLE_KINDS = ('build', 'refactor', 'docs')
+MAX_DELIVERABLES = 3
 _COORDINATOR_RE = re.compile(r'(?:\band\b|[,&;.?!\n])', re.IGNORECASE)
 
 # --- the texts the loop and the handler exchange with the model ------------
@@ -118,6 +128,7 @@ class Task:
     files: list[str] = field(default_factory=list)
     role: str = ''
     skill: str = ''
+    deliverables: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -139,16 +150,19 @@ class Verdict:
     # Concerns the request names that share one task: the plan has fewer
     # tasks than coordinated concerns (soft, one re-ask, like ``missing``).
     undersplit: list[str] = field(default_factory=list)
+    # Deliverable problems (:func:`ownership_problems`; soft, one re-ask).
+    ownership: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return (self.plan is not None and not self.errors
-                and not self.missing and not self.undersplit)
+                and not self.soft)
 
     @property
     def soft(self) -> bool:
-        """Only coverage problems (asked once, then accepted)."""
-        return bool(self.missing or self.undersplit)
+        """Only coverage or ownership problems (asked once, then
+        accepted)."""
+        return bool(self.missing or self.undersplit or self.ownership)
 
     @property
     def messages(self) -> list[str]:
@@ -162,6 +176,7 @@ class Verdict:
                 f"the request names {len(self.undersplit)} concerns "
                 f"({', '.join(self.undersplit)}) but the plan has {n} "
                 f"task(s): spawn one task per concern, in parallel")
+        out.extend(self.ownership)
         return out
 
 
@@ -191,6 +206,15 @@ TASK_SCHEMA: dict = {
         'files': {
             'type': 'array', 'items': {'type': 'string'},
             'description': 'Files or directories the task concerns'},
+        'deliverables': {
+            'type': 'array', 'items': {'type': 'string'},
+            'description': (
+                'The files this task creates or changes (required for'
+                f' {", ".join(DELIVERABLE_KINDS)}; at most'
+                f' {MAX_DELIVERABLES}). The task owns them and changes'
+                ' nothing else; no two tasks share one. Size a task so a'
+                ' worker writes them in one go; dependent work goes in a'
+                ' later delegate round.')},
         'role': {'type': 'string',
                  'description': 'Persona from the catalog, or omit'},
         'skill': {'type': 'string',
@@ -265,12 +289,29 @@ def _parse_task(index: int, raw: object, errors: list[str]
     for key in ('role', 'skill'):
         if raw.get(key) not in (None, '') and not isinstance(raw[key], str):
             errors.append(f'{tag}: {key} must be a string')
+    deliverables_raw = _listish(raw.get('deliverables'))
+    deliverables: list[str] = []
+    if deliverables_raw not in (None, ''):
+        if not isinstance(deliverables_raw, list) or not all(
+                isinstance(f, str) for f in deliverables_raw):
+            errors.append(f'{tag}: deliverables must be a list of strings')
+        else:
+            deliverables = [_path(f) for f in deliverables_raw if f.strip()]
     return Task(goal=goal,
                 kind=_label(raw.get('kind')) or routing.DEFAULT_KIND,
                 complexity=(_label(raw.get('complexity'))
                             or routing.DEFAULT_COMPLEXITY),
                 files=files, role=_text(raw.get('role')),
-                skill=_text(raw.get('skill')))
+                skill=_text(raw.get('skill')), deliverables=deliverables)
+
+
+def _path(value: str) -> str:
+    """A deliverable path as written, normalised (``./a/../b.py`` ->
+    ``b.py``) so two spellings of one file compare equal; a trailing
+    ``/`` (a directory) is kept for :func:`ownership_problems` to name."""
+    value = value.strip()
+    norm = posixpath.normpath(value)
+    return norm + '/' if value.endswith('/') and norm != '/' else norm
 
 
 def parse(args: object) -> tuple[Optional[Plan], list[str]]:
@@ -381,6 +422,41 @@ def undersplit_concerns(request: str, plan: Plan) -> list[str]:
     return []
 
 
+def ownership_problems(plan: Plan) -> list[str]:
+    """Deliverable problems of a ``delegate`` plan: a writing task
+    (``DELIVERABLE_KINDS``) that names none, a task with more than
+    ``MAX_DELIVERABLES``, a file two tasks both own."""
+    if plan.outcome != 'delegate':
+        return []
+    out: list[str] = []
+    owner: dict[str, int] = {}
+    for i, t in enumerate(plan.tasks, 1):
+        if t.deliverables and toolpolicy.for_kind(t.kind):
+            out.append(f'task {i} ({t.kind}) is read-only and cannot own'
+                       ' deliverables: drop them or make it a writing task')
+        for path in t.deliverables:
+            if path.endswith('/'):
+                out.append(f'task {i}: deliverable {path} is a directory:'
+                           ' name the files')
+            elif path.startswith('~'):
+                out.append(f'task {i}: deliverable {path} is outside the'
+                           ' project: name project files only')
+        if t.kind in DELIVERABLE_KINDS and not t.deliverables:
+            out.append(f'task {i} ({t.kind}) names no deliverables: list'
+                       ' the files it creates or changes')
+        if len(t.deliverables) > MAX_DELIVERABLES:
+            out.append(f'task {i} has {len(t.deliverables)} deliverables (at'
+                       f' most {MAX_DELIVERABLES}): split it into smaller'
+                       ' tasks, or later delegate rounds')
+        for path in t.deliverables:
+            first = owner.setdefault(path, i)
+            if first != i:
+                out.append(f'{path} is a deliverable of tasks {first} and'
+                           f' {i}: one task owns a file; run the dependent'
+                           ' work in a later delegate round')
+    return out
+
+
 def validate(request: str, plan: Plan, followup: bool = False
              ) -> list[str]:
     """Every problem with ``plan`` for ``request``: unknown labels, then
@@ -391,6 +467,7 @@ def validate(request: str, plan: Plan, followup: bool = False
     if not followup:
         errors.extend(Verdict(plan, [], missing_concerns(request, plan),
                               undersplit_concerns(request, plan)).messages)
+    errors.extend(ownership_problems(plan))
     return errors
 
 
@@ -404,7 +481,10 @@ def evaluate(request: str, args: object, followup: bool = False) -> Verdict:
     missing = [] if (errors or followup) else missing_concerns(request, plan)
     under = ([] if (errors or followup)
              else undersplit_concerns(request, plan))
-    return Verdict(plan, errors, missing, under)
+    # Ownership is checked on a follow-up too: re-delegating the rest of a
+    # capped task is exactly when it matters.
+    owned = [] if errors else ownership_problems(plan)
+    return Verdict(plan, errors, missing, under, owned)
 
 
 # --- the text path (adapters that cannot force a tool call) ------------------
@@ -595,4 +675,7 @@ def task_text(task: Task) -> str:
     text = task.goal
     if task.files:
         text += '\nFiles: ' + ', '.join(task.files)
+    if task.deliverables:
+        text += ('\nDeliverables (you own these files; change nothing'
+                 ' else): ' + ', '.join(task.deliverables))
     return brief_hook(text)

@@ -481,12 +481,7 @@ class LiteLLMAdapter(Adapter):
 
         def run_tools(pending):
             for name, args, call_id, duplicate in pending:
-                if duplicate:
-                    ui.console.print(
-                        f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = turn.DUPLICATE_RESULT.format(name=name)
-                else:
-                    content = tools.execute_tool(name, args)
+                content = turn.tool_result(name, args, duplicate)
                 native.append({
                     'role': 'tool', 'tool_call_id': call_id,
                     'content': content})

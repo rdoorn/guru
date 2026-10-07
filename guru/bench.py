@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from guru import config, session, skills
 from guru.adapters.anthropic import AnthropicAdapter
@@ -143,6 +144,15 @@ class BenchRun(Orchestrator):
         # (agent title, 'ExcType: text') per turn that raised; the eval
         # runner reports them as the case error.
         self.worker_errors: list = []
+        # Spend cap in USD (an eval case's max_cost_usd): the run is
+        # cancelled once every agent's priced calls add up past it, and
+        # ``over_budget_usd`` records the spend at that point.
+        self.max_cost_usd: Optional[float] = None
+        self.over_budget_usd: Optional[float] = None
+
+    def spent(self) -> float:
+        """USD spent so far by every agent of the run (priced calls)."""
+        return sum(a.state.cost_usd for a in self.manager.all_agents())
 
     def on_worker_error(self, agent, exc: Exception) -> None:
         """Keep a raised turn on the run (headless: the default only logs,
@@ -181,6 +191,11 @@ class BenchRun(Orchestrator):
             while any(a.busy or a.queue for a in self.manager.agents):
                 await asyncio.sleep(0.05)
                 if deadline is not None and self.loop.time() >= deadline:
+                    await self._abort()
+                    break
+                if (self.max_cost_usd is not None
+                        and self.spent() > self.max_cost_usd):
+                    self.over_budget_usd = self.spent()
                     await self._abort()
                     break
         finally:

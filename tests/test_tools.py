@@ -847,3 +847,32 @@ class TestRunnerDenialIsMode:
         ledger.flush()
         [row] = fake_repo.stream('tool_events')
         assert row['denied'] == 'mode' and row['ok'] is False
+
+
+class TestWriteKindsStartWithEditTools:
+    """A writing task (build, refactor, debug, docs) starts with the
+    file-change tools active; other kinds keep the read-first core set."""
+
+    EDIT = {'write_file', 'edit_file', 'apply_patch'}
+
+    def test_build_gets_the_edit_tools(self) -> None:
+        _base, names = tools.initial_tools(False, kind='build')
+        assert self.EDIT <= names
+        assert 'delete_file' not in names
+
+    @pytest.mark.parametrize('kind', ['explain', 'other', None])
+    def test_reading_kinds_do_not(self, kind) -> None:
+        _base, names = tools.initial_tools(False, kind=kind)
+        assert not self.EDIT & names
+
+    def test_review_stays_read_only(self) -> None:
+        _base, names = tools.initial_tools(False, kind='review')
+        assert not self.EDIT & names
+
+    def test_project_policy_still_wins(self, monkeypatch) -> None:
+        tools.set_policy(tools.ToolsPolicy(disabled={'write_file'}))
+        try:
+            _base, names = tools.initial_tools(False, kind='build')
+        finally:
+            tools.set_policy(None)
+        assert 'write_file' not in names and 'edit_file' in names

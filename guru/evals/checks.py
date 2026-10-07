@@ -41,6 +41,12 @@ class Observed:
     gate_verdicts: list[str] = field(default_factory=list)
     sandbox: Optional[dict] = None
     skipped: bool = False
+    # The case's spend (sum of its ledger call rows; None when any call
+    # could not be priced), its sub-tasks' closing statuses, and the patch
+    # of what it changed in the copy ('' when nothing changed).
+    cost_usd: Optional[float] = None
+    task_statuses: list[str] = field(default_factory=list)
+    diff_path: str = ''
 
 
 @dataclass
@@ -206,6 +212,22 @@ def _gate_verdict_any(e: Expect, o: Observed) -> CheckResult:
                        f'{_fmt(e.gate_verdict_any)}')
 
 
+def _max_cost_usd(e: Expect, o: Observed) -> CheckResult:
+    assert e.max_cost_usd is not None
+    if o.cost_usd is None:
+        return CheckResult('max_cost_usd', False, 'cost unknown')
+    ok = o.cost_usd <= e.max_cost_usd
+    return CheckResult('max_cost_usd', ok, '' if ok else
+                       f'cost ${o.cost_usd:.2f} > ${e.max_cost_usd:.2f}')
+
+
+def _task_status_none(e: Expect, o: Observed) -> CheckResult:
+    hit = [s for s in o.task_statuses if s in e.task_status_none]
+    return CheckResult('task_status_none', not hit, '' if not hit else
+                       f'task statuses {_fmt(hit)} hit '
+                       f'{_fmt(e.task_status_none)}')
+
+
 # (name, is-configured predicate, check) in the order results are reported.
 _Check = Callable[[Expect, Observed], CheckResult]
 _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
@@ -231,6 +253,9 @@ _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
     ('gate_verdict', lambda e: bool(e.gate_verdict), _gate_verdict),
     ('gate_verdict_any', lambda e: bool(e.gate_verdict_any),
      _gate_verdict_any),
+    ('max_cost_usd', lambda e: e.max_cost_usd is not None, _max_cost_usd),
+    ('task_status_none', lambda e: bool(e.task_status_none),
+     _task_status_none),
 ]
 
 

@@ -22,8 +22,14 @@ module owns the shared skeleton so all adapters get the same behaviour:
   turn like a ``join`` (the mailbox resumes the agent); a second ``plan``
   in one round is refused unrun,
 * the round cap (``_MAX_ROUNDS`` plan rounds for a controller,
-  ``_MAX_TOOL_ROUNDS`` for everyone else): the turn ends on the last text
-  with ``protocol_violation`` instead of paying for rounds without end,
+  ``_MAX_TOOL_ROUNDS`` for everyone else): the turn ends with
+  ``protocol_violation`` instead of paying for rounds without end — a
+  controller on its last plan, a worker on a handoff built in code (files
+  read, files changed, its last text) and ``session.capped`` set,
+* the round budget a worker sees: every round's first tool result carries
+  ``[guru] round N/40 · files changed: K``; a writing kind with nothing
+  changed at half the budget gets one checkpoint, and every worker gets
+  one last-call note ``HANDOFF_ROUNDS`` before the cap (``budget_nudges``),
 * the delegation nudge (end of turn after a broad read-heavy answer) for a
   hands-on delegation-capable agent,
 * duplicate-call suppression (same name and arguments as an earlier call
@@ -63,6 +69,7 @@ from rich.markdown import Markdown
 from guru import config, session, ui
 from guru.adapters.base import FORCE_ANY, FORCE_PLAN
 from guru.domain import conversation, decisions, ledger, plan, tools
+from guru.domain.toolpolicy import WRITE_KINDS
 
 # A controller answer longer than this with no delegation in the turn counts
 # as the controller doing the work itself (design doc §5: measured, not
@@ -88,6 +95,47 @@ _MAX_ROUNDS = 12
 _MAX_TOOL_ROUNDS = 40
 _CAPPED_TEXT = '(guru ended the turn after {n} rounds without a final answer.)'
 
+# The worker's round budget, made visible (dogfood 2026-10-07: three build
+# workers read for all 40 rounds and wrote nothing; they never knew how
+# many rounds they had). The checkpoint fires once for a writing kind
+# (toolpolicy.WRITE_KINDS) with no file changed at CHECKPOINT_AT of the
+# cap; the last call fires once HANDOFF_ROUNDS before the cap.
+CHECKPOINT_AT = 0.5
+HANDOFF_ROUNDS = 2
+# Past READ_STOP_AT of the cap a writing task that still changed nothing
+# has its read tools refused until it writes (eval a6953350f1c1: a build
+# worker got the checkpoint at round 20 and read ledger.py 18 more times,
+# writing nothing).
+READ_STOP_AT = 0.75
+FOOTER_TEXT = '[guru] round {n}/{cap} · files changed: {changed}'
+CHECKPOINT_TEXT = (
+    '[guru] Half of your round budget is spent and no file is changed.'
+    ' Stop exploring: write the files now with what you know, or call'
+    ' final_answer saying what blocks you.')
+LAST_CALL_TEXT = (
+    '[guru] {left} round(s) left. Your next call must be final_answer with'
+    ' a handoff: what you changed, what you found (file:line), what'
+    ' remains to do. Any other tool call from now on is refused.')
+# The answer to any call but final_answer once the budget is spent (the
+# last HANDOFF_ROUNDS - 1 rounds): not run; the tool list is left as it is
+# so the prompt cache holds. Dogfood eval bcfc2314e34f: a worker ignored
+# the last-call note and edited until the cap.
+BUDGET_REFUSAL = ('Refused: your round budget is spent; this call did not'
+                  ' run. Call final_answer now with your handoff.')
+READS_CLOSED_TEXT = (
+    '[guru] Reading is closed: {n}/{cap} rounds spent and no file changed.'
+    ' Write the files now with what you know, or call final_answer saying'
+    ' what blocks you.')
+READ_REFUSAL = ('Refused: reading is closed for this task until you change'
+                ' a file; this call did not run. Write now, or call'
+                ' final_answer with what blocks you.')
+# The handoff of a worker that still hit the cap, built in code so the
+# parent gets what the worker learned without another paid call.
+_HANDOFF_PATHS = 12
+# In a sandbox project the edits happen in the copy (sandbox_submit lands
+# them): a worker running these is writing, not exploring.
+_SANDBOX_EDIT_TOOLS = frozenset(('sandbox_run', 'sandbox_python'))
+
 # The tool result an adapter returns for a call the loop marked duplicate
 # (``run_tools`` gets ``duplicate=True``); the call itself does not run.
 DUPLICATE_RESULT = ('Already called {name} with these arguments. Use the'
@@ -101,6 +149,31 @@ DUPLICATE_RESULT = ('Already called {name} with these arguments. Use the'
 # earlier result without running. A second ``plan`` in one round is
 # refused the same way (unrun) so the round has one plan verdict.
 _NEVER_DUPLICATE = frozenset(('plan', 'final_answer'))
+
+
+def tool_result(name: str, args: dict, duplicate: bool,
+                execute=None) -> str:
+    """One tool call's result, as every adapter threads it: the
+    duplicate notice (the call does not run) or the tool's output, plus
+    the round's budget footer on the first result of the round
+    (``session.round_note``, consumed here). ``execute`` defaults to
+    ``tools.execute_tool`` (tests pass a stub)."""
+    if session.budget_spent and name != 'final_answer':
+        content = BUDGET_REFUSAL
+    elif session.reads_closed and name in config.DELEGATION_READ_TOOLS:
+        content = READ_REFUSAL
+    elif duplicate:
+        ui.console.print(
+            f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
+        content = DUPLICATE_RESULT.format(name=name)
+    else:
+        content = (execute or tools.execute_tool)(name, args)
+    note = session.round_note
+    if note:
+        session.round_note = ''
+        content = f'{content}\n\n{note}'
+    return content
+
 
 _DELEGATION_TEXT = conversation.DELEGATION_TEXT
 # Historical: the act nudge's text. The loop no longer sends it (the turn
@@ -285,6 +358,10 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     session.last_error = ''          # this turn's provider failure, if any
     session.turn_waiting = False     # set by join/check/plan (orchestrator)
     session.check_polls = 0
+    session.capped = False
+    session.round_note = ''
+    session.budget_spent = False
+    session.reads_closed = False
     if not session.task_id:
         # A sub-agent executing a task keeps the turn_id it inherited.
         session.turn_id = ledger.new_turn_id()
@@ -340,6 +417,7 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
     panel_asked = False
     delegated = 0
     turn0 = _turn_start()
+    budget = _Budget()
     while True:
         if session.cancel_requested:
             ui.console.print("[yellow]* cancelled[/yellow]")
@@ -353,7 +431,9 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
             ui.console.print(
                 f"[dim yellow]\\[CONTRACT][/dim yellow] {rounds} rounds"
                 " without a final answer — ending the turn")
-            content = _capped_text(last_text, last_plan, rounds)
+            if _is_worker():
+                session.capped = True
+            content = _capped_text(last_text, last_plan, rounds, budget)
             _settle(content, False)
             _render_answer(content)
             return content, delegated
@@ -402,8 +482,16 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
                     if not duplicate:
                         called.add(key)
                 pending.append((name, args, ref, duplicate))
+            if _is_worker():
+                session.round_note = budget.note(rounds, cap)
+                session.budget_spent = rounds > cap - HANDOFF_ROUNDS
+                session.reads_closed = budget.reads_closed(rounds, cap)
             before = len(session.messages)
             run_tools(pending)
+            session.round_note = ''
+            session.budget_spent = False
+            session.reads_closed = False
+            budget.saw(session.messages[before:])
             _after_tools(rnd, turn0, before)
 
         if rnd.reprompt:
@@ -454,15 +542,130 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
         return content, delegated
 
 
-def _capped_text(last_text: str, last_plan: Optional[dict], rounds: int
-                 ) -> str:
+def _is_worker() -> bool:
+    """A sub-agent executing a delegated task (the round budget, its
+    notes and the capped handoff apply to it; the main agent's turn is
+    the user's conversation and keeps the plain cap)."""
+    return bool(session.task_id)
+
+
+# The paths an ``apply_patch`` / ``sandbox_submit`` result reports as
+# written ("<path>: N hunk(s) applied"), one per line.
+_APPLIED_RE = re.compile(r'^(.+?): \d+ hunk', re.MULTILINE)
+
+
+def changed_paths(name: str, args: object, content: str) -> list[str]:
+    """The files a finished tool call changed, read off its result: only
+    a call that succeeded counts (a refused, invalid or failed write
+    changed nothing). Empty for every other tool."""
+    path = args.get('path') if isinstance(args, dict) else None
+    if name in ('write_file', 'edit_file'):
+        return [str(path)] if path and '(sha:' in content else []
+    if name == 'delete_file':
+        return [str(path)] if path and content.startswith('Deleted ') else []
+    if name in ('apply_patch', 'sandbox_submit'):
+        if content.startswith('Applied patch'):
+            return _APPLIED_RE.findall(content) or [name]
+    return []
+
+
+class _Budget:
+    """What a worker did with its rounds: the paths it read and changed,
+    whether it is editing a sandbox copy, and which budget notes it
+    already got (each fires once)."""
+
+    def __init__(self) -> None:
+        self.read: list[str] = []
+        self.changed: list[str] = []
+        self.sandboxing = False         # editing the sandbox copy
+        self.checkpointed = False
+        self.last_called = False
+        self.read_stop_noted = False
+
+    def _idle_writer(self) -> bool:
+        """A writing task that has changed nothing (and is not editing a
+        sandbox copy)."""
+        return (not self.changed and not self.sandboxing
+                and session.task_kind in WRITE_KINDS)
+
+    def reads_closed(self, rounds: int, cap: int) -> bool:
+        """Whether this round's read tools are refused: past READ_STOP_AT
+        of the cap with nothing changed; reopened by the first write."""
+        return self._idle_writer() and rounds >= cap * READ_STOP_AT
+
+    def saw(self, results: list) -> None:
+        """Take in a round's tool messages (after they ran)."""
+        for m in results:
+            if not isinstance(m, dict) or m.get('role') != 'tool':
+                continue
+            name = str(m.get('tool_name', ''))
+            args = m.get('tool_args')
+            content = str(m.get('content', ''))
+            for p in changed_paths(name, args, content):
+                if p not in self.changed:
+                    self.changed.append(p)
+            if name in _SANDBOX_EDIT_TOOLS:
+                self.sandboxing = True
+            path = args.get('path') if isinstance(args, dict) else None
+            if (name in config.DELEGATION_READ_TOOLS and path
+                    and str(path) not in self.read):
+                self.read.append(str(path))
+
+    def note(self, rounds: int, cap: int) -> str:
+        """The footer for round ``rounds`` of ``cap``, plus the checkpoint
+        or the last call when one is due (each bumps ``budget_nudges``)."""
+        parts = [FOOTER_TEXT.format(n=rounds, cap=cap,
+                                    changed=len(self.changed))]
+        left = cap - rounds
+        if not self.last_called and left <= HANDOFF_ROUNDS:
+            self.last_called = True
+            ledger.bump('budget_nudges')
+            ui.console.print("[dim yellow]\\[BUDGET][/dim yellow] last"
+                             " call: asking for a handoff")
+            parts.append(LAST_CALL_TEXT.format(left=left))
+        elif (not self.read_stop_noted and self.reads_closed(rounds, cap)):
+            self.read_stop_noted = True
+            ledger.bump('budget_nudges')
+            ui.console.print("[dim yellow]\\[BUDGET][/dim yellow] reading"
+                             " closed, nothing written")
+            parts.append(READS_CLOSED_TEXT.format(n=rounds, cap=cap))
+        elif (not self.checkpointed and self._idle_writer()
+              and rounds >= cap * CHECKPOINT_AT):
+            self.checkpointed = True
+            ledger.bump('budget_nudges')
+            ui.console.print("[dim yellow]\\[BUDGET][/dim yellow] half the"
+                             " rounds spent, nothing written")
+            parts.append(CHECKPOINT_TEXT)
+        return '\n'.join(parts)
+
+    def handoff(self, last_text: str, rounds: int) -> str:
+        """The capped worker's answer: what it read and changed, then
+        its last text — the parent re-delegates from here."""
+        def paths(items: list[str]) -> str:
+            shown = ', '.join(items[:_HANDOFF_PATHS])
+            more = len(items) - _HANDOFF_PATHS
+            return shown + (f' (+{more} more)' if more > 0 else '')
+        lines = [f'(capped: guru ended this task after {rounds} rounds'
+                 ' without a final answer; the handoff below is what it'
+                 ' got to.)',
+                 f'Files changed: {paths(self.changed) or "none"}',
+                 f'Files read: {paths(self.read) or "none"}']
+        if last_text:
+            lines.append(f'Last note: {last_text}')
+        return '\n'.join(lines)
+
+
+def _capped_text(last_text: str, last_plan: Optional[dict], rounds: int,
+                 budget: Optional[_Budget] = None) -> str:
     """The answer when the round cap ends a turn: a controller's last
-    plan rendered through ``plan.fallback_text`` (its own text first),
-    else the last text the model wrote, else a fixed line."""
+    plan rendered through ``plan.fallback_text`` (its own text first);
+    a worker's handoff (files read and changed, its last text)."""
     if session.controller and last_plan is not None:
         return plan.fallback_text(
             last_text, last_plan,
             [f'{rounds} plan rounds without an accepted plan'])
+    if _is_worker():
+        return (budget or _Budget()).handoff(last_text, rounds)
     return last_text or _CAPPED_TEXT.format(n=rounds)
 
 

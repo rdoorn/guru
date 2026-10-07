@@ -1577,14 +1577,15 @@ class TestNativeRoundRebuild:
             {'type': 'tool_use', 'id': 'tu_1', 'name': 'spawn',
              'input': {'task': 'x'}}]
         assert last[1]['content'] == [use]
+        ran = 'ran spawn'
         assert [self._plain(m) for m in again[2:3]] == [
             {'role': 'user', 'content': [
                 {'type': 'tool_result', 'tool_use_id': 'tu_1',
-                 'content': 'ran spawn'}]}]
+                 'content': ran}]}]
         assert [self._plain(m) for m in last[2:3]] == [
             {'role': 'user', 'content': [
                 {'type': 'tool_result', 'tool_use_id': 'tu_1',
-                 'content': 'ran spawn',
+                 'content': ran,
                  'cache_control': {'type': 'ephemeral'}}]}]
         assert again[3] == {'role': 'assistant', 'content': 'done'}
         assert again[4] == {'role': 'user', 'content': 'and then?'}

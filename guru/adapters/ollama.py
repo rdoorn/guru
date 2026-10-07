@@ -628,13 +628,7 @@ class OllamaAdapter(Adapter):
 
     def _run_tools(self, pending) -> None:
         for name, arguments, _ref, duplicate in pending:
-            if duplicate:
-                ui.console.print(
-                    f"[yellow]\\[SKIP][/yellow] duplicate:"
-                    f" {name}({arguments})")
-                content = turn.DUPLICATE_RESULT.format(name=name)
-            else:
-                content = tools.execute_tool(name, arguments)
+            content = turn.tool_result(name, arguments, duplicate)
             # tool_args is guru-only (the delegation nudge counts distinct
             # paths from it); the Ollama client ignores unknown keys.
             session.messages.append(

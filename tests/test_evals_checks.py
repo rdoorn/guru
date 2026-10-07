@@ -234,3 +234,28 @@ class TestFixtureTestsTail:
 
     def test_tail_defaults_empty(self) -> None:
         assert obs().fixture_tests_tail == ''
+
+
+class TestBudgetAndTaskStatus:
+    """max_cost_usd caps a case's spend; task_status_none fails a case
+    whose sub-tasks ended in one of the listed statuses."""
+
+    def test_cost_under_the_cap(self) -> None:
+        r = one(Expect(max_cost_usd=20.0), obs(cost_usd=12.5))
+        assert r.passed and r.name == 'max_cost_usd'
+
+    def test_cost_over_the_cap(self) -> None:
+        r = one(Expect(max_cost_usd=20.0), obs(cost_usd=21.0))
+        assert not r.passed and r.detail == 'cost $21.00 > $20.00'
+
+    def test_unknown_cost_fails(self) -> None:
+        r = one(Expect(max_cost_usd=20.0), obs(cost_usd=None))
+        assert not r.passed and r.detail == 'cost unknown'
+
+    def test_task_statuses(self) -> None:
+        e = Expect(task_status_none=['capped', 'incomplete'])
+        assert one(e, obs(task_statuses=['done', 'done'])).passed
+        r = one(e, obs(task_statuses=['done', 'capped', 'capped']))
+        assert not r.passed
+        assert r.detail == ("task statuses ['capped', 'capped'] hit"
+                            " ['capped', 'incomplete']")

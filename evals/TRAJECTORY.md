@@ -80,3 +80,6 @@ One row per recorded run (appended by `python -m guru.evals run`).
 | 2026-09-26T21:19:07+00:00 | 93e122e2f82c | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 62.0 | $0.27 | undersplit rule: review 3/3 (1/3), two workers | 73.7 | 11.0 |
 | 2026-09-26T21:20:36+00:00 | 447a79aa6909 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 55.3 | $0.23 | undersplit rule: review (2/3) | 67.4 | 10.0 |
 | 2026-09-26T21:21:56+00:00 | e2337608fbc5 | SBP Litellm\|aws/claude-4-5-haiku@125k+routed:claude-tiers-review+controller | 1/1 | 68.8 | $0.26 | undersplit rule: review (3/3) | 66.1 | 10.0 |
+| 2026-10-07T19:06:04+00:00 | bcfc2314e34f | SBP Litellm\|aws/claude-5-5-opus@125k+routed:claude-tiers+controller | 0/1 | 878.5 | $6.56 | worker-budget iter 1 | 6882.3 | 162.0 |
+| 2026-10-07T19:29:30+00:00 | a6953350f1c1 | SBP Litellm\|aws/claude-5-5-opus@125k+routed:claude-tiers+controller | 0/1 | 1027.1 | $5.24 | worker-budget iter 2: refused calls after last call; incomplete only for unwritten new files | 5851.8 | 162.0 |
+| 2026-10-07T19:54:05+00:00 | 06075f330988 | SBP Litellm\|aws/claude-5-5-opus@125k+routed:claude-tiers+controller | 1/1 | 1018.8 | $6.13 | worker-budget iter 3: reads closed at 75% for idle writers; tests with their code | 5889.6 | 121.0 |

@@ -285,7 +285,10 @@ class TestDecisionsAndLedgerSettings:
         assert config.DECISIONS_MODE == 'off'
         assert any('autopilot' in r.getMessage() for r in caplog.records)
 
-    def test_defaults(self) -> None:
+    def test_defaults(self, tmp_path, monkeypatch) -> None:
+        # An empty settings file: the user's ~/.guru/settings.toml (loaded
+        # at import) must not leak into the code defaults under test.
+        self._apply(tmp_path, monkeypatch, '')
         assert config.DECISIONS_MODE == 'off'
         assert config.DECISIONS_POINTS == {}
         assert config.DECISIONS_LABELS_MARGIN == 0.15

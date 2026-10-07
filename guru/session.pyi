@@ -44,6 +44,10 @@ class SessionState:
     last_error: str
     turn_waiting: bool
     check_polls: int
+    capped: bool
+    round_note: str
+    budget_spent: bool
+    reads_closed: bool
     def __init__(self) -> None: ...
 
 
@@ -85,3 +89,7 @@ struggle: dict[str, int]
 last_error: str
 turn_waiting: bool
 check_polls: int
+capped: bool
+round_note: str
+budget_spent: bool
+reads_closed: bool
