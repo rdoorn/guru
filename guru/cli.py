@@ -8,12 +8,13 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
-from guru import config, judges, session, ui
+from guru import config, judges, session, startup, ui
 from guru.adapters.base import Adapter
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
 from guru.domain import ledger, policy, tools
+from guru.judges import quiet
 from guru.repositories import settings as routing_settings
 from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
@@ -826,6 +827,74 @@ def _handle_slash_search(query: str) -> None:
             ui.console.print("[bold green]--- End ---[/bold green]")
 
 
+def _home(path: Path) -> str:
+    """``path`` with the home directory shown as ``~``."""
+    try:
+        return f'~/{path.relative_to(Path.home())}'
+    except ValueError:
+        return str(path)
+
+
+def _model_detail(adapter: Adapter) -> str:
+    """``model · Adapter (local, host) · ctx N · GPU`` for the step list."""
+    parts = [session.model or '?', adapter.describe()]
+    if session.num_ctx:
+        parts.append(f'ctx {session.num_ctx:,}')
+    if adapter.placement():
+        parts.append(adapter.placement())
+    return ' · '.join(parts)
+
+
+def _start(args: argparse.Namespace,
+           progress: startup.RichProgress) -> routing_settings.RoutingSettings:
+    """The startup phases, one reported step each; returns the routing."""
+    global ADAPTERS, REGISTRY
+    from guru import log, skills
+    with progress.step('settings, skills, ledger') as step:
+        skills.setup(reset=args.reset_skills)
+        ledger.set_repository(JsonlLedger(config.LEDGER_DIR))
+        tools.set_policy(load_tools_policy())
+        session.num_ctx_override = args.num_ctx
+        step.detail(_home(config.GLOBAL_SETTINGS_PATH))
+
+    with progress.step('adapters') as step:
+        ADAPTERS = _build_adapters()
+        REGISTRY = build_registry(ADAPTERS)
+        if routing_settings.ensure_default_routing(
+                ADAPTER_CONFIGS) == 'written':
+            ui.console.print(
+                "[yellow]routing: wrote the default Claude-tier configuration"
+                " to settings.toml; /routing to inspect or turn off[/yellow]")
+        if routing_settings.migrate_labels_judge() == 'migrated':
+            ui.console.print(
+                '[yellow]decisions: the labels judge moved from "encoder"'
+                ' (NLI) to "decide" in settings.toml (0.83 vs 0.46 on real'
+                ' tasks); set labels = "encoder" to go back[/yellow]')
+        routing = load_routing()
+        step.detail('\n'.join(a.describe() for a in _enabled_adapters()))
+
+    with progress.step('main model') as step:
+        # Restore the last-used adapter+model (and log in); else a default.
+        if not _restore_last(args.model):
+            _startup_select(args.model or DEFAULT_MODEL)
+        if session.adapter is not None:
+            step.detail(_model_detail(session.adapter))
+
+    with progress.step('judges') as step:
+        judges.set_registry(REGISTRY, routing)   # llm: judges, gate reviewer
+        installed = judges.install()
+        if installed:
+            log.info('shadow judges: %s', installed)
+        described = judges.installed_descriptions()
+        if not described:
+            step.detail(f'none (decisions {config.DECISIONS_MODE})')
+        elif judges.warming():
+            step.detail('\n'.join(described + ['warming in background']))
+        else:
+            step.detail('\n'.join(described))
+    return routing
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="guru — local LLM agent")
     parser.add_argument("--model", default=None)
@@ -838,37 +907,17 @@ def main() -> None:
         help="Overwrite the baked-in default roles/skills on startup",
     )
     args, _ = parser.parse_known_args()
-
     from guru import log
+    # The log's GURU_DEBUG stderr handler binds the real stderr, not the
+    # router below (a router-bound handler would log warm-up records twice).
     log.setup()
-
-    from guru import skills
-    skills.setup(reset=args.reset_skills)
-
-    ledger.set_repository(JsonlLedger(config.LEDGER_DIR))
-    tools.set_policy(load_tools_policy())
-
-    session.num_ctx_override = args.num_ctx
-    global ADAPTERS, REGISTRY
-    ADAPTERS = _build_adapters()
-    REGISTRY = build_registry(ADAPTERS)
-    if routing_settings.ensure_default_routing(ADAPTER_CONFIGS) == 'written':
-        ui.console.print(
-            "[yellow]routing: wrote the default Claude-tier configuration to"
-            " settings.toml; /routing to inspect or turn off[/yellow]")
-    if routing_settings.migrate_labels_judge() == 'migrated':
-        ui.console.print(
-            '[yellow]decisions: the labels judge moved from "encoder" (NLI)'
-            ' to "decide" in settings.toml (0.83 vs 0.46 on real tasks);'
-            ' set labels = "encoder" to go back[/yellow]')
-    routing = load_routing()
-    judges.set_registry(REGISTRY, routing)     # llm: judges, gate reviewer
-    installed = judges.install()
-    if installed:
-        log.info('shadow judges: %s', installed)
-    # Restore the last-used adapter+model (and log in); else pick a default.
-    if not _restore_last(args.model):
-        _startup_select(args.model or DEFAULT_MODEL)
+    # Before anything imports transformers: its log handler keeps the
+    # sys.stderr it sees, and the judge warm-up's output must reach the log.
+    quiet.install()
+    progress = startup.RichProgress(ui.console)
+    progress.header()
+    with startup.use(progress):
+        routing = _start(args, progress)
 
     session.messages = [
         {"role": "system", "content": config.build_system_prompt()}]

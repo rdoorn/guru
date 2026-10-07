@@ -12,12 +12,14 @@ they live here to keep ``tui.py`` focused on the coordinator itself:
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 
 from prompt_toolkit.application import get_app
 
-from guru import config, log
+from guru import config, judges, log
 from guru.domain import conversation
+from guru.domain.startup import status_text
 
 
 class _BufferWriter:
@@ -149,5 +151,13 @@ def _status_from(st) -> tuple:
         f" · {comp}"
         f" | ↓ {st.session_in} | ↑ {st.session_out}"
         f" | 📁 {Path.cwd().name} | 🌿 {st.git_branch or 'none'}"
+        f"{_judges_segment()}"
     )
     return left, ctx, right, colour
+
+
+def _judges_segment() -> str:
+    """' | judges: loading decide…' while the background warm-up runs (and
+    briefly 'ready', or a failure until restart); '' otherwise."""
+    text = status_text(judges.warm_status(), time.monotonic())
+    return f' | {text}' if text else ''

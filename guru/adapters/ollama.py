@@ -10,7 +10,7 @@ import time
 
 import ollama
 
-from guru import config, log, session, ui
+from guru import config, log, session, startup, ui
 from guru.adapters import turn
 from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
                                 openai_tool_defs)
@@ -45,6 +45,7 @@ class OllamaAdapter(Adapter):
         self.url = url
         self._fitted: set = set()   # models already fitted to memory
         self._thinks: dict = {}     # model -> supports thinking
+        self._placement: dict = {}  # model -> 'GPU' / 'CPU spill'
 
     # --- discovery -----------------------------------------------------------
 
@@ -198,7 +199,8 @@ class OllamaAdapter(Adapter):
             return
         ui.console.print(f"[dim]Pulling {model_id} (one-time download)…[/dim]")
         try:
-            subprocess.run(['ollama', 'pull', model_id], check=False)
+            with startup.current().paused():    # ollama draws its own bar
+                subprocess.run(['ollama', 'pull', model_id], check=False)
         except Exception as e:
             ui.console.print(f"[red]Could not pull {model_id}: {e}[/red]")
 
@@ -461,16 +463,22 @@ class OllamaAdapter(Adapter):
         """Load the model now (so the first answer is fast) and fit context."""
         if not self.available():
             return
-        ui.console.print(
-            f"[dim]Loading {session.model} (context"
-            f" {session.num_ctx:,})…[/dim]")
+        progress = startup.current()
+        progress.detail(
+            f"Loading {session.model} (context {session.num_ctx:,})…")
         if not self._reload(session.num_ctx):
             ui.console.print(
                 f"[yellow]Could not preload {session.model}; it will load on"
                 f" the first question.[/yellow]")
             return
         self._fit_after_load()
-        ui.console.print(f"[dim]{session.model} ready.[/dim]")
+        self._placement[session.model] = (
+            'GPU' if self._gpu_fits() else 'CPU spill')
+        progress.detail(f"{session.model} ready.")
+
+    def placement(self) -> str:
+        """'GPU' or 'CPU spill' once the current model is preloaded."""
+        return self._placement.get(session.model, '')
 
     def _gpu_fits(self) -> bool:
         """True if the loaded model sits entirely in VRAM (no CPU spill)."""

@@ -116,3 +116,17 @@ so auto cases still hit its denying asker), `DELEGATION_NUDGE_MIN_READS = 3`
 `SECRET_SCAN` (mirrors `[routing] secret_scan` while a table is present).
 Every constant in `config.py` is read by at least one module; none was
 removed.
+
+## Startup output (no knob)
+
+Always on, nothing to set: `./start.sh` prints one line per startup step
+(`settings, skills, ledger`, `adapters`, `main model`, `judges`) with what
+it found, where each model runs (`local` / `remote` and the host; `GPU` or
+`CPU spill` for an Ollama model) and how long the step took. Judges warm
+on a background thread after the prompt opens; the statusline shows
+`judges: loading <name>…`, then `judges ready Ns` for
+`READY_SHOWN_S = 10` seconds (`guru/domain/startup.py`), or `judges:
+<names> failed (see log)` until restart. Anything the judge libraries
+print or log during warm-up (the gliner2 config banner, transformers'
+`Device set to use mps`, attention-implementation warnings) goes to
+`~/.guru/guru.log` at debug level instead of the terminal.

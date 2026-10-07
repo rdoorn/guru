@@ -1713,3 +1713,76 @@ class TestThinkingLastRound:
                  'content': 'A'}]
             assert out[3:] == [{'role': 'assistant', 'content': 'done'},
                                {'role': 'user', 'content': 'more'}]
+
+
+class TestLocation:
+    """``Adapter.location()`` / ``describe()``: where the model runs."""
+
+    def test_ollama_default_is_local(self) -> None:
+        from guru.adapters.ollama import OllamaAdapter
+        a = OllamaAdapter()
+        assert str(a.location()) == 'local, localhost:11434'
+        assert a.describe() == 'Ollama (local, localhost:11434)'
+
+    def test_ollama_on_another_host_is_remote(self) -> None:
+        from guru.adapters.ollama import OllamaAdapter
+        a = OllamaAdapter(url='http://gpu-box:11434')
+        assert str(a.location()) == 'remote, gpu-box:11434'
+
+    def test_anthropic_without_base_url(self) -> None:
+        from guru.adapters.anthropic import AnthropicAdapter
+        assert str(AnthropicAdapter().location()) == (
+            'remote, api.anthropic.com')
+
+    def test_anthropic_with_a_local_base_url(self) -> None:
+        from guru.adapters.anthropic import AnthropicAdapter
+        a = AnthropicAdapter(base_url='http://127.0.0.1:8080')
+        assert str(a.location()) == 'local, 127.0.0.1:8080'
+
+    def test_litellm_proxy(self) -> None:
+        from guru.adapters.litellm import LiteLLMAdapter
+        a = LiteLLMAdapter(base_url='https://proxy.example/v1')
+        assert a.describe() == 'LiteLLM (remote, proxy.example)'
+
+
+class _RecordingProgress:
+    def __init__(self) -> None:
+        self.details: list = []
+
+    def detail(self, text: str) -> None:
+        self.details.append(text)
+
+
+class TestOllamaPreloadReports:
+    """The preload reports through ``startup.current()`` and records
+    whether the model sits on the GPU."""
+
+    def _adapter(self, monkeypatch, fits: bool, loads: bool = True):
+        from guru import session, startup
+        from guru.adapters.ollama import OllamaAdapter
+        a = OllamaAdapter()
+        monkeypatch.setattr(a, 'available', lambda: True)
+        monkeypatch.setattr(a, '_reload', lambda ctx: loads)
+        monkeypatch.setattr(a, '_fit_after_load', lambda: None)
+        monkeypatch.setattr(a, '_gpu_fits', lambda: fits)
+        monkeypatch.setattr(session, 'model', 'm:1')
+        monkeypatch.setattr(session, 'num_ctx', 8192)
+        rec = _RecordingProgress()
+        monkeypatch.setattr(startup, '_current', rec)
+        return a, rec
+
+    def test_loading_then_ready_on_gpu(self, monkeypatch) -> None:
+        a, rec = self._adapter(monkeypatch, fits=True)
+        a._preload_and_fit()
+        assert rec.details == ['Loading m:1 (context 8,192)…', 'm:1 ready.']
+        assert a.placement() == 'GPU'
+
+    def test_cpu_spill(self, monkeypatch) -> None:
+        a, _ = self._adapter(monkeypatch, fits=False)
+        a._preload_and_fit()
+        assert a.placement() == 'CPU spill'
+
+    def test_failed_preload_has_no_placement(self, monkeypatch) -> None:
+        a, _ = self._adapter(monkeypatch, fits=True, loads=False)
+        a._preload_and_fit()
+        assert a.placement() == ''

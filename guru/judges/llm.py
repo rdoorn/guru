@@ -66,6 +66,11 @@ class LLMReviewer:
         self.max_tokens = int(max_tokens)
         self.name = f'llm:{getattr(adapter, "name", "?")}|{self.model}'
 
+    def describe(self) -> str:
+        """Name and where its adapter runs (the startup step list)."""
+        location = getattr(self.adapter, 'location', None)
+        return f'{self.name} ({location()})' if location else self.name
+
     def ask(self, questions: list) -> list:
         """One completion per question; a non-review question or an
         unparsable answer raises (the seam records an ``error`` row)."""

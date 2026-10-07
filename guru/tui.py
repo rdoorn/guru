@@ -33,9 +33,11 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.widgets import HorizontalLine, TextArea
 from rich.console import Console
 
-from guru import config, log, session, skills, ui
+from guru import config, judges, log, session, skills, ui
 from guru.agents import AgentManager
 from guru.domain import conversation, files, spend, tools
+from guru.domain.startup import READY_SHOWN_S
+from guru.judges import quiet
 from guru.orchestrator import Orchestrator
 from guru.tui_io import _app_cols, _BufferWriter, _MainWriter, _status_from
 
@@ -119,7 +121,9 @@ def run(registry=None, routing=None) -> None:
     def _attach_console(agent) -> None:
         writer = _BufferWriter()
         writer.target = agent
-        writer.refresh = _invalidate
+        # Late-bound: the main agent is configured before _invalidate (which
+        # needs tui_app) is defined further down.
+        writer.refresh = lambda: _invalidate()
         agent.console = Console(
             # _BufferWriter is a duck-typed file-like sink, not a real IO[str].
             file=writer,  # type: ignore[arg-type]
@@ -324,6 +328,23 @@ def run(registry=None, routing=None) -> None:
         if state['view'] == 'tui':
             tui_app.invalidate()
 
+    def _redraw_status() -> None:
+        # Called from the warm-up / timer threads; invalidate() is
+        # thread-safe and a no-op for an app that is not running.
+        if state['view'] == 'tui':
+            tui_app.invalidate()
+        elif ps.app.is_running:
+            ps.app.invalidate()
+
+    def _judges_changed() -> None:
+        # The 'judges ready' notice expires after READY_SHOWN_S: redraw
+        # once more then so it disappears without a keypress.
+        _redraw_status()
+        if judges.warm_status().state == 'ready':
+            timer = threading.Timer(READY_SHOWN_S + 0.1, _redraw_status)
+            timer.daemon = True
+            timer.start()
+
     # --- main prompt (normal buffer) ----------------------------------------
 
     main_kb = KeyBindings()
@@ -368,6 +389,8 @@ def run(registry=None, routing=None) -> None:
         multiline=True,
         key_bindings=merge_key_bindings([ui._kb, main_kb]),
     )
+    judges.set_warm_listener(_judges_changed)
+    _judges_changed()       # the warm-up may have finished before the TUI
 
     def _main_toolbar():
         # Match the TUI's bottom chrome: rule · status · tabs. The output
@@ -549,6 +572,9 @@ def run(registry=None, routing=None) -> None:
                 # raw=True so rich's ANSI colour codes (from main's console)
                 # pass through instead of being shown literally (?[1;32m…).
                 with patch_stdout(raw=True):
+                    # patch_stdout swaps in its own proxy; route the judge
+                    # warm-up's library output around it too.
+                    quiet.install()
                     res = await ps.prompt_async(
                         _main_message, bottom_toolbar=_main_toolbar,
                         style=ui._TOOLBAR_STYLE,
@@ -606,6 +632,7 @@ def run(registry=None, routing=None) -> None:
                         pre_run=ui.enable_terminal_modes)
         finally:
             state['closing'] = True
+            judges.set_warm_listener(None)
             ui.reset_terminal()
 
     asyncio.run(_amain())

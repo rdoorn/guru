@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import string
 import time
 from typing import Optional, Union
@@ -18,9 +19,12 @@ import ollama
 
 from guru import log
 from guru.domain.decisions import CHOICE, NOUL, SCORE, Answer, Question
+from guru.domain.startup import host_location
 
 LETTERS = string.ascii_uppercase
 KEEP_ALIVE = '10m'
+# Where the ollama client goes without a url (the client reads OLLAMA_HOST).
+DEFAULT_URL = 'http://localhost:11434'
 SIDECAR_TIMEOUT_S = 30      # a hung sidecar must not pin the judge thread
 
 
@@ -82,9 +86,16 @@ class OllamaJsonJudge:
     def __init__(self, model: str, url: Optional[str] = None,
                  client=None) -> None:
         self.model = model
+        self.url = url
         self.client = client or ollama.Client(host=url,
                                               timeout=SIDECAR_TIMEOUT_S)
         self.name = f'ollama-json:{model}'
+
+    def describe(self) -> str:
+        """Name and where the sidecar runs (the startup step list)."""
+        where = host_location(
+            self.url or os.environ.get('OLLAMA_HOST') or DEFAULT_URL, False)
+        return f'{self.name} (Ollama, {where})'
 
     def warm_up(self) -> float:
         """Load the model into the sidecar with a one-token generate (kept
