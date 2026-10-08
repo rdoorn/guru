@@ -70,6 +70,10 @@ class DecideJudge:
         # a crash risk, and serialising costs nothing at ~150 ms each).
         self._infer = threading.Lock()
 
+    def describe(self) -> str:
+        """Name and where it runs (the startup step list)."""
+        return encoder._describe(self.name)
+
     def warm_up(self) -> float:
         """Load the model and classify one token so the weights are
         resident; never raises. Returns the seconds spent."""

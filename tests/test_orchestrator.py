@@ -44,6 +44,19 @@ class TestOrchestrator:
         assert 'resuming' in msg.lower()
         assert any('A1' in p for p in main.queue)
 
+    def test_join_names_a_capped_child(self) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        c1 = self._agent('agent1', parent=main, answer='A1')
+        c1.outcome = 'capped'
+        o.manager.agents.append(c1)
+        o.barriers[main] = {'remaining': {'agent1'}, 'results': {}}
+        o.report(c1)
+        [payload] = main.queue
+        assert '— agent1 · capped · task: task-agent1\nA1' in payload
+
     def test_report_barrier_waits_then_delivers_joined(self) -> None:
         from guru.orchestrator import Orchestrator
         o = Orchestrator()
@@ -402,6 +415,36 @@ class TestTaskRecords:
         o.on_done(child)
         assert self._tasks(fake_repo)[1]['status'] == 'cancelled'
 
+    def test_capped_child_is_recorded_and_delivered_as_capped(
+            self, monkeypatch, fake_repo) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        child = self._child(o, main)
+        child.state.capped = True
+        child.state.messages.append({'role': 'assistant',
+                                     'content': '(capped: ...) handoff'})
+        o.on_done(child)
+        assert self._tasks(fake_repo)[1]['status'] == 'capped'
+        assert child.outcome == 'capped'
+        [payload] = main.queue
+        assert payload.startswith(f'[result from {child.title} · capped ·'
+                                  ' task: review auth]')
+
+    def test_done_child_delivery_header_unchanged(
+            self, monkeypatch, fake_repo) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        child = self._child(o, main)
+        child.state.messages.append({'role': 'assistant', 'content': 'A1'})
+        o.on_done(child)
+        assert child.outcome == 'done'
+        assert main.queue == [f'[result from {child.title} · task: review'
+                              ' auth]\nA1']
+
     def test_second_on_done_writes_no_second_finish_row(
             self, monkeypatch, fake_repo) -> None:
         from guru.orchestrator import Orchestrator
@@ -443,14 +486,14 @@ class TestTaskRecords:
         tasks = self._tasks(repo)
         assert [t['status'] for t in tasks] == ['running', 'cancelled']
 
-    def test_panel_index_offsets_titles(self, monkeypatch, fake_repo) -> None:
+    def test_batch_titles_count_up(self, monkeypatch, fake_repo) -> None:
         from guru.orchestrator import Orchestrator
         repo = fake_repo
         o = Orchestrator()
         main = o.manager.active
         main.state.turn_id = 'T9'
-        a = self._child(o, main, index=0)
-        b = self._child(o, main, index=1)
+        a = self._child(o, main)
+        b = self._child(o, main)
         assert (a.title, b.title) == ('agent1', 'agent2')
         assert self._tasks(repo)[0]['turn_id'] == 'T9'
         assert a.task_rec.task_id != b.task_rec.task_id
@@ -631,7 +674,7 @@ class TestRouting:
         spend.set_spend_asker(lambda q: calls.append(q) or True)
         o, main = self._orch(settings=self._settings(spend_confirm='ask'))
         a = o._make_child(main, 't1', complexity='hard')
-        b = o._make_child(main, 't2', complexity='hard', index=1)
+        b = o._make_child(main, 't2', complexity='hard')
         assert len(calls) == 1
         assert a.state.adapter.name == b.state.adapter.name == 'Remote'
         assert a.task_rec.confirmation == 'granted'
@@ -2096,3 +2139,157 @@ class TestProjectBrief:
         monkeypatch.setattr(orch_mod._brief, 'slice', boom)
         assert orch_mod._brief_block('t', self._brief()) == ''
         assert logged == ['brief slice failed']
+
+
+class TestDeliverablesCheck:
+    """A child that owns deliverables is ``incomplete`` when one was not
+    written during its task; the delivery says which."""
+
+    @pytest.fixture(autouse=True)
+    def _constant_environment(self, monkeypatch) -> None:
+        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+
+    def _run(self, monkeypatch, tmp_path, fake_repo, write: list,
+             deliverables: list, preexisting: tuple = ()):
+        import time as _time
+
+        from guru.orchestrator import Orchestrator
+        monkeypatch.chdir(tmp_path)
+        for name in preexisting:
+            (tmp_path / name).write_text('old')
+            old = _time.time() - 3600
+            os.utime(tmp_path / name, (old, old))
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        child = o._make_child(main, task='build it', kind='build')
+        child.queue.clear()
+        child.deliverables = list(deliverables)
+        child.started_wall = _time.time() - 1
+        child.preexisting = {p for p in deliverables
+                             if (tmp_path / p).exists()}
+        for name in write:
+            (tmp_path / name).write_text('new')
+        child.state.messages.append({'role': 'assistant', 'content': 'ok'})
+        o.on_done(child)
+        ledger.flush()
+        return child, main, fake_repo.stream('tasks')[-1]
+
+    def test_all_written_is_done(self, monkeypatch, tmp_path,
+                                 fake_repo) -> None:
+        child, main, row = self._run(monkeypatch, tmp_path, fake_repo,
+                                     write=['a.py'], deliverables=['a.py'])
+        assert row['status'] == 'done' and child.outcome == 'done'
+
+    def test_missing_is_incomplete(self, monkeypatch, tmp_path,
+                                   fake_repo) -> None:
+        child, main, row = self._run(
+            monkeypatch, tmp_path, fake_repo, write=['a.py'],
+            deliverables=['a.py', 'tests/test_a.py'])
+        assert row['status'] == 'incomplete'
+        [payload] = main.queue
+        assert payload.startswith(f'[result from {child.title} ·'
+                                  ' incomplete · task: build it]')
+        assert payload.endswith('(guru: deliverables not written:'
+                                ' tests/test_a.py)')
+
+    def test_untouched_existing_file_is_not_written(
+            self, monkeypatch, tmp_path, fake_repo) -> None:
+        _child, _main, row = self._run(
+            monkeypatch, tmp_path, fake_repo, write=[],
+            deliverables=['a.py'], preexisting=('a.py',))
+        assert row['status'] == 'incomplete'
+
+    def test_an_untouched_existing_owned_file_is_fine(
+            self, monkeypatch, tmp_path, fake_repo) -> None:
+        # A fix that needed only one of its two (existing) files.
+        _child, _main, row = self._run(
+            monkeypatch, tmp_path, fake_repo, write=['a.py'],
+            deliverables=['a.py', 'b.py'], preexisting=('a.py', 'b.py'))
+        assert row['status'] == 'done'
+
+    def test_capped_stays_capped(self, monkeypatch, tmp_path,
+                                 fake_repo) -> None:
+        child, _main, row = self._run_capped(monkeypatch, tmp_path,
+                                             fake_repo)
+        assert row['status'] == 'capped'
+
+    def _run_capped(self, monkeypatch, tmp_path, fake_repo):
+        import time as _time
+
+        from guru.orchestrator import Orchestrator
+        monkeypatch.chdir(tmp_path)
+        o = Orchestrator()
+        main = o.manager.active
+        main.busy = True
+        child = o._make_child(main, task='build it', kind='build')
+        child.queue.clear()
+        child.deliverables = ['a.py']
+        child.started_wall = _time.time()
+        child.state.capped = True
+        child.state.messages.append({'role': 'assistant', 'content': 'h'})
+        o.on_done(child)
+        ledger.flush()
+        return child, main, fake_repo.stream('tasks')[-1]
+
+
+class TestDeliverableEdges:
+    def test_newest_mtime_of_a_directory(self, tmp_path) -> None:
+        import time as _time
+
+        from guru.orchestrator import _newest_mtime
+        (tmp_path / 'pkg').mkdir()
+        f = tmp_path / 'pkg' / 'a.py'
+        f.write_text('x')
+        now = _time.time()
+        os.utime(f, (now, now))
+        assert _newest_mtime(str(tmp_path / 'pkg')) == pytest.approx(now)
+        assert _newest_mtime(str(tmp_path / 'missing')) == 0.0
+
+    def test_retry_keeps_the_deliverables(self, monkeypatch,
+                                          fake_repo) -> None:
+        from guru.orchestrator import Orchestrator
+        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+        o = Orchestrator()
+        main = o.manager.active
+        failed = o._make_child(main, task='build it', kind='build')
+        failed.deliverables = ['a.py']
+        rec = failed.task_rec
+        plan = o._plan_child(main, 'build it', 'build', 'standard')
+        retry = o._retry_child(failed, rec, plan)
+        assert retry is not None and retry.deliverables == ['a.py']
+        assert retry.deliverables is not failed.deliverables
+
+
+class TestProjectRules:
+    """The project's rules file reaches the controller and every worker."""
+
+    def _brief(self, root):
+        from guru.domain.brief import Brief
+        return Brief(root=str(root), head_sha='h', built_at='t',
+                     build_seconds=0.0, files=1, python_files=1,
+                     modules=['m'], test_command='pytest')
+
+    def test_agents_md_in_both_blocks(self, tmp_path) -> None:
+        import guru.orchestrator as orch_mod
+        (tmp_path / 'AGENTS.md').write_text('Domain never imports repos.\n')
+        b = self._brief(tmp_path)
+        for block in (orch_mod._brief_block('t', b), orch_mod._map_block(b)):
+            assert '[project rules — follow them]\n(AGENTS.md)\nDomain' \
+                in block
+
+    def test_first_file_wins_and_long_rules_are_cut(self, tmp_path) -> None:
+        from guru.domain import brief
+        (tmp_path / 'CLAUDE.md').write_text('x' * (brief.MAX_RULES_CHARS + 50))
+        (tmp_path / '.guru').mkdir()
+        (tmp_path / '.guru' / 'rules.md').write_text('later')
+        text = brief.rules(tmp_path)
+        assert text.startswith('(CLAUDE.md)\n')
+        assert text.endswith('… (cut; read CLAUDE.md for the rest)')
+
+    def test_no_rules_file(self, tmp_path) -> None:
+        import guru.orchestrator as orch_mod
+        from guru.domain import brief
+        assert brief.rules(tmp_path) == ''
+        assert '[project rules' not in orch_mod._map_block(
+            self._brief(tmp_path))

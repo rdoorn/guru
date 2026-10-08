@@ -89,6 +89,10 @@ def _warm(name: str, run: Callable[[], object]) -> float:
     return round(time.perf_counter() - t0, 3)
 
 
+def _describe(name: str) -> str:
+    return f'{name} (local, in-process)'
+
+
 def _noul_answer(p: float, judge: str, ms: int) -> Answer:
     p = round(p, 4)
     return Answer(chosen=p >= 0.5, dist={'yes': p, 'no': round(1 - p, 4)},
@@ -103,6 +107,10 @@ class EncoderJudge:
         self.name = f'encoder:{model.rsplit("/", 1)[-1]}'
         self._pipeline = _LazyPipeline(pipeline_factory or _factory(
             'zero-shot-classification', model))
+
+    def describe(self) -> str:
+        """Name and where it runs (the startup step list)."""
+        return _describe(self.name)
 
     def warm_up(self) -> float:
         """Load the pipeline and classify one token so the weights are
@@ -148,6 +156,10 @@ class InjectionJudge:
         self.name = f'injection:{model.rsplit("/", 1)[-1]}'
         self._pipeline = _LazyPipeline(pipeline_factory or _factory(
             'text-classification', model, truncation=True, max_length=512))
+
+    def describe(self) -> str:
+        """Name and where it runs (the startup step list)."""
+        return _describe(self.name)
 
     def warm_up(self) -> float:
         """Load the pipeline and classify one token; never raises.

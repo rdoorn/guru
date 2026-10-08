@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from guru.domain.startup import Location, host_location
+
 # System instruction for :meth:`Adapter.complete`: every single-shot
 # completion guru asks for (the sandbox gate's review) is machine-read, so
 # the model is told once, the same way on every provider, to emit JSON only.
@@ -128,6 +130,25 @@ class Adapter(ABC):
     # local-only mode and whenever the secret scanner finds something; the
     # remote path also redacts tool output. Local providers set False.
     remote: bool = True
+    # Host shown when the adapter has no url/base_url of its own.
+    default_host: str = ''
+
+    def location(self) -> Location:
+        """Where the models run: a loopback url is local, any other host
+        remote; without a url the ``remote`` flag and ``default_host``."""
+        url = getattr(self, 'url', None) or getattr(self, 'base_url', None)
+        if url:
+            return host_location(url, self.remote)
+        return Location('remote' if self.remote else 'local',
+                        self.default_host)
+
+    def describe(self) -> str:
+        """``Name (local, host)`` for the startup step list."""
+        return f'{self.name} ({self.location()})'
+
+    def placement(self) -> str:
+        """Where the loaded model sits (e.g. 'GPU'); '' when unknown."""
+        return ''
 
     def verify(self) -> tuple:
         """Check the adapter works, triggering auth if needed.

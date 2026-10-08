@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from guru import config, log, session, skills, ui
-from guru.domain import ledger, plan, tools
+from guru.domain import claims, ledger, plan, tools
 
 
 def message_to_dict(msg: object) -> dict:
@@ -159,10 +159,12 @@ def is_nudge(text: str) -> bool:
     """True for a user message the turn loop itself injected: the
     delegation nudge (old histories also carry the retired over-read
     nudge, which ends with the delegation text), a turn-contract re-prompt
-    or a plan re-ask (:mod:`guru.domain.plan`), or the historical act
-    nudge."""
+    or a plan re-ask (:mod:`guru.domain.plan`), the answer check's
+    problems (:mod:`guru.domain.claims`; a user message on the text path),
+    or the historical act nudge."""
     return (text in (NUDGE_TEXT, DELEGATION_TEXT)
-            or text.endswith(DELEGATION_TEXT) or plan.is_reprompt(text))
+            or text.endswith(DELEGATION_TEXT) or plan.is_reprompt(text)
+            or text.startswith(claims.PREFIX))
 
 
 def is_mailbox(text: str) -> bool:

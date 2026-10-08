@@ -3197,3 +3197,173 @@ class TestBriefStorePerCase:
         with runner._sandbox(copy, config.MODE_AUTO, repo):
             assert briefs.root().name == runner.BRIEFS_DIRNAME
         assert briefs.BRIEFS_DIR_ENV not in os.environ
+
+
+class TestBudgetDiffAndStatuses:
+    """The run's spend cap, the saved patch and the sub-task statuses."""
+
+    def test_diff_is_saved_and_observed(self, tmp_path: Path, canned,
+                                        monkeypatch) -> None:
+        orig = bench.BenchRun.run
+
+        async def writing_run(self, prompt, timeout=None):
+            Path('NEW.md').write_text('hello\n')
+            return await orig(self, prompt, timeout)
+
+        monkeypatch.setattr(bench.BenchRun, 'run', writing_run)
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+        path = Path(res.observed['diff_path'])
+        assert path == tmp_path / 'o' / 'diffs' / 'review.patch'
+        assert '+hello' in path.read_text()
+        res2 = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+        assert res2.observed['diff_path'].endswith('review-2.patch')
+
+    def test_no_change_no_patch(self, tmp_path: Path, canned) -> None:
+        base = _base()
+        res = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+        assert res.observed['diff_path'] == ''
+        assert not (tmp_path / 'o' / 'diffs').exists()
+
+    def test_cap_reaches_the_bench_and_over_budget_fails(
+            self, tmp_path: Path, monkeypatch) -> None:
+        seen: dict = {}
+
+        async def spending_run(self, prompt, timeout=None):
+            seen['cap'] = self.max_cost_usd
+            self.over_budget_usd = 25.0
+            return _canned_agents()
+
+        monkeypatch.setattr(bench.BenchRun, 'run', spending_run)
+        base = _base()
+        res = runner.run_case(_case(max_cost_usd=20.0), base, [base.adapter],
+                              tmp_path / 'o')
+        assert seen['cap'] == 20.0
+        assert res.observed['error'] == 'over budget: $25.00 > $20.00'
+        assert res.passed is False
+
+
+def test_bench_cancels_past_the_cap(monkeypatch) -> None:
+    import asyncio
+
+    st = session.SessionState()
+    run = bench.BenchRun(st)
+    run.max_cost_usd = 1.0
+    aborted: list = []
+
+    def launch(agent) -> None:
+        agent.busy = True
+        agent.state.cost_usd = 1.5
+
+    async def abort(grace: float = 30.0) -> None:
+        aborted.append(True)
+        for a in run.manager.agents:
+            a.busy = False
+
+    monkeypatch.setattr(run, 'configure', lambda *a, **k: None)
+    monkeypatch.setattr(run, 'launch', launch)
+    monkeypatch.setattr(run, '_abort', abort)
+    asyncio.run(run.run('p', timeout=5))
+    assert aborted == [True] and run.over_budget_usd == 1.5
+
+
+def test_a_failing_diff_save_does_not_fail_the_case(
+        tmp_path: Path, canned, monkeypatch) -> None:
+    orig = bench.BenchRun.run
+
+    async def writing_run(self, prompt, timeout=None):
+        Path('NEW.md').write_text('hello\n')
+        return await orig(self, prompt, timeout)
+
+    def broken(*a, **k):
+        raise subprocess.CalledProcessError(128, 'git add')
+
+    monkeypatch.setattr(bench.BenchRun, 'run', writing_run)
+    monkeypatch.setattr(runner, 'save_diff', broken)
+    base = _base()
+    res = runner.run_case(_case(), base, [base.adapter], tmp_path / 'o')
+    assert res.observed['error'] == ''
+    assert res.observed['diff_path'] == ''
+    assert res.observed['files_changed'] == ['NEW.md']
+
+
+def test_fixture_home_files_lists_what_tests_left(tmp_path: Path) -> None:
+    copy = tmp_path / 'repo'
+    copy.mkdir()
+    assert runner.fixture_home_files(copy) == []
+    home = tmp_path / '.guru-eval-tmp' / 'home'
+    (home / '.guru').mkdir(parents=True)
+    (home / '.guru' / 'usage.db').write_text('x')
+    assert runner.fixture_home_files(copy) == ['.guru/usage.db']
+    env = runner._fixture_env(copy)
+    assert Path(env['HOME']) == home          # the same private HOME
+
+
+class TestVerify:
+    """``verify``: a candidate's checks in a copy, HOME contained."""
+
+    def _repo(self, tmp_path: Path, test_body: str) -> Path:
+        repo = tmp_path / 'cand'
+        (repo / 'tests').mkdir(parents=True)
+        (repo / 'tests' / 'test_x.py').write_text(test_body)
+        _git(repo, 'init', '-q')
+        _git(repo, 'add', '.')
+        _git(repo, '-c', 'user.name=t', '-c', 'user.email=t@t',
+             'commit', '-qm', 'c')
+        return repo
+
+    def test_writes_land_in_the_contained_home(self, tmp_path) -> None:
+        repo = self._repo(tmp_path, (
+            'import os\n'
+            'import pathlib\n'
+            '\n'
+            '\n'
+            'def test_writes_home():\n'
+            '    d = pathlib.Path(os.environ["HOME"]) / ".guru"\n'
+            '    d.mkdir(exist_ok=True)\n'
+            '    (d / "usage.db").write_text("x")\n'))
+        root = tmp_path / 'contained'
+        res = runner.verify('HEAD', repo=repo, home=root)
+        assert res.passed and set(res.checks) == {'flake8', 'pytest'}
+        assert res.home_files == ['.guru/usage.db']
+        run_home = Path(res.home)
+        assert run_home.parent == root and run_home.name.startswith(
+            'verify-')
+        assert (run_home / '.guru' / 'usage.db').is_file()
+        # The next run gets a fresh HOME: nothing carried over.
+        again = runner.verify('HEAD', repo=repo, home=root)
+        assert again.home != res.home
+
+    def test_a_failing_test_fails(self, tmp_path) -> None:
+        repo = self._repo(tmp_path, 'def test_no():\n    assert False\n')
+        res = runner.verify('HEAD', repo=repo, home=tmp_path / 'h')
+        assert not res.passed and res.home_files == []
+
+    def test_default_home_is_the_setting(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'EVALS_HOME', '~/elsewhere')
+        assert runner.contained_home() == Path('~/elsewhere').expanduser()
+        monkeypatch.setattr(config, 'EVALS_HOME', '')
+        assert runner.contained_home() == Path('~/.guru-evals').expanduser()
+
+
+def test_fixture_lint_result_runs_flake8_and_mypy(tmp_path: Path) -> None:
+    copy = tmp_path / 'c'
+    (copy / 'guru').mkdir(parents=True)
+    (copy / 'guru' / '__init__.py').write_text('import os\n')
+    ok, tail = runner.fixture_lint_result(copy)
+    assert not ok and 'F401' in tail
+    (copy / 'guru' / '__init__.py').write_text('X = 1\n')
+    assert runner.fixture_lint_result(copy)[0] is True
+    bare = tmp_path / 'bare'                 # no lint or typecheck targets
+    bare.mkdir()
+    assert runner.fixture_lint_result(bare) == (True, '')
+
+
+def test_a_provider_outage_is_named_not_an_empty_answer() -> None:
+    main = _agent('main', [{'role': 'user', 'content': 'p'}])
+    main.state.last_error = "RateLimitError('429 budget_exceeded')"
+    obs = runner._observe([main], 1.0, False, [], None, '')
+    assert obs.error == "provider error: RateLimitError('429 budget_exceeded')"
+    quiet = _agent('main', [{'role': 'user', 'content': 'p'}])
+    assert runner._observe([quiet], 1.0, False, [], None, '').error == \
+        'empty answer'

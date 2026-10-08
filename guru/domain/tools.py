@@ -48,6 +48,9 @@ SANDBOX_TOOLS = ('sandbox_run', 'sandbox_python', 'sandbox_diff',
 # (apply_patch stays a module function sandbox_submit and provisioning call).
 DIRECT_WRITE_TOOLS = frozenset(('write_file', 'edit_file', 'apply_patch',
                                 'delete_file'))
+# Pre-activated for a writing task kind (toolpolicy.WRITE_KINDS), still
+# subject to the policy, the kind and the sandbox rule above.
+_WRITE_KIND_TOOLS = ('write_file', 'edit_file', 'apply_patch')
 SANDBOX_WRITE_REFUSAL = ('Refused: this project runs in a sandbox; edit '
                          'inside it and use sandbox_submit')
 
@@ -1341,6 +1344,11 @@ def _core_tool_fns(kind: object = None) -> list:
         # sandbox image (a worker must find them without a search hop).
         names = list(config.PREACTIVATE_TOOLS) + [
             n for n in SANDBOX_TOOLS if n not in config.PREACTIVATE_TOOLS]
+        k = _task_kind() if kind is None else kind
+        if isinstance(k, str) and k.strip().lower() in toolpolicy.WRITE_KINDS:
+            # A writing task starts able to write (dogfood 2026-10-07: the
+            # build workers spent a round finding write_file, then read on).
+            names += [n for n in _WRITE_KIND_TOOLS if n not in names]
     advertised = set(_advertised(kind))
     return [(name, TOOL_REGISTRY[name]['fn']) for name in names
             if name in advertised]

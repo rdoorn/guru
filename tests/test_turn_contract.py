@@ -1,10 +1,12 @@
 """The turn contract in the shared loop (guru.adapters.turn): forced tool
 calls, ``final_answer``, the controller's ``plan`` handling and the
 protocol-violation bookkeeping."""
+import math
+
 from guru import session, ui
 from guru.adapters import turn
 from guru.adapters.base import FORCE_ANY, FORCE_PLAN
-from guru.domain import ledger, plan, tools
+from guru.domain import conversation, ledger, plan, tools
 
 
 class Forcing:
@@ -34,7 +36,8 @@ class Scripted:
 
     def __init__(self, monkeypatch, rounds, *, adapter=None,
                  controller=False, request='review the login code',
-                 messages=None, handler=None) -> None:
+                 messages=None, handler=None, kind='',
+                 task_id='') -> None:
         monkeypatch.setattr(ui, 'note_thinking', lambda: None)
         monkeypatch.setattr(ui, 'status_draw', lambda: None)
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
@@ -47,9 +50,10 @@ class Scripted:
                                 {'role': 'system', 'content': 's'},
                                 {'role': 'user', 'content': request}])
         monkeypatch.setattr(session, 'cancel_requested', False)
-        monkeypatch.setattr(session, 'task_id', '')
+        monkeypatch.setattr(session, 'task_id', task_id)
         monkeypatch.setattr(session, 'can_spawn', controller)
         monkeypatch.setattr(session, 'controller', controller)
+        monkeypatch.setattr(session, 'task_kind', kind)
         monkeypatch.setattr(session, 'adapter', adapter)
         monkeypatch.setattr(session, 'struggle',
                             {k: 0 for k in session.STRUGGLE_KEYS})
@@ -68,16 +72,20 @@ class Scripted:
     def _step(self):
         return next(self.steps)
 
+    def _execute(self, name: str, args: dict) -> str:
+        self.ran.append(name)
+        if name in ('plan', 'final_answer'):
+            return tools.execute_tool(name, args)
+        if name in ('write_file', 'edit_file'):       # a real success line
+            return f"Wrote 1 bytes to {args.get('path')}. (sha:abc123)"
+        return f'{name} ran'
+
     def _run_tools(self, pending) -> None:
         for name, args, _ref, dup in pending:
             if dup:
                 self.skipped.append(name)
-                content = turn.DUPLICATE_RESULT.format(name=name)
-            else:
-                self.ran.append(name)
-                content = (tools.execute_tool(name, args)
-                           if name in ('plan', 'final_answer')
-                           else f'{name} ran')
+            content = turn.tool_result(name, args, dup,
+                                       execute=self._execute)
             session.messages.append({'role': 'tool', 'tool_name': name,
                                      'tool_args': args, 'content': content})
 
@@ -397,8 +405,8 @@ class TestDuplicates:
         assert s.ran == ['read_file', 'final_answer']
         assert s.skipped == ['read_file']
         dup = [m for m in session.messages if m.get('role') == 'tool'][1]
-        assert dup['content'] == turn.DUPLICATE_RESULT.format(
-            name='read_file')
+        assert dup['content'].startswith(turn.DUPLICATE_RESULT.format(
+            name='read_file'))
 
     def test_identical_plan_after_coverage_reask_is_accepted(
             self, monkeypatch, fake_repo):
@@ -478,7 +486,9 @@ class TestRoundCap:
         [row] = s.run(fake_repo)
         assert len(s.ran) == turn._MAX_TOOL_ROUNDS == 40
         assert row['struggle']['protocol_violation'] == 1
+        # The main agent keeps the plain cap line (no worker handoff).
         assert s.rendered == [turn._CAPPED_TEXT.format(n=40)]
+        assert session.capped is False
 
     def test_worker_cap_keeps_the_last_text(self, monkeypatch, fake_repo):
         s = Scripted(monkeypatch, [], adapter=Forcing())
@@ -500,6 +510,242 @@ class TestRoundCap:
         [row] = s.run(fake_repo)
         assert s.rendered == ['done']
         assert row['struggle']['protocol_violation'] == 0
+        assert session.capped is False
+
+
+class TestRoundBudget:
+    """The budget a worker (a sub-agent executing a task) sees: a footer on
+    each round's first tool result, one checkpoint for a writing kind that
+    changed nothing by half the cap, one last call HANDOFF_ROUNDS before
+    the cap, and a code-built handoff when it still hits the cap."""
+
+    def _worker(self, monkeypatch, kind=''):
+        return Scripted(monkeypatch, [], adapter=Forcing(), kind=kind,
+                        task_id='t1')
+
+    def _reads(self, s, n: int, then=None) -> None:
+        rounds = [lambda i=i: _assistant(
+            '', [('read_file', {'path': f'{i}.py'}, 'r')])
+            for i in range(n)]
+        s.script(rounds + (then or []))
+
+    def _results(self) -> list:
+        return [m['content'] for m in session.messages
+                if m.get('role') == 'tool']
+
+    @staticmethod
+    def _final():
+        return lambda: _assistant('', [('final_answer', {'text': 'ok'}, 'f')])
+
+    def test_every_round_carries_the_footer(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        self._reads(s, 2, [self._final()])
+        s.run()
+        # The lone final_answer round collapses into the answer text.
+        first, second = self._results()
+        assert first.endswith('[guru] round 1/40 · files changed: 0')
+        assert second.endswith('[guru] round 2/40 · files changed: 0')
+
+    def test_the_main_agent_sees_no_footer(self, monkeypatch,
+                                           fake_repo) -> None:
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        self._reads(s, 2, [self._final()])
+        s.run(fake_repo)
+        assert all('[guru] round' not in r for r in self._results())
+
+    def test_footer_on_the_first_result_counts_finished_writes(
+            self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([lambda: _assistant('', [
+            ('read_file', {'path': 'a.py'}, 'r1'),
+            ('write_file', {'path': 'b.py', 'content': 'x'}, 'w1')]),
+            lambda: _assistant('', [('read_file', {'path': 'c.py'}, 'r2')]),
+            lambda: _assistant('', [('run_tests', {}, 't'),
+                                    ('lint', {}, 'l')]),
+            self._final()])
+        s.run()
+        read, write, read2, _tests, _lint = self._results()
+        assert read.endswith('[guru] round 1/40 · files changed: 0')
+        assert '[guru]' not in write
+        assert read2.endswith('[guru] round 2/40 · files changed: 1')
+
+    def test_a_failed_write_is_not_a_change(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='build')
+        s._execute = lambda n, a: (                    # type: ignore
+            "'old' text not found in a.py; nothing changed."
+            if n == 'edit_file' else f'{n} ran')
+        s.script([lambda: _assistant('', [('edit_file', {
+            'path': 'a.py', 'old': 'x', 'new': 'y', 'sha': 's'}, 'e')])]
+            + [lambda i=i: _assistant('', [('read_file',
+                                            {'path': f'{i}.py'}, 'r')])
+               for i in range(25)] + [self._final()])
+        s.run()
+        assert sum(turn.CHECKPOINT_TEXT in r for r in self._results()) == 1
+
+    def test_checkpoint_for_a_writing_kind(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='build')
+        self._reads(s, 25, [self._final()])
+        s.run()
+        results = self._results()
+        at = math.ceil(turn._MAX_TOOL_ROUNDS * turn.CHECKPOINT_AT)  # 12
+        assert all(turn.CHECKPOINT_TEXT not in r for r in results[:at - 1])
+        assert turn.CHECKPOINT_TEXT in results[at - 1]
+        assert sum(turn.CHECKPOINT_TEXT in r for r in results) == 1
+        assert session.struggle['budget_nudges'] == 2   # + reads closed
+
+    def test_no_checkpoint_once_a_file_changed(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='build')
+        s.script([lambda: _assistant('', [('write_file', {
+            'path': 'a.py', 'content': 'x'}, 'w')])]
+            + [lambda i=i: _assistant('', [('read_file',
+                                            {'path': f'{i}.py'}, 'r')])
+               for i in range(25)]
+            + [lambda: _assistant('', [('run_tests', {}, 't'),
+                                       ('lint', {}, 'l')]),
+               self._final()])
+        s.run()
+        assert all(turn.CHECKPOINT_TEXT not in r for r in self._results())
+
+    def test_no_checkpoint_while_editing_a_sandbox_copy(
+            self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='build')
+        s.script([lambda: _assistant('', [('sandbox_run', {
+            'command': 'sed -i s/a/b/ x.py'}, 's')])]
+            + [lambda i=i: _assistant('', [('read_file',
+                                            {'path': f'{i}.py'}, 'r')])
+               for i in range(25)] + [self._final()])
+        s.run()
+        assert all(turn.CHECKPOINT_TEXT not in r for r in self._results())
+
+    def test_no_checkpoint_for_a_reading_kind(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='explain')
+        self._reads(s, 25, [self._final()])
+        s.run()
+        assert all(turn.CHECKPOINT_TEXT not in r for r in self._results())
+
+    def test_last_call_then_handoff_at_the_cap(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='explain')
+        texts = iter(['first', 'Looking at 3.py'] + [''] * 100)
+        s.script([lambda i=i: _assistant(next(texts), [
+            ('read_file', {'path': f'{i}.py'}, 'r')]) for i in range(100)])
+        s.run()
+        results = self._results()
+        assert turn.LAST_CALL_TEXT.format(left=2) in results[37]   # 38/40
+        assert sum('round(s) left' in r for r in results) == 1
+        assert session.struggle['budget_nudges'] == 1
+        assert session.capped is True
+        [text] = s.rendered
+        assert text.startswith('(capped: guru ended this task after 40'
+                               ' rounds')
+        assert 'Files changed: none' in text
+        assert 'Files read: 0.py, 1.py' in text and '(+28 more)' in text
+        assert text.endswith('Last note: Looking at 3.py')
+
+    def test_spent_budget_refuses_all_but_final_answer(
+            self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        self._reads(s, 39, [lambda: _assistant('', [
+            ('final_answer', {'text': 'handoff after refusal'}, 'f')])])
+        s.run()
+        results = self._results()
+        assert turn.BUDGET_REFUSAL not in results[37]       # round 38 ran
+        assert results[38].startswith(turn.BUDGET_REFUSAL)  # round 39 not
+        assert s.ran.count('read_file') == 38
+        assert s.rendered == ['handoff after refusal']
+        assert session.capped is False
+
+    def test_main_agent_is_never_refused(self, monkeypatch,
+                                         fake_repo) -> None:
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        self._reads(s, 40)
+        s.run(fake_repo)
+        assert all(turn.BUDGET_REFUSAL not in r for r in self._results())
+        assert s.ran.count('read_file') == 40
+
+    def test_reads_close_for_an_idle_writer(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='build')
+        self._reads(s, 33, [self._final()])
+        s.run()
+        results = self._results()
+        stop = int(turn._MAX_TOOL_ROUNDS * turn.READ_STOP_AT)   # round 20
+        assert not any(r.startswith(turn.READ_REFUSAL)
+                       for r in results[:stop - 1])
+        assert results[stop - 1].startswith(turn.READ_REFUSAL)
+        assert f'Reading is closed: {stop}/40' in results[stop - 1]
+        assert sum('Reading is closed' in r for r in results) == 1
+        assert s.ran.count('read_file') == stop - 1
+        assert session.struggle['budget_nudges'] == 2   # checkpoint + stop
+
+    def test_a_write_reopens_reading(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='build')
+        s.script([lambda i=i: _assistant('', [('read_file',
+                                               {'path': f'{i}.py'}, 'r')])
+                  for i in range(31)]
+                 + [lambda: _assistant('', [('write_file', {
+                     'path': 'a.py', 'content': 'x'}, 'w')])]
+                 + [lambda: _assistant('', [('read_file',
+                                             {'path': 'z.py'}, 'r')]),
+                    lambda: _assistant('', [('run_tests', {}, 't'),
+                                            ('lint', {}, 'l')]),
+                    self._final()])
+        s.run()
+        assert not self._results()[-3].startswith(turn.READ_REFUSAL)
+
+    def test_reads_stay_open_for_a_reading_kind(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch, kind='explain')
+        self._reads(s, 35, [self._final()])
+        s.run()
+        assert all(not r.startswith(turn.READ_REFUSAL)
+                   for r in self._results())
+
+    def test_last_call_heeded_ends_normally(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        self._reads(s, 38, [lambda: _assistant('', [
+            ('final_answer', {'text': 'handoff: read 38 files'}, 'f')])])
+        s.run()
+        assert s.rendered == ['handoff: read 38 files']
+        assert session.capped is False
+
+    def test_controller_rounds_carry_no_footer(self, monkeypatch,
+                                               fake_repo) -> None:
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True)
+        s.script([lambda: _assistant('', [('plan', {
+            'outcome': 'answer', 'answer': 'hi'}, 'p')])])
+        s.run(fake_repo)
+        assert all('[guru] round' not in r for r in self._results())
+
+
+class TestChangedPaths:
+    """Only a write that succeeded counts as a change (from its result)."""
+
+    def test_writes(self) -> None:
+        ok = 'Wrote 6 bytes to /p/a.py. (sha:9e26bf369911)'
+        assert turn.changed_paths('write_file', {'path': 'a.py'}, ok) == [
+            'a.py']
+        assert turn.changed_paths('edit_file', {'path': 'a.py'},
+                                  "'old' text not found; nothing changed.") \
+            == []
+        assert turn.changed_paths('write_file', {'path': 'a.py'},
+                                  'Refused: read-only mode') == []
+
+    def test_patch_and_submit_report_their_targets(self) -> None:
+        applied = ('Applied patch:\n/p/a.py: 1 hunk(s) applied (sha:1)\n'
+                   '/p/b.py: 2 hunk(s) applied (sha:2)')
+        for name in ('apply_patch', 'sandbox_submit'):
+            assert turn.changed_paths(name, {}, applied) == [
+                '/p/a.py', '/p/b.py']
+        assert turn.changed_paths(
+            'apply_patch', {}, 'Patch rejected: no headers') == []
+
+    def test_delete(self) -> None:
+        assert turn.changed_paths('delete_file', {'path': 'a.py'},
+                                  'Deleted /p/a.py.') == ['a.py']
+        assert turn.changed_paths('delete_file', {'path': 'a.py'},
+                                  'No such file: /p/a.py') == []
+
+    def test_other_tools(self) -> None:
+        assert turn.changed_paths('read_file', {'path': 'a.py'},
+                                  '(sha:1)') == []
 
 
 class TestTwoPlansInOneRound:
@@ -701,3 +947,158 @@ class TestSettle:
         turn._settle('Hello', collapse=False)
         assert session.messages[-1] == {'role': 'assistant',
                                         'content': 'Hello'}
+
+
+def test_controller_hint_numbers_match_the_code() -> None:
+    """The hint states the worker budget and the deliverable limit; keep
+    them in step with the constants that enforce them."""
+    from guru import config
+    hint = config.CONTROLLER_HINT
+    assert f'budget of {turn._MAX_TOOL_ROUNDS} tool rounds' in hint
+    assert f'at most {plan.MAX_DELIVERABLES} files' in hint
+
+
+class TestVerifyBeforeFinal:
+    """A worker that changed files and ran no tests since has its first
+    final_answer sent back once; a tested change goes straight through."""
+
+    def _worker(self, monkeypatch):
+        return Scripted(monkeypatch, [], adapter=Forcing(), kind='build',
+                        task_id='t1')
+
+    @staticmethod
+    def _write():
+        return lambda: _assistant('', [('write_file', {
+            'path': 'a.py', 'content': 'x'}, 'w')])
+
+    @staticmethod
+    def _final(text='done'):
+        return lambda: _assistant('', [('final_answer', {'text': text},
+                                        'f')])
+
+    def test_untested_change_is_sent_back_once(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(), self._final('first'),
+                  lambda: _assistant('', [('run_tests', {}, 't'),
+                                          ('lint', {}, 'l')]),
+                  self._final('tested')])
+        s.run()
+        assert s.rendered == ['tested']
+        sent_back = [m['content'] for m in session.messages
+                     if m.get('tool_name') == 'final_answer']
+        assert sent_back[0].startswith(turn.VERIFY_REFUSAL)
+
+    def test_only_once(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(), self._final('first'),
+                  self._final('second')])
+        s.run()
+        assert s.rendered == ['second']
+
+    def test_tested_change_goes_through(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(),
+                  lambda: _assistant('', [('run_tests', {}, 't'),
+                                          ('lint', {}, 'l')]),
+                  self._final('ok')])
+        s.run()
+        assert s.rendered == ['ok']
+
+    def test_tests_in_the_same_round_count(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(), lambda: _assistant('', [
+            ('run_tests', {}, 't'), ('lint', {}, 'l'),
+            ('final_answer', {'text': 'ok'}, 'f')])])
+        s.run()
+        assert s.rendered == ['ok']
+
+    def test_tests_without_lint_are_sent_back_for_lint(
+            self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(),
+                  lambda: _assistant('', [('run_tests', {}, 't')]),
+                  self._final('first'),
+                  lambda: _assistant('', [('lint', {}, 'l')]),
+                  self._final('linted')])
+        s.run()
+        assert s.rendered == ['linted']
+        sent = [m['content'] for m in session.messages
+                if m.get('tool_name') == 'final_answer']
+        assert sent[0].startswith(turn.VERIFY_REFUSAL + 'lint since.')
+
+    def test_neither_names_both(self) -> None:
+        text = turn.verify_refusal(frozenset({'tests', 'lint'}))
+        assert text.startswith(turn.VERIFY_REFUSAL + 'tests or lint since.')
+        assert 'run_tests' in text and 'lint on the files' in text
+
+    def test_lint_not_required_when_disabled(self, monkeypatch) -> None:
+        tools.set_policy(tools.ToolsPolicy(disabled={'lint'}))
+        try:
+            s = self._worker(monkeypatch)
+            s.script([self._write(),
+                      lambda: _assistant('', [('run_tests', {}, 't')]),
+                      self._final('ok')])
+            s.run()
+        finally:
+            tools.set_policy(None)
+        assert s.rendered == ['ok']
+
+    def test_no_change_no_check(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._final('nothing to do')])
+        s.run()
+        assert s.rendered == ['nothing to do']
+
+    def test_main_agent_is_not_sent_back(self, monkeypatch,
+                                         fake_repo) -> None:
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        s.script([self._write(), self._final('ok')])
+        s.run(fake_repo)
+        assert s.rendered == ['ok']
+
+
+class TestAnswerCheckInTheLoop:
+    """A controller answer sent back by the answer check: one more round,
+    and the human request stays the request (tool and text paths)."""
+
+    REQUEST = 'add a usage store and wire it in'
+
+    def _handler(self):
+        from guru.domain import claims
+        verdicts = iter([claims.problems_text(['cli.py not changed']),
+                         plan.ANSWER_ACK])
+        return lambda args: next(verdicts)
+
+    def test_tool_path(self, monkeypatch, fake_repo) -> None:
+        from guru.domain import claims
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True,
+                     request=self.REQUEST, handler=self._handler())
+        s.script([lambda: _assistant('', [('plan', {
+            'outcome': 'answer', 'answer': 'Wired in.'}, 'p1')]),
+            lambda: _assistant('', [('plan', {
+                'outcome': 'answer', 'answer': 'Not wired: cli.py.'},
+                'p2')])])
+        s.run(fake_repo)
+        assert s.rendered == ['Not wired: cli.py.']
+        assert conversation.request_in(session.messages) == self.REQUEST
+        assert claims.already_checked(session.messages)
+
+    def test_text_path(self, monkeypatch, fake_repo) -> None:
+        from guru.domain import claims
+        s = Scripted(monkeypatch, [], adapter=Lenient(), controller=True,
+                     request=self.REQUEST, handler=self._handler())
+        s.script([lambda: _assistant(
+            '{"outcome": "answer", "answer": "Wired in."}'),
+            lambda: _assistant(
+                '{"outcome": "answer", "answer": "Not wired: cli.py."}')])
+        s.run(fake_repo)
+        assert s.rendered == ['Not wired: cli.py.']
+        # The problems came back as a user message: a loop nudge, never
+        # the request, and it marks the request as checked.
+        sent = [m for m in session.messages if m.get('role') == 'user'
+                and m['content'].startswith(claims.PREFIX)]
+        assert len(sent) == 1
+        assert conversation.is_nudge(sent[0]['content'])
+        assert conversation.request_in(session.messages) == self.REQUEST
+        assert conversation.request_start(session.messages) == 1
+        assert claims.already_checked(session.messages)

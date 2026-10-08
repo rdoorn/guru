@@ -98,11 +98,12 @@ from typing import Callable, Iterator, Optional, Union
 from guru import bench, config, judges, log, session, skills
 from guru.adapters import turn
 from guru.adapters.base import Adapter
-from guru.domain import conversation
+from guru.domain import claims, conversation
 from guru.domain import decisions as decision_seam
 from guru.domain import files, gate, ledger, ledger_report, policy, spend
 from guru.domain import routing as routing_domain
 from guru.domain import tools
+from guru.judges.claims import ClaimsReviewer
 from guru.evals import cases, checks, rubric, runs
 from guru.evals.cases import Case, GitFixture
 from guru.evals.checks import Observed
@@ -354,6 +355,25 @@ def files_changed(repo: Path) -> list[str]:
     return sorted(paths)
 
 
+def save_diff(repo: Path, out_dir: Path, name: str) -> str:
+    """Write what the run changed in ``repo`` (tracked and untracked,
+    binary-safe) as ``out_dir/diffs/<name>.patch`` (``<name>-2.patch`` and
+    so on for a repeat) and return its path; '' when nothing changed. Apply
+    it on the fixture's pinned ref to keep the result on a branch."""
+    _git(repo, 'add', '-A')
+    patch = _git(repo, 'diff', '--cached', '--binary')
+    if not patch.strip():
+        return ''
+    diffs = out_dir / 'diffs'
+    diffs.mkdir(parents=True, exist_ok=True)
+    path, n = diffs / f'{name}.patch', 1
+    while path.exists():
+        n += 1
+        path = diffs / f'{name}-{n}.patch'
+    path.write_text(patch, encoding='utf-8')
+    return str(path)
+
+
 def _fixture_env(repo: Path) -> dict:
     """The environment for the fixture's pytest: ``PYTHONPATH`` starts with
     the copy, so a copied package (a git fixture of a real project, which
@@ -389,12 +409,134 @@ def _fixture_env(repo: Path) -> dict:
     return env
 
 
+def fixture_home_files(repo: Path) -> list[str]:
+    """Files the fixture's tests left in their private HOME (see
+    :func:`_fixture_env`), relative and sorted: a test that writes to the
+    user's home directory — the real ``~/.guru`` outside the eval — shows
+    up here (eval 06075f330988: the new store's tests wrote to the real
+    usage database)."""
+    home = Path(repo).parent / '.guru-eval-tmp' / 'home'
+    if not home.is_dir():
+        return []
+    return sorted(p.relative_to(home).as_posix()
+                  for p in home.rglob('*') if p.is_file())
+
+
+DEFAULT_EVALS_HOME = '~/.guru-evals'
+
+
+def contained_home() -> Path:
+    """The root under which ``verify`` makes each candidate's HOME:
+    ``[evals] home`` (``~`` expanded), else ``~/.guru-evals`` — outside
+    any git checkout (code that walks up from HOME must not find one) and
+    away from the real ``~/.guru``."""
+    return Path(config.EVALS_HOME or DEFAULT_EVALS_HOME).expanduser()
+
+
+@dataclass
+class VerifyResult:
+    """``verify``'s outcome: each check's (passed, tail) and the files
+    the candidate's checks created in the contained home."""
+    checks: dict
+    home: str
+    home_files: list
+
+    @property
+    def passed(self) -> bool:
+        return all(ok for ok, _ in self.checks.values())
+
+
+def _files_under(root: Path) -> set:
+    return ({p.relative_to(root).as_posix() for p in root.rglob('*')
+             if p.is_file()} if root.is_dir() else set())
+
+
+# ``make lint`` targets (flake8) and the typecheck target (mypy): the gate
+# a candidate must pass, run over whichever of them the copy has.
+LINT_TARGETS = ('guru', 'bench', 'tests', 'evals')
+TYPECHECK_TARGET = 'guru'
+
+
+def _check_cmd(copy: Path, env: dict, args: list,
+               timeout: float) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run([sys.executable, '-m', *args], cwd=copy,
+                              capture_output=True, text=True,
+                              timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return False, f'{args[0]} timed out after {timeout:.0f}s'
+    except OSError as e:
+        return False, f'{args[0]} could not run: {e}'
+    text = ((proc.stdout or '') + (proc.stderr or '')).strip()
+    return proc.returncode == 0, '\n'.join(
+        text.splitlines()[-FIXTURE_TAIL_LINES:])
+
+
+def fixture_lint_result(copy: Path, timeout: float = FIXTURE_PYTEST_TIMEOUT_S
+                        ) -> tuple[bool, str]:
+    """flake8 over the copy's ``LINT_TARGETS`` and mypy over its
+    ``TYPECHECK_TARGET`` (the project's ``make lint typecheck``), each
+    only when the copy has it; ``(passed, tail)`` with the failing tool's
+    last lines."""
+    env = _fixture_env(copy)
+    targets = [d for d in LINT_TARGETS if (copy / d).is_dir()]
+    commands = [['flake8', *targets]] if targets else []
+    if (copy / TYPECHECK_TARGET).is_dir():
+        commands.append(['mypy', TYPECHECK_TARGET])
+    tails, ok = [], True
+    for args in commands:
+        passed, tail = _check_cmd(copy, env, args, timeout)
+        if not passed:
+            ok = False
+            tails.append(f'{args[0]}: {tail}')
+    return ok, '\n'.join(tails)
+
+
+def verify(ref: str, repo: Path = cases.REPO_ROOT,
+           home: Optional[Path] = None,
+           timeout: float = FIXTURE_PYTEST_TIMEOUT_S) -> VerifyResult:
+    """Check a candidate (``ref`` of ``repo``, e.g. an eval branch) in a
+    temporary copy: flake8 and mypy as ``make lint typecheck`` would, then
+    its pytest — all with HOME set to a fresh directory under ``home``
+    (default :func:`contained_home`), so nothing lands in the real
+    ``~/.guru`` and no earlier run's files influence this one. The copy is
+    removed; the HOME is kept for inspection and every file the checks
+    left in it is reported. A bad ref raises ``ValueError``."""
+    root = Path(home) if home is not None else contained_home()
+    stamp = time.strftime('%Y%m%dT%H%M%S')
+    run_home = Path(tempfile.mkdtemp(prefix=f'verify-{stamp}-',
+                                     dir=_mkdirs(root)))
+    work = Path(tempfile.mkdtemp(prefix='guru-verify-'))
+    try:
+        copy = prepare_fixture(cases.GitFixture(Path(repo), ref), work)
+        env = _fixture_env(copy)
+        env['HOME'] = str(run_home)
+        checks: dict = {}
+        targets = [d for d in LINT_TARGETS if (copy / d).is_dir()]
+        if targets:
+            checks['flake8'] = _check_cmd(copy, env, ['flake8', *targets],
+                                          timeout)
+        if (copy / TYPECHECK_TARGET).is_dir():
+            checks['mypy'] = _check_cmd(copy, env,
+                                        ['mypy', TYPECHECK_TARGET], timeout)
+        checks['pytest'] = fixture_tests_result(copy, timeout, env=env)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return VerifyResult(checks, str(run_home),
+                        sorted(_files_under(run_home)))
+
+
+def _mkdirs(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 FIXTURE_TAIL_LINES = 30
 
 
 def fixture_tests_result(repo: Path,
-                         timeout: float = FIXTURE_PYTEST_TIMEOUT_S
-                         ) -> tuple[bool, str]:
+                         timeout: float = FIXTURE_PYTEST_TIMEOUT_S,
+                         env: Optional[dict] = None) -> tuple[bool, str]:
     """Run the fixture's own pytest in ``repo`` (this interpreter, the copy
     first on ``PYTHONPATH``, tests marked ``sandbox`` deselected); return
     ``(passed, tail)`` where ``tail`` is the last ``FIXTURE_TAIL_LINES``
@@ -406,7 +548,7 @@ def fixture_tests_result(repo: Path,
             [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
              '--color=no', '-m', FIXTURE_PYTEST_DESELECT],
             cwd=repo, capture_output=True, text=True, timeout=timeout,
-            env=_fixture_env(repo))
+            env=env if env is not None else _fixture_env(repo))
     except subprocess.TimeoutExpired:
         return False, f'fixture pytest timed out after {timeout:.0f}s'
     except OSError as e:
@@ -652,6 +794,7 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         token = session.use(base)
         t0 = time.monotonic()
         run = bench.BenchRun(base, registry=registry, routing=settings)
+        run.max_cost_usd = case.expect.max_cost_usd
         try:
             agents = asyncio.run(run.run(case.prompt, timeout=case.timeout_s))
         finally:
@@ -661,6 +804,9 @@ def _execute(case: Case, copy: Path, base_state: session.SessionState,
         if not _drain_workers(agents, WORKER_DRAIN_S):
             box.leaked = True
             error = 'workers still running after timeout'
+        elif run.over_budget_usd is not None:
+            error = (f'over budget: ${run.over_budget_usd:.2f} >'
+                     f' ${case.expect.max_cost_usd:.2f}')
         elif run.worker_errors:
             # A turn that raised (run 94fdc1bb11a5: the mailbox synthesis
             # turn died on a vanished cwd) is a failed case, not a case
@@ -689,7 +835,10 @@ def _observe(agents: list, seconds: float, timed_out: bool,
     answer = bench._final_answer(agents[0]) if agents else ''
     skipped = error == SANDBOX_UNAVAILABLE
     if not error and not timed_out and not answer:
-        error = 'empty answer'
+        # A main agent whose last call failed at the provider: name the
+        # outage, not the agent (eval 7a03ce75026d: a proxy budget 429).
+        last = agents[0].state.last_error if agents else ''
+        error = f'provider error: {last}' if last else 'empty answer'
     tools_used: list[str] = []
     for a in agents:
         tools_used += bench._tool_names(a)
@@ -798,6 +947,10 @@ def run_case(case: Case, base_state: session.SessionState,
     changed: list[str] = []
     tests_pass: Optional[bool] = None
     tests_tail = ''
+    diff_path = ''
+    home_files: list[str] = []
+    lint_pass: Optional[bool] = None
+    lint_tail = ''
     sandbox: Optional[dict] = None
     try:
         copy = prepare_fixture(case.fixture_git or case.fixture, workdir,
@@ -814,8 +967,17 @@ def run_case(case: Case, base_state: session.SessionState,
                 verbs.cleanup_all()      # the verbs' task copies
         _check_copy(copy, inode)         # the checks must see THIS copy
         changed = files_changed(copy)
+        if changed:              # before the fixture's pytest writes files
+            try:
+                diff_path = save_diff(copy, out_dir, case.name)
+            except Exception:                        # noqa: BLE001
+                # An artefact, not a verdict: the case is still judged.
+                log.exc(f'saving the diff of {case.name} failed')
         if case.expect.fixture_tests_pass is not None:
             tests_pass, tests_tail = fixture_tests_result(copy)
+            home_files = fixture_home_files(copy)
+        if case.expect.fixture_lint_pass is not None:
+            lint_pass, lint_tail = fixture_lint_result(copy)
     except Exception as e:                           # noqa: BLE001
         error = error or str(e) or type(e).__name__
     finally:
@@ -830,9 +992,17 @@ def run_case(case: Case, base_state: session.SessionState,
                            'ref': case.fixture_git.ref}
     tpath = out_dir / 'transcripts' / f'{case.name}.json.gz'
     _save_transcript(agents, tpath)
-    results = checks.evaluate(case.expect, obs)
     calls = repo.rows('calls')[rows_before:]
     tool_events = repo.rows('tool_events')[tools_before:]
+    obs.cost_usd = _cost(calls)
+    obs.task_statuses = [r.get('status', '') for r in
+                         repo.rows('tasks')[tasks_before:]
+                         if r.get('status') != 'running']
+    obs.diff_path = diff_path
+    obs.fixture_home_files = home_files
+    obs.fixture_lint_pass = lint_pass
+    obs.fixture_lint_tail = lint_tail if lint_pass is False else ''
+    results = checks.evaluate(case.expect, obs)
     return CaseResult(
         case=case.name, passed=checks.passed(results),
         checks=[asdict(r) for r in results], observed=asdict(obs),
@@ -1076,6 +1246,8 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     # file's standard rung, or (no file: empty settings) the session model.
     judges.set_registry(registry, routing if routing is not None
                         else RoutingSettings())
+    claims.set_checker(ClaimsReviewer()       # as the CLI installs it
+                       if config.ANSWER_CHECK else None)
     try:
         judge: Optional[rubric.LLMJudge] = None
         if rubric_spec:
@@ -1098,6 +1270,7 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
                     on_result(res)
     finally:
         judges.set_registry(None)
+        claims.set_checker(None)
     run = Run(run_id=run_id, ts=ts, model=model_spec, git_sha=git_sha(),
               cases=results,
               num_ctx=base_state.num_ctx or base_state.num_ctx_override,

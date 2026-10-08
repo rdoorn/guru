@@ -41,7 +41,7 @@ import subprocess
 import time
 from typing import Optional, Union
 
-from guru import log, session, ui
+from guru import log, session, startup, ui
 from guru.adapters import turn
 from guru.adapters.base import (FORCE_PLAN, JSON_ONLY, Adapter, ModelInfo,
                                 dump_request, is_tool_choice_error,
@@ -271,6 +271,8 @@ def neutral_assistant(text: str, tool_calls: list) -> dict:
 class AnthropicAdapter(Adapter):
     """Anthropic Messages API provider (api_key or oauth)."""
 
+    default_host = 'api.anthropic.com'
+
     def __init__(self, name: str = "Anthropic", auth: str = "api_key",
                  base_url=None, api_key_env=None, api_key=None, profile=None,
                  models=None, thinking: bool = True,
@@ -353,7 +355,8 @@ class AnthropicAdapter(Adapter):
             f" --profile {profile}…[/dim]"
         )
         try:
-            subprocess.run(['ant', 'auth', 'login', '--profile', profile])
+            with startup.current().paused():   # ant owns the terminal
+                subprocess.run(['ant', 'auth', 'login', '--profile', profile])
         except Exception as e:
             return (False, f"ant auth login failed: {e}")
         if self._oauth_credentials_path().exists():
@@ -530,12 +533,7 @@ class AnthropicAdapter(Adapter):
             # All tool_results for a round must go back in ONE user turn.
             results = []
             for name, args, block, duplicate in pending:
-                if duplicate:
-                    ui.console.print(
-                        f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = turn.DUPLICATE_RESULT.format(name=name)
-                else:
-                    content = tools.execute_tool(name, args)
+                content = turn.tool_result(name, args, duplicate)
                 results.append({
                     'type': 'tool_result',
                     'tool_use_id': block.id,
@@ -594,3 +592,7 @@ def _note_error(e: Exception) -> None:
     """Count a provider failure on the bound session and keep its text."""
     ledger.bump('provider_errors')
     session.last_error = repr(e)[:200]
+    # Logged too: the eval bench's console is quiet, and a provider outage
+    # (eval 7a03ce75026d: a proxy budget 429) was otherwise invisible.
+    log.warning('provider error (%s): %s', session.agent_id,
+                session.last_error)

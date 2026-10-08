@@ -481,12 +481,7 @@ class LiteLLMAdapter(Adapter):
 
         def run_tools(pending):
             for name, args, call_id, duplicate in pending:
-                if duplicate:
-                    ui.console.print(
-                        f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
-                    content = turn.DUPLICATE_RESULT.format(name=name)
-                else:
-                    content = tools.execute_tool(name, args)
+                content = turn.tool_result(name, args, duplicate)
                 native.append({
                     'role': 'tool', 'tool_call_id': call_id,
                     'content': content})
@@ -580,3 +575,7 @@ def _note_error(e: Exception) -> None:
     """Count a provider failure on the bound session and keep its text."""
     ledger.bump('provider_errors')
     session.last_error = repr(e)[:200]
+    # Logged too: the eval bench's console is quiet, and a provider outage
+    # (eval 7a03ce75026d: a proxy budget 429) was otherwise invisible.
+    log.warning('provider error (%s): %s', session.agent_id,
+                session.last_error)

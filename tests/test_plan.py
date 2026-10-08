@@ -424,3 +424,100 @@ class TestUndersplit:
         msgs = plan.validate(self.REQ, p)
         assert len(msgs) == 1 and 'one task per concern' in msgs[0]
         assert plan.validate(self.REQ, p, followup=True) == []
+
+
+class TestDeliverables:
+    """A writing task owns its deliverables: required for build, refactor
+    and docs, at most MAX_DELIVERABLES, never shared by two tasks of one
+    plan. Soft problems: re-asked once, then the plan runs."""
+
+    def _verdict(self, *tasks, followup=False):
+        return plan.evaluate('build the usage store',
+                             {'outcome': 'delegate', 'tasks': list(tasks)},
+                             followup=followup)
+
+    def test_parsed_and_normalised(self) -> None:
+        p, errors = plan.parse({'outcome': 'delegate', 'tasks': [
+            _task('build it', 'build',
+                  deliverables=['./guru/a.py', ' tests/test_a.py '])]})
+        assert errors == []
+        assert p.tasks[0].deliverables == ['guru/a.py', 'tests/test_a.py']
+
+    def test_not_a_list_is_a_hard_error(self) -> None:
+        _, errors = plan.parse({'outcome': 'delegate', 'tasks': [
+            _task('build it', 'build', deliverables='guru/a.py')]})
+        assert errors == ['task 1: deliverables must be a list of strings']
+
+    def test_a_build_task_without_deliverables_is_asked_once(self) -> None:
+        v = self._verdict(_task('build the store', 'build'))
+        assert not v.ok and v.soft and not v.errors
+        assert v.ownership == ['task 1 (build) names no deliverables: list'
+                               ' the files it creates or changes']
+        assert v.ownership[0] in v.messages
+
+    def test_reading_kinds_need_none(self) -> None:
+        assert self._verdict(_task('explain the ledger', 'explain')).ok
+
+    def test_too_many(self) -> None:
+        v = self._verdict(_task('build all', 'build', deliverables=[
+            'a.py', 'b.py', 'c.py', 'd.py']))
+        assert v.ownership == [
+            f'task 1 has 4 deliverables (at most {plan.MAX_DELIVERABLES}):'
+            ' split it into smaller tasks, or later delegate rounds']
+
+    def test_shared_between_tasks(self) -> None:
+        v = self._verdict(
+            _task('store', 'build', deliverables=['guru/a.py']),
+            _task('server', 'build', deliverables=['./guru/a.py', 'b.py']))
+        assert v.ownership == ['guru/a.py is a deliverable of tasks 1 and 2:'
+                               ' one task owns a file; run the dependent'
+                               ' work in a later delegate round']
+
+    def test_checked_on_a_followup_too(self) -> None:
+        v = self._verdict(_task('finish it', 'build'), followup=True)
+        assert v.ownership and not v.missing
+
+    def test_valid(self) -> None:
+        v = self._verdict(
+            _task('store', 'build', deliverables=['guru/a.py',
+                                                  'tests/test_a.py']),
+            _task('review it', 'review'))
+        assert v.ok
+
+    def test_task_text_names_them(self) -> None:
+        t = plan.Task('build the store', 'build', deliverables=['guru/a.py'])
+        assert plan.task_text(t) == (
+            'build the store\nDeliverables (you own these files; change'
+            ' nothing else): guru/a.py')
+
+    def test_schema_describes_the_field(self) -> None:
+        props = plan.TASK_SCHEMA['properties']
+        assert props['deliverables']['type'] == 'array'
+        assert 'deliverables' not in plan.TASK_SCHEMA['required']
+
+
+class TestDeliverablePaths:
+    def _owned(self, task):
+        p, _ = plan.parse({'outcome': 'delegate', 'tasks': [task]})
+        return plan.ownership_problems(p)
+
+    def test_a_directory_is_named(self) -> None:
+        assert self._owned(_task('b', 'build', deliverables=['src/pkg/'])) \
+            == ['task 1: deliverable src/pkg/ is a directory: name the files']
+
+    def test_home_paths_are_outside_the_project(self) -> None:
+        assert self._owned(_task('b', 'build',
+                                 deliverables=['~/.guru/usage.db'])) == [
+            'task 1: deliverable ~/.guru/usage.db is outside the project:'
+            ' name project files only']
+
+    def test_a_review_cannot_own_files(self) -> None:
+        assert self._owned(_task('r', 'review', deliverables=['a.py'])) == [
+            'task 1 (review) reports in its answer and owns no files: drop'
+            ' the deliverables or make it a writing task']
+
+    def test_an_explain_task_reports_in_its_answer(self) -> None:
+        assert self._owned(_task('e', 'explain',
+                                 deliverables=['notes.md'])) == [
+            'task 1 (explain) reports in its answer and owns no files: drop'
+            ' the deliverables or make it a writing task']

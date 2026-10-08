@@ -2,6 +2,7 @@
 import json
 import math
 import threading
+import time
 from types import SimpleNamespace as NS
 
 import pytest
@@ -551,3 +552,105 @@ class TestInstallWarmUp:
 
     def test_warm_up_all_without_judges(self) -> None:
         assert judges.warm_up_all(timeout_s=1) == {}
+
+
+class TestDescribe:
+    """Each judge says what it is and where it runs (startup step)."""
+
+    def test_in_process_judges(self) -> None:
+        enc = encoder.EncoderJudge(pipeline_factory=lambda: None)
+        assert enc.describe() == (
+            'encoder:deberta-v3-base-zeroshot-v2.0 (local, in-process)')
+        inj = encoder.InjectionJudge(pipeline_factory=lambda: None)
+        assert inj.describe().endswith('(local, in-process)')
+        dec = decide.DecideJudge(extractor_factory=lambda: None)
+        assert dec.describe() == 'decide:GLiNER2.5-Decide (local, in-process)'
+
+    def test_ollama_json_judge(self, monkeypatch) -> None:
+        monkeypatch.delenv('OLLAMA_HOST', raising=False)
+        j = ollama_json.OllamaJsonJudge('qwen3:4b', client=object())
+        assert j.describe() == (
+            'ollama-json:qwen3:4b (Ollama, local, localhost:11434)')
+        far = ollama_json.OllamaJsonJudge('qwen3:4b', url='http://box:11434',
+                                          client=object())
+        assert far.describe().endswith('(Ollama, remote, box:11434)')
+
+    def test_llm_reviewer_uses_its_adapter_location(self) -> None:
+        from guru.adapters.anthropic import AnthropicAdapter
+        from guru.judges import llm
+        j = llm.LLMReviewer(AnthropicAdapter(), 'claude-sonnet-5')
+        assert j.describe() == (
+            'llm:Anthropic|claude-sonnet-5 (remote, api.anthropic.com)')
+
+
+class TestWarmStatus:
+    """``warm_status()``: idle → loading <name> → ready / failed, with the
+    listener called on each change (the TUI statusline)."""
+
+    def setup_method(self) -> None:
+        decisions.clear_judges()
+        judges.set_warm_listener(None)
+
+    def teardown_method(self) -> None:
+        judges.wait_warm_up(timeout_s=5)
+        judges.set_warm_listener(None)
+        decisions.clear_judges()
+
+    def _points(self, monkeypatch, fakes: dict) -> None:
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'shadow')
+        monkeypatch.setattr(config, 'DECISIONS_POINTS',
+                            {p: p for p in fakes})
+        monkeypatch.setattr(judges, 'build', lambda spec: fakes[spec])
+
+    def test_idle_without_judges(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'DECISIONS_MODE', 'off')
+        judges.install()
+        assert judges.warm_status().state == 'idle'
+
+    def test_loading_then_ready(self, monkeypatch) -> None:
+        gate = threading.Event()
+        seen: list = []
+        judges.set_warm_listener(
+            lambda: seen.append(judges.warm_status()))
+        self._points(monkeypatch, {'labels': _WarmFake('a', block=gate)})
+        judges.install()
+        deadline = time.monotonic() + 5
+        while judges.warm_status().state != 'loading':
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert judges.warm_status().name == 'a'
+        gate.set()
+        judges.wait_warm_up(timeout_s=5)
+        st = judges.warm_status()
+        assert st.state == 'ready' and st.failed == ()
+        # install() resets to idle first (a change the listener hears).
+        assert [s.state for s in seen][-2:] == ['loading', 'ready']
+
+    def test_a_raising_judge_is_failed(self, monkeypatch) -> None:
+        class Bad(_WarmFake):
+            def warm_up(self) -> float:
+                raise RuntimeError('boom')
+        self._points(monkeypatch, {'labels': Bad('bad'),
+                                   'panel': _WarmFake('ok')})
+        judges.install()
+        judges.wait_warm_up(timeout_s=5)
+        st = judges.warm_status()
+        assert st.state == 'failed' and st.failed == ('bad',)
+
+    def test_a_logged_exception_is_failed(self, monkeypatch) -> None:
+        # Real judges swallow their own errors (log.exc) and return.
+        enc = encoder.EncoderJudge(pipeline_factory=lambda: 1 / 0)
+        self._points(monkeypatch, {'panel': enc})
+        judges.install()
+        judges.wait_warm_up(timeout_s=5)
+        assert judges.warm_status().failed == (enc.name,)
+
+    def test_listener_errors_do_not_stop_warm_up(self, monkeypatch) -> None:
+        def boom() -> None:
+            raise RuntimeError('listener')
+        judges.set_warm_listener(boom)
+        a = _WarmFake('a')
+        self._points(monkeypatch, {'labels': a})
+        judges.install()
+        judges.wait_warm_up(timeout_s=5)
+        assert a.warmed == 1 and judges.warm_status().state == 'ready'

@@ -415,6 +415,8 @@ max_seconds = 240
 
 gate_verdict = "intended"      # sandbox cases: the gate's LAST verdict
 gate_verdict_any = ["unclear", "suspicious"]   # at least one submit ended so
+max_cost_usd = 20.0            # spend cap: the run is cancelled past it
+task_status_none = ["capped", "incomplete"]    # no sub-task ended so
 
 [expect.content]               # the answer and the repo afterwards
 answer_contains = ["traversal"]      # case-insensitive substrings

@@ -381,7 +381,8 @@ class TestGitFixture:
                 if 'real' in c.tags]
         assert {c.name for c in real} == {
             'guru-explain-gpu-fit', 'guru-review-adapters',
-            'guru-add-version-flag', 'guru-sandbox-ledger-origin'}
+            'guru-add-version-flag', 'guru-sandbox-ledger-origin',
+            'guru-usage-store'}
         for c in real:
             assert c.fixture_git is not None, c.name
             assert c.fixture_git.path == cases.REPO_ROOT
@@ -477,7 +478,8 @@ class TestSandboxKeys:
         table gains the origin column, a submit through the gate."""
         by_name = {c.name: c for c in cases.load_cases(cases.CASES_DIR,
                                                        tags=['dogfood'])}
-        assert set(by_name) == {'guru-sandbox-ledger-origin'}
+        assert set(by_name) == {'guru-sandbox-ledger-origin',
+                                'guru-usage-store'}
         c = by_name['guru-sandbox-ledger-origin']
         assert c.sandbox and c.mode == 'auto'
         assert set(c.tags) == {'real', 'sandbox', 'dogfood'}
@@ -494,3 +496,15 @@ class TestSandboxKeys:
         assert c.expect.files_changed is None     # the test file is free
         assert c.expect.fixture_tests_pass is True
         assert 'origin' in c.expect.rubric
+
+
+def test_budget_and_task_status_keys(tmp_path) -> None:
+    from guru.evals import cases
+    path = tmp_path / 'c.toml'
+    path.write_text('name = "c"\nprompt = "p"\nfixture = "f"\n'
+                    '[expect.behaviour]\nmax_cost_usd = 20\n'
+                    'task_status_none = ["capped"]\n')
+    (tmp_path / 'f').mkdir()
+    case = cases.load_case(path, fixtures_dir=tmp_path)
+    assert case.expect.max_cost_usd == 20.0
+    assert case.expect.task_status_none == ['capped']

@@ -116,3 +116,97 @@ so auto cases still hit its denying asker), `DELEGATION_NUDGE_MIN_READS = 3`
 `SECRET_SCAN` (mirrors `[routing] secret_scan` while a table is present).
 Every constant in `config.py` is read by at least one module; none was
 removed.
+
+## Startup output (no knob)
+
+Always on, nothing to set: `./start.sh` prints one line per startup step
+(`settings, skills, ledger`, `adapters`, `main model`, `judges`) with what
+it found, where each model runs (`local` / `remote` and the host; `GPU` or
+`CPU spill` for an Ollama model) and how long the step took. Judges warm
+on a background thread after the prompt opens; the statusline shows
+`judges: loading <name>…`, then `judges ready Ns` for
+`READY_SHOWN_S = 10` seconds (`guru/domain/startup.py`), or `judges:
+<names> failed (see log)` until restart. Anything the judge libraries
+print or log during warm-up (the gliner2 config banner, transformers'
+`Device set to use mps`, attention-implementation warnings) goes to
+`~/.guru/guru.log` at debug level instead of the terminal.
+
+## Worker budget, deliverables and agent tabs (no knob)
+
+Always on, code constants (dogfood 2026-10-07: three build workers read
+for 40 rounds, wrote nothing, and reported `done`):
+
+- **Round budget a worker sees** (`guru/adapters/turn.py`): the first tool
+  result of every worker round ends with `[guru] round N/40 · files
+  changed: K` (`_MAX_TOOL_ROUNDS = 40`). A writing task (`build`,
+  `refactor`, `debug`, `docs`: `toolpolicy.WRITE_KINDS`) with no file
+  changed at `CHECKPOINT_AT = 0.3` of the budget gets one checkpoint note,
+  and from `READ_STOP_AT = 0.5` its read tools are refused unrun until it
+  changes a file (one note when reading closes);
+  every worker gets one last-call note `HANDOFF_ROUNDS = 2` rounds before
+  the cap asking for a `final_answer` handoff; after it every call but
+  `final_answer` is refused unrun (`BUDGET_REFUSAL`; the tool list is left
+  alone so the prompt cache holds). Both notes count in the
+  `budget_nudges` struggle column. Workers only (a sub-agent running a
+  task); the main agent keeps the plain cap.
+- **Whole-suite test runs**: `run_tests` with no target and no `-k` gets
+  at least `SUITE_TIMEOUT_S = 600` seconds of wall clock and CPU
+  (`guru/config.py`; the `[tools.limits]` defaults stay 120 s for every
+  other run); a timed-out whole suite tells the worker to run the tests
+  for what it changed.
+- **Verify before reporting**: a worker that changed files and has not
+  run `run_tests` (or `sandbox_run`/`sandbox_python`) and — when the
+  project's `lint` tool is enabled — `lint` since has its first
+  `final_answer` sent back once, naming what is missing, while rounds
+  remain.
+- **Project rules**: the first of `AGENTS.md`, `CLAUDE.md`,
+  `.guru/rules.md` at the project root (`brief.RULES_FILES`, cut at
+  `MAX_RULES_CHARS = 6000`) is read fresh into the controller's and every
+  worker's system context as `[project rules — follow them]`.
+- **Answer check** (`guru/domain/claims.py`, endpoint
+  `guru/judges/claims.py`): when the controller answers a request it
+  delegated, a reviewer on the routing's `standard` review rung (secret
+  scan, local-only mode and the spend confirmation apply, as for the gate)
+  compares the answer with the request and the repository's changes
+  (`git diff HEAD` plus new files, `MAX_EVIDENCE_CHARS = 32000`), once per
+  request. Problems (at most `MAX_PROBLEMS = 5`) send the answer back and
+  allow one delegate round beyond `MAX_DELEGATE_ROUNDS`; a reviewer error
+  or garbage reply delivers the answer unchanged. Installed by the CLI and
+  the eval runner.
+- **Capped worker**: the answer is a handoff built in code (files changed,
+  files read, its last text), the task row's status is `capped` and the
+  parent's delivery header says `· capped`.
+- **Write tools up front**: a writing task kind starts with `write_file`,
+  `edit_file` and `apply_patch` active (project policy, kind hiding and
+  the sandbox rule still apply).
+- **Deliverables** (`guru/domain/plan.py`): a `build`/`refactor`/`docs`
+  plan task names the files it creates or changes
+  (`DELIVERABLE_KINDS`), at most `MAX_DELIVERABLES = 3`, none shared by two
+  tasks of one plan, no directories or `~` paths, none on a reporting
+  kind (`explain`, `review`: `REPORTING_KINDS`) — soft problems, re-asked once, then the plan runs. A task is
+  `incomplete` when it wrote none of its deliverables, or a deliverable
+  that did not exist at launch still does not; an existing owned file it
+  left alone is fine. The delivery lists the missing files.
+- **Agent tabs** (TUI): a sub-agent that finished `done` leaves the tab
+  bar (archived; `check`/`join` still find it, the transcript is in the
+  ledger); one that ended `capped`, `incomplete` or `error`, or that is on
+  screen when it finishes, stays until its tab has been viewed and left.
+  Titles count up for the whole run and are never reused.
+
+Eval runner: `max_cost_usd` (per case) cancels the run once its priced
+calls pass the cap and fails the check; `task_status_none` fails a case
+whose sub-tasks ended in a listed status; `fixture_home_clean` fails a
+case whose fixture tests left files in their private HOME beyond
+`fixture_home_allow`; `fixture_lint_pass` runs flake8 (`guru bench tests
+evals`, those present) and mypy (`guru`) in the copy; every run that changed the
+fixture writes its patch to `evals/runs/<run_id>/diffs/<case>.patch`.
+
+`[evals] home` (settings.toml, default `''` = `~/.guru-evals`): the root
+under which `python -m guru.evals verify <ref>` makes a fresh HOME
+(`verify-<timestamp>-…`) for a candidate branch's flake8 (`guru bench tests
+evals`, as `make lint`), mypy (`guru`) and pytest, so nothing they write
+lands in the real `~/.guru` and no run sees another's files; the HOME is
+kept and its files are listed.
+
+`[decisions] answer_check` (default `true`): the answer check above; `false`
+turns it off (the CLI and the eval runner then install no checker).

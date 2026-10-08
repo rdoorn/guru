@@ -11,16 +11,21 @@ timeout, so the first active answer would always fall back to the
 heuristic. ``install(warm=True)`` (the default; the TUI path) warms every
 judge exposing ``warm_up()`` on a background thread; ``warm_up_all()`` does
 the same synchronously with a deadline (the eval runner, before its first
-case).
+case). ``warm_status()`` tells how far the warm-up got (the TUI statusline);
+``set_warm_listener`` is called on every change.
 """
 from __future__ import annotations
 
+import logging
 import threading
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 from guru import config, log
 from guru.domain import decisions
+from guru.domain.startup import WarmStatus
 from guru.judges import decide, encoder, llm, ollama_json
+from guru.judges.quiet import WARM_THREAD
 
 
 def set_registry(registry: object, routing_cfg: object = None) -> None:
@@ -63,6 +68,7 @@ def install(warm: bool = True) -> dict:
     """
     global _warm_thread
     _warm_thread = None
+    _set_status(WarmStatus())
     decisions.clear_judges()
     if config.DECISIONS_MODE not in config.JUDGING_MODES:
         return {}
@@ -78,6 +84,67 @@ def install(warm: bool = True) -> dict:
 
 
 _warm_thread: Optional[threading.Thread] = None
+_status = WarmStatus()
+_listener: Optional[Callable[[], None]] = None
+
+
+def warming() -> bool:
+    """True when ``install`` started a background warm-up."""
+    return _warm_thread is not None
+
+
+def warm_status() -> WarmStatus:
+    """How far the background warm-up got."""
+    return _status
+
+
+def set_warm_listener(listener: Optional[Callable[[], None]]) -> None:
+    """Call ``listener`` (no arguments) whenever ``warm_status`` changes."""
+    global _listener
+    _listener = listener
+
+
+def _set_status(status: WarmStatus) -> None:
+    global _status
+    _status = status
+    listener = _listener          # cleared concurrently by the TUI on exit
+    if listener is not None:
+        try:
+            listener()
+        except Exception:
+            log.exc('judge warm-up listener failed')
+
+
+class _ExceptionSeen(logging.Handler):
+    """Notes a ``guru`` log record carrying an exception from this thread:
+    the judges' ``warm_up`` logs its failure (``log.exc``) and returns."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self._ident = threading.get_ident()
+        self.seen = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.exc_info and record.thread == self._ident:
+            self.seen = True
+
+
+def describe(judge: object) -> str:
+    """A judge's ``describe()``, or its name when it has none."""
+    fn = getattr(judge, 'describe', None)
+    if callable(fn):
+        return str(fn())
+    return str(getattr(judge, 'name', type(judge).__name__))
+
+
+def installed_descriptions() -> list:
+    """``describe`` of every installed judge, each once (startup step)."""
+    out: list = []
+    for judge in decisions.installed_judges():
+        text = describe(judge)
+        if text not in out:
+            out.append(text)
+    return out
 
 
 def _warmable() -> list:
@@ -92,20 +159,36 @@ def _warmable() -> list:
 
 def _warm_all(into: dict) -> None:
     """Warm each warmable judge in turn, recording ``{name: seconds}`` in
-    ``into`` as each finishes; one info line at the end. Never raises."""
+    ``into`` as each finishes; one info line at the end. Never raises.
+    ``warm_status`` follows along: loading each judge, then ready or
+    failed (naming the judges whose warm-up raised or logged an error)."""
+    t0 = time.monotonic()
+    failed: list = []
     for judge in _warmable():
         name = getattr(judge, 'name', type(judge).__name__)
+        _set_status(WarmStatus('loading', name=name, at=time.monotonic()))
+        seen = _ExceptionSeen()
+        log.log.addHandler(seen)
         try:
             into[name] = float(judge.warm_up())
         except Exception:
             log.exc(f'warm-up of {name} failed')
+        finally:
+            log.log.removeHandler(seen)
+        if seen.seen:
+            failed.append(name)
+            into.pop(name, None)
+    now = time.monotonic()
+    _set_status(WarmStatus('failed' if failed else 'ready',
+                           seconds=round(now - t0, 3),
+                           failed=tuple(failed), at=now))
     log.info('judge warm-up: %s', ', '.join(
         f'{name}={secs:.2f}s' for name, secs in into.items()) or 'nothing')
 
 
 def _start_warm_up(into: dict) -> threading.Thread:
     thread = threading.Thread(target=_warm_all, args=(into,),
-                              name='guru-judge-warm-up', daemon=True)
+                              name=WARM_THREAD, daemon=True)
     thread.start()
     return thread
 

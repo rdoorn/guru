@@ -285,7 +285,10 @@ class TestDecisionsAndLedgerSettings:
         assert config.DECISIONS_MODE == 'off'
         assert any('autopilot' in r.getMessage() for r in caplog.records)
 
-    def test_defaults(self) -> None:
+    def test_defaults(self, tmp_path, monkeypatch) -> None:
+        # An empty settings file: the user's ~/.guru/settings.toml (loaded
+        # at import) must not leak into the code defaults under test.
+        self._apply(tmp_path, monkeypatch, '')
         assert config.DECISIONS_MODE == 'off'
         assert config.DECISIONS_POINTS == {}
         assert config.DECISIONS_LABELS_MARGIN == 0.15
@@ -442,3 +445,12 @@ class TestProcLimitSettings:
     def test_tools_policy_path_under_project_dir(self) -> None:
         assert config.TOOLS_POLICY_PATH == (
             config.PROJECT_GURU_DIR / 'tools.toml')
+
+
+def test_evals_home_setting(tmp_path, monkeypatch) -> None:
+    path = tmp_path / 'settings.toml'
+    path.write_text('[evals]\nhome = " ~/loop-home "\n')
+    monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', path)
+    monkeypatch.setattr(config, 'EVALS_HOME', '')
+    config._apply_settings()
+    assert config.EVALS_HOME == '~/loop-home'

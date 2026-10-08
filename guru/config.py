@@ -104,6 +104,11 @@ PROC_MEM_MB = 2048
 PROC_FSIZE_MB = 64
 PROC_OUT_KB = 256
 PROC_LIMIT_KEYS = ('timeout_s', 'cpu_s', 'mem_mb', 'fsize_mb', 'out_kb')
+# A whole-suite run_tests (no target, no -k) gets at least this much wall
+# clock and CPU: guru's own suite takes ~3 min and the 120 s default cut it
+# off every time, so verify workers re-ran it in pieces for ten minutes
+# (evals 4e6dcda17b7b, 7a03ce75026d).
+SUITE_TIMEOUT_S = 600
 
 # Sampling overrides applied on top of a model's own modelfile defaults (the
 # authoritative per-model source). Empty by default so each model keeps its
@@ -188,8 +193,17 @@ PRICING_OVERRIDES: dict = {}
 #   model = "Ollama|qwen3:14b"
 #   num_ctx = 8192
 # ``python -m guru.evals run --model/--num-ctx`` override both.
+# ``[evals] home`` is the root under which ``python -m guru.evals verify``
+# makes a fresh HOME for each candidate branch's checks, so nothing they
+# write lands in the real ``~/.guru``; '' = ``~/.guru-evals``.
 EVALS_MODEL = ''
 EVALS_NUM_CTX = 8192
+EVALS_HOME = ''
+
+# The answer check (guru.domain.claims): the controller's answer to work
+# it delegated is compared with the changes before the user sees it.
+# settings.toml ``[decisions] answer_check = false`` turns it off.
+ANSWER_CHECK = True
 
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
@@ -354,7 +368,25 @@ CONTROLLER_HINT = (
     " immediately with a self-contained task goal that names the project"
     " path, and let the worker look around.\n"
     "Every task that edits code must say: verify with run_tests/"
-    "check_syntax before reporting."
+    "check_syntax before reporting.\n"
+    "How workers run: each task gets a fresh worker with a budget of 40"
+    " tool rounds; it cannot be addressed again after it reports. Give a"
+    " writing task (build, refactor, docs) the deliverables it owns, at"
+    " most 3 files a worker can write in that budget, and put the facts"
+    " you already know (paths, line numbers, the interfaces to use) in the"
+    " goal so it does not re-explore. Work that depends on another task's"
+    " files goes in a later delegate round, not in parallel. A result"
+    " marked capped carries the worker's handoff, one marked incomplete"
+    " names the deliverables it did not write: re-delegate the remaining"
+    " part from that, do not start the exploration over. Tests go in the"
+    " same task as the code they test (its deliverables include the test"
+    " file): a later delegate round may never come. Gathering facts for"
+    " a later task is standard complexity, however large the codebase."
+    " A feature is done only when the running application uses it: the"
+    " round that builds a component also owns wiring it in (the file"
+    " that installs it is some task's deliverable). Spend no task on work"
+    " the user did not ask for (design notes, extra documents) unless the"
+    " project rules require it."
 )
 
 # The plan tool's description (guru.domain.tools._PLAN_SPEC); the field
@@ -582,7 +614,7 @@ def _apply_settings() -> None:
     """Apply settings.toml overrides (retention, tools, sampling, bench,
     decisions, ledger, pricing, evals)."""
     global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
-    global EVALS_MODEL, EVALS_NUM_CTX
+    global EVALS_MODEL, EVALS_NUM_CTX, EVALS_HOME
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
     global BENCH_MODEL_TIMEOUT, FLAT_TOOLS
     global PROC_TIMEOUT_S, PROC_CPU_S, PROC_MEM_MB, PROC_FSIZE_MB, PROC_OUT_KB
@@ -626,6 +658,8 @@ def _apply_settings() -> None:
     except (TypeError, ValueError):
         pass
     dec = settings_section('decisions')
+    global ANSWER_CHECK
+    ANSWER_CHECK = bool(dec.get('answer_check', True))
     mode = str(dec.get('mode', DECISIONS_MODE))
     if mode not in DECISIONS_MODES:
         log.info('ignoring unknown [decisions] mode %r; expected one of %s',
@@ -677,6 +711,9 @@ def _apply_settings() -> None:
     if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) \
             and num_ctx >= 0:
         EVALS_NUM_CTX = num_ctx
+    home = ev.get('home', EVALS_HOME)
+    if isinstance(home, str):
+        EVALS_HOME = home.strip()
     ledger = settings_section('ledger')
     LEDGER_ENABLED = bool(ledger.get('enabled', True))
     LEDGER_TURN_LINE = bool(ledger.get('turn_line', True))
