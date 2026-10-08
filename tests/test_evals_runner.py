@@ -3285,3 +3285,15 @@ def test_a_failing_diff_save_does_not_fail_the_case(
     assert res.observed['error'] == ''
     assert res.observed['diff_path'] == ''
     assert res.observed['files_changed'] == ['NEW.md']
+
+
+def test_fixture_home_files_lists_what_tests_left(tmp_path: Path) -> None:
+    copy = tmp_path / 'repo'
+    copy.mkdir()
+    assert runner.fixture_home_files(copy) == []
+    home = tmp_path / '.guru-eval-tmp' / 'home'
+    (home / '.guru').mkdir(parents=True)
+    (home / '.guru' / 'usage.db').write_text('x')
+    assert runner.fixture_home_files(copy) == ['.guru/usage.db']
+    env = runner._fixture_env(copy)
+    assert Path(env['HOME']) == home          # the same private HOME

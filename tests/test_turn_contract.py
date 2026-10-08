@@ -1,6 +1,8 @@
 """The turn contract in the shared loop (guru.adapters.turn): forced tool
 calls, ``final_answer``, the controller's ``plan`` handling and the
 protocol-violation bookkeeping."""
+import math
+
 from guru import session, ui
 from guru.adapters import turn
 from guru.adapters.base import FORCE_ANY, FORCE_PLAN
@@ -558,9 +560,10 @@ class TestRoundBudget:
             ('read_file', {'path': 'a.py'}, 'r1'),
             ('write_file', {'path': 'b.py', 'content': 'x'}, 'w1')]),
             lambda: _assistant('', [('read_file', {'path': 'c.py'}, 'r2')]),
+            lambda: _assistant('', [('run_tests', {}, 't')]),
             self._final()])
         s.run()
-        read, write, read2 = self._results()
+        read, write, read2, _tests = self._results()
         assert read.endswith('[guru] round 1/40 · files changed: 0')
         assert '[guru]' not in write
         assert read2.endswith('[guru] round 2/40 · files changed: 1')
@@ -583,10 +586,11 @@ class TestRoundBudget:
         self._reads(s, 25, [self._final()])
         s.run()
         results = self._results()
-        assert all(turn.CHECKPOINT_TEXT not in r for r in results[:19])
-        assert turn.CHECKPOINT_TEXT in results[19]          # round 20/40
+        at = math.ceil(turn._MAX_TOOL_ROUNDS * turn.CHECKPOINT_AT)  # 12
+        assert all(turn.CHECKPOINT_TEXT not in r for r in results[:at - 1])
+        assert turn.CHECKPOINT_TEXT in results[at - 1]
         assert sum(turn.CHECKPOINT_TEXT in r for r in results) == 1
-        assert session.struggle['budget_nudges'] == 1
+        assert session.struggle['budget_nudges'] == 2   # + reads closed
 
     def test_no_checkpoint_once_a_file_changed(self, monkeypatch) -> None:
         s = self._worker(monkeypatch, kind='build')
@@ -594,7 +598,9 @@ class TestRoundBudget:
             'path': 'a.py', 'content': 'x'}, 'w')])]
             + [lambda i=i: _assistant('', [('read_file',
                                             {'path': f'{i}.py'}, 'r')])
-               for i in range(25)] + [self._final()])
+               for i in range(25)]
+            + [lambda: _assistant('', [('run_tests', {}, 't')]),
+               self._final()])
         s.run()
         assert all(turn.CHECKPOINT_TEXT not in r for r in self._results())
 
@@ -659,11 +665,11 @@ class TestRoundBudget:
         self._reads(s, 33, [self._final()])
         s.run()
         results = self._results()
-        stop = int(turn._MAX_TOOL_ROUNDS * turn.READ_STOP_AT)   # round 30
+        stop = int(turn._MAX_TOOL_ROUNDS * turn.READ_STOP_AT)   # round 20
         assert not any(r.startswith(turn.READ_REFUSAL)
                        for r in results[:stop - 1])
         assert results[stop - 1].startswith(turn.READ_REFUSAL)
-        assert 'Reading is closed: 30/40' in results[stop - 1]
+        assert f'Reading is closed: {stop}/40' in results[stop - 1]
         assert sum('Reading is closed' in r for r in results) == 1
         assert s.ran.count('read_file') == stop - 1
         assert session.struggle['budget_nudges'] == 2   # checkpoint + stop
@@ -677,9 +683,10 @@ class TestRoundBudget:
                      'path': 'a.py', 'content': 'x'}, 'w')])]
                  + [lambda: _assistant('', [('read_file',
                                              {'path': 'z.py'}, 'r')]),
+                    lambda: _assistant('', [('run_tests', {}, 't')]),
                     self._final()])
         s.run()
-        assert not self._results()[-1].startswith(turn.READ_REFUSAL)
+        assert not self._results()[-2].startswith(turn.READ_REFUSAL)
 
     def test_reads_stay_open_for_a_reading_kind(self, monkeypatch) -> None:
         s = self._worker(monkeypatch, kind='explain')
@@ -946,3 +953,68 @@ def test_controller_hint_numbers_match_the_code() -> None:
     hint = config.CONTROLLER_HINT
     assert f'budget of {turn._MAX_TOOL_ROUNDS} tool rounds' in hint
     assert f'at most {plan.MAX_DELIVERABLES} files' in hint
+
+
+class TestVerifyBeforeFinal:
+    """A worker that changed files and ran no tests since has its first
+    final_answer sent back once; a tested change goes straight through."""
+
+    def _worker(self, monkeypatch):
+        return Scripted(monkeypatch, [], adapter=Forcing(), kind='build',
+                        task_id='t1')
+
+    @staticmethod
+    def _write():
+        return lambda: _assistant('', [('write_file', {
+            'path': 'a.py', 'content': 'x'}, 'w')])
+
+    @staticmethod
+    def _final(text='done'):
+        return lambda: _assistant('', [('final_answer', {'text': text},
+                                        'f')])
+
+    def test_untested_change_is_sent_back_once(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(), self._final('first'),
+                  lambda: _assistant('', [('run_tests', {}, 't')]),
+                  self._final('tested')])
+        s.run()
+        assert s.rendered == ['tested']
+        sent_back = [m['content'] for m in session.messages
+                     if m.get('tool_name') == 'final_answer']
+        assert sent_back[0].startswith(turn.VERIFY_REFUSAL)
+
+    def test_only_once(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(), self._final('first'),
+                  self._final('second')])
+        s.run()
+        assert s.rendered == ['second']
+
+    def test_tested_change_goes_through(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(),
+                  lambda: _assistant('', [('run_tests', {}, 't')]),
+                  self._final('ok')])
+        s.run()
+        assert s.rendered == ['ok']
+
+    def test_tests_in_the_same_round_count(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(), lambda: _assistant('', [
+            ('run_tests', {}, 't'), ('final_answer', {'text': 'ok'}, 'f')])])
+        s.run()
+        assert s.rendered == ['ok']
+
+    def test_no_change_no_check(self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._final('nothing to do')])
+        s.run()
+        assert s.rendered == ['nothing to do']
+
+    def test_main_agent_is_not_sent_back(self, monkeypatch,
+                                         fake_repo) -> None:
+        s = Scripted(monkeypatch, [], adapter=Forcing())
+        s.script([self._write(), self._final('ok')])
+        s.run(fake_repo)
+        assert s.rendered == ['ok']

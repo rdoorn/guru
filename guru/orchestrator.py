@@ -141,7 +141,22 @@ def _brief_block(task: str, project: Optional[Brief]) -> str:
     except Exception:                                    # noqa: BLE001
         log.exc('brief slice failed')
         return ''
-    return f"\n\n[project brief]\n{text}" if text.strip() else ''
+    block = f"\n\n[project brief]\n{text}" if text.strip() else ''
+    return block + _rules_block(project)
+
+
+def _rules_block(project: Optional[Brief]) -> str:
+    """The project's rules file (``brief.rules``) as a system-context
+    block for the controller and every worker; empty without one."""
+    if project is None:
+        return ''
+    try:
+        text = _brief.rules(Path(project.root))
+    except Exception:                                    # noqa: BLE001
+        log.exc('project rules read failed')
+        return ''
+    return (f"\n\n[project rules — follow them]\n{text}"
+            if text else '')
 
 
 def _map_block(project: Optional[Brief]) -> str:
@@ -154,7 +169,8 @@ def _map_block(project: Optional[Brief]) -> str:
     except Exception:                                    # noqa: BLE001
         log.exc('brief map failed')
         return ''
-    return f"\n\n[project map]\n{text}" if text.strip() else ''
+    block = f"\n\n[project map]\n{text}" if text.strip() else ''
+    return block + _rules_block(project)
 
 
 def _newest_mtime(path: str, limit: int = 2000) -> float:

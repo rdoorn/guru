@@ -2259,3 +2259,37 @@ class TestDeliverableEdges:
         retry = o._retry_child(failed, rec, plan)
         assert retry is not None and retry.deliverables == ['a.py']
         assert retry.deliverables is not failed.deliverables
+
+
+class TestProjectRules:
+    """The project's rules file reaches the controller and every worker."""
+
+    def _brief(self, root):
+        from guru.domain.brief import Brief
+        return Brief(root=str(root), head_sha='h', built_at='t',
+                     build_seconds=0.0, files=1, python_files=1,
+                     modules=['m'], test_command='pytest')
+
+    def test_agents_md_in_both_blocks(self, tmp_path) -> None:
+        import guru.orchestrator as orch_mod
+        (tmp_path / 'AGENTS.md').write_text('Domain never imports repos.\n')
+        b = self._brief(tmp_path)
+        for block in (orch_mod._brief_block('t', b), orch_mod._map_block(b)):
+            assert '[project rules — follow them]\n(AGENTS.md)\nDomain' \
+                in block
+
+    def test_first_file_wins_and_long_rules_are_cut(self, tmp_path) -> None:
+        from guru.domain import brief
+        (tmp_path / 'CLAUDE.md').write_text('x' * (brief.MAX_RULES_CHARS + 50))
+        (tmp_path / '.guru').mkdir()
+        (tmp_path / '.guru' / 'rules.md').write_text('later')
+        text = brief.rules(tmp_path)
+        assert text.startswith('(CLAUDE.md)\n')
+        assert text.endswith('… (cut; read CLAUDE.md for the rest)')
+
+    def test_no_rules_file(self, tmp_path) -> None:
+        import guru.orchestrator as orch_mod
+        from guru.domain import brief
+        assert brief.rules(tmp_path) == ''
+        assert '[project rules' not in orch_mod._map_block(
+            self._brief(tmp_path))

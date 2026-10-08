@@ -100,18 +100,21 @@ _CAPPED_TEXT = '(guru ended the turn after {n} rounds without a final answer.)'
 # many rounds they had). The checkpoint fires once for a writing kind
 # (toolpolicy.WRITE_KINDS) with no file changed at CHECKPOINT_AT of the
 # cap; the last call fires once HANDOFF_ROUNDS before the cap.
-CHECKPOINT_AT = 0.5
+CHECKPOINT_AT = 0.3
 HANDOFF_ROUNDS = 2
 # Past READ_STOP_AT of the cap a writing task that still changed nothing
 # has its read tools refused until it writes (eval a6953350f1c1: a build
 # worker got the checkpoint at round 20 and read ledger.py 18 more times,
-# writing nothing).
-READ_STOP_AT = 0.75
+# writing nothing). Moved from 0.75 after eval 5db195fa2af9: an Opus build
+# worker given the facts still read 41 times, wrote only once reading
+# closed and reported in the spent rounds, so its work went untested.
+READ_STOP_AT = 0.5
 FOOTER_TEXT = '[guru] round {n}/{cap} · files changed: {changed}'
 CHECKPOINT_TEXT = (
-    '[guru] Half of your round budget is spent and no file is changed.'
+    '[guru] Your round budget is running down and no file is changed.'
     ' Stop exploring: write the files now with what you know, or call'
-    ' final_answer saying what blocks you.')
+    ' final_answer saying what blocks you. Reading closes at half the'
+    ' budget.')
 LAST_CALL_TEXT = (
     '[guru] {left} round(s) left. Your next call must be final_answer with'
     ' a handoff: what you changed, what you found (file:line), what'
@@ -126,6 +129,14 @@ READS_CLOSED_TEXT = (
     '[guru] Reading is closed: {n}/{cap} rounds spent and no file changed.'
     ' Write the files now with what you know, or call final_answer saying'
     ' what blocks you.')
+# A worker's first final_answer after changing files with no test run
+# since is sent back once (eval 06075f330988: a build worker wrote the
+# store and its tests, ran only check_syntax, and a whole verify task had
+# to follow). VERIFY_TOOLS count as verification.
+VERIFY_TOOLS = frozenset(('run_tests', 'sandbox_run', 'sandbox_python'))
+VERIFY_REFUSAL = ('Not delivered: you changed files and ran no tests since.'
+                  ' Run run_tests on what you changed (the targeted tests'
+                  ' first), fix what fails, then call final_answer again.')
 READ_REFUSAL = ('Refused: reading is closed for this task until you change'
                 ' a file; this call did not run. Write now, or call'
                 ' final_answer with what blocks you.')
@@ -158,8 +169,13 @@ def tool_result(name: str, args: dict, duplicate: bool,
     the round's budget footer on the first result of the round
     (``session.round_note``, consumed here). ``execute`` defaults to
     ``tools.execute_tool`` (tests pass a stub)."""
+    if name in VERIFY_TOOLS:
+        session.verify_due = False      # tested earlier in this round
     if session.budget_spent and name != 'final_answer':
         content = BUDGET_REFUSAL
+    elif session.verify_due and name == 'final_answer':
+        session.verify_due = False      # sent back once per turn
+        content = VERIFY_REFUSAL
     elif session.reads_closed and name in config.DELEGATION_READ_TOOLS:
         content = READ_REFUSAL
     elif duplicate:
@@ -362,6 +378,7 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     session.round_note = ''
     session.budget_spent = False
     session.reads_closed = False
+    session.verify_due = False
     if not session.task_id:
         # A sub-agent executing a task keeps the turn_id it inherited.
         session.turn_id = ledger.new_turn_id()
@@ -486,11 +503,13 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
                 session.round_note = budget.note(rounds, cap)
                 session.budget_spent = rounds > cap - HANDOFF_ROUNDS
                 session.reads_closed = budget.reads_closed(rounds, cap)
+                session.verify_due = budget.verify_due(rounds, cap)
             before = len(session.messages)
             run_tools(pending)
             session.round_note = ''
             session.budget_spent = False
             session.reads_closed = False
+            session.verify_due = False
             budget.saw(session.messages[before:])
             _after_tools(rnd, turn0, before)
 
@@ -581,6 +600,15 @@ class _Budget:
         self.checkpointed = False
         self.last_called = False
         self.read_stop_noted = False
+        self.unverified = False         # changed files since the last test
+        self.verify_asked = False
+
+    def verify_due(self, rounds: int, cap: int) -> bool:
+        """Whether a final_answer this round is sent back to verify: files
+        changed and untested since, not asked before, and rounds left to
+        run the tests."""
+        return (self.unverified and not self.verify_asked
+                and rounds < cap - HANDOFF_ROUNDS)
 
     def _idle_writer(self) -> bool:
         """A writing task that has changed nothing (and is not editing a
@@ -602,8 +630,14 @@ class _Budget:
             args = m.get('tool_args')
             content = str(m.get('content', ''))
             for p in changed_paths(name, args, content):
+                self.unverified = True
                 if p not in self.changed:
                     self.changed.append(p)
+            if name in VERIFY_TOOLS:
+                self.unverified = False
+            if (name == 'final_answer'
+                    and content.startswith(VERIFY_REFUSAL)):
+                self.verify_asked = True
             if name in _SANDBOX_EDIT_TOOLS:
                 self.sandboxing = True
             path = args.get('path') if isinstance(args, dict) else None
@@ -750,6 +784,10 @@ def _after_tools(rnd: _Round, turn0: int, start: int) -> None:
         return
     args = rnd.call('final_answer')
     if args is not None:
+        if _round_tool_result('final_answer', start).startswith(
+                VERIFY_REFUSAL):
+            ledger.bump('budget_nudges')
+            return                      # sent back to verify first
         rnd.answer = plan.final_text(args)
         rnd.collapse = len(rnd.calls) == 1
 

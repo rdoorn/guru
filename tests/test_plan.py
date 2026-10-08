@@ -513,5 +513,11 @@ class TestDeliverablePaths:
 
     def test_a_review_cannot_own_files(self) -> None:
         assert self._owned(_task('r', 'review', deliverables=['a.py'])) == [
-            'task 1 (review) is read-only and cannot own deliverables: drop'
-            ' them or make it a writing task']
+            'task 1 (review) reports in its answer and owns no files: drop'
+            ' the deliverables or make it a writing task']
+
+    def test_an_explain_task_reports_in_its_answer(self) -> None:
+        assert self._owned(_task('e', 'explain',
+                                 deliverables=['notes.md'])) == [
+            'task 1 (explain) reports in its answer and owns no files: drop'
+            ' the deliverables or make it a writing task']

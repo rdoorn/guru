@@ -259,3 +259,18 @@ class TestBudgetAndTaskStatus:
         assert not r.passed
         assert r.detail == ("task statuses ['capped', 'capped'] hit"
                             " ['capped', 'incomplete']")
+
+
+class TestFixtureHomeClean:
+    def test_clean_and_allowed(self) -> None:
+        e = Expect(fixture_home_clean=True,
+                   fixture_home_allow=['.guru/guru.log', '.matplotlib/*'])
+        assert one(e, obs(fixture_home_files=[])).passed
+        assert one(e, obs(fixture_home_files=[
+            '.guru/guru.log', '.matplotlib/fontlist.json'])).passed
+
+    def test_a_new_file_fails(self) -> None:
+        e = Expect(fixture_home_clean=True, fixture_home_allow=['.guru/x'])
+        r = one(e, obs(fixture_home_files=['.guru/usage.db', '.guru/x']))
+        assert not r.passed
+        assert r.detail == "tests wrote to HOME: ['.guru/usage.db']"

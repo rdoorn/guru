@@ -140,8 +140,8 @@ for 40 rounds, wrote nothing, and reported `done`):
   result of every worker round ends with `[guru] round N/40 · files
   changed: K` (`_MAX_TOOL_ROUNDS = 40`). A writing task (`build`,
   `refactor`, `debug`, `docs`: `toolpolicy.WRITE_KINDS`) with no file
-  changed at `CHECKPOINT_AT = 0.5` of the budget gets one checkpoint note,
-  and from `READ_STOP_AT = 0.75` its read tools are refused unrun until it
+  changed at `CHECKPOINT_AT = 0.3` of the budget gets one checkpoint note,
+  and from `READ_STOP_AT = 0.5` its read tools are refused unrun until it
   changes a file (one note when reading closes);
   every worker gets one last-call note `HANDOFF_ROUNDS = 2` rounds before
   the cap asking for a `final_answer` handoff; after it every call but
@@ -149,6 +149,13 @@ for 40 rounds, wrote nothing, and reported `done`):
   alone so the prompt cache holds). Both notes count in the
   `budget_nudges` struggle column. Workers only (a sub-agent running a
   task); the main agent keeps the plain cap.
+- **Verify before reporting**: a worker that changed files and ran no
+  `run_tests` (or `sandbox_run`/`sandbox_python`) since has its first
+  `final_answer` sent back once (`VERIFY_REFUSAL`) while rounds remain.
+- **Project rules**: the first of `AGENTS.md`, `CLAUDE.md`,
+  `.guru/rules.md` at the project root (`brief.RULES_FILES`, cut at
+  `MAX_RULES_CHARS = 6000`) is read fresh into the controller's and every
+  worker's system context as `[project rules — follow them]`.
 - **Capped worker**: the answer is a handoff built in code (files changed,
   files read, its last text), the task row's status is `capped` and the
   parent's delivery header says `· capped`.
@@ -158,8 +165,8 @@ for 40 rounds, wrote nothing, and reported `done`):
 - **Deliverables** (`guru/domain/plan.py`): a `build`/`refactor`/`docs`
   plan task names the files it creates or changes
   (`DELIVERABLE_KINDS`), at most `MAX_DELIVERABLES = 3`, none shared by two
-  tasks of one plan, no directories or `~` paths, none on a read-only
-  kind — soft problems, re-asked once, then the plan runs. A task is
+  tasks of one plan, no directories or `~` paths, none on a reporting
+  kind (`explain`, `review`: `REPORTING_KINDS`) — soft problems, re-asked once, then the plan runs. A task is
   `incomplete` when it wrote none of its deliverables, or a deliverable
   that did not exist at launch still does not; an existing owned file it
   left alone is fine. The delivery lists the missing files.
@@ -171,5 +178,7 @@ for 40 rounds, wrote nothing, and reported `done`):
 
 Eval runner: `max_cost_usd` (per case) cancels the run once its priced
 calls pass the cap and fails the check; `task_status_none` fails a case
-whose sub-tasks ended in a listed status; every run that changed the
+whose sub-tasks ended in a listed status; `fixture_home_clean` fails a
+case whose fixture tests left files in their private HOME beyond
+`fixture_home_allow`; every run that changed the
 fixture writes its patch to `evals/runs/<run_id>/diffs/<case>.patch`.

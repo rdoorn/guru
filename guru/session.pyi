@@ -48,6 +48,7 @@ class SessionState:
     round_note: str
     budget_spent: bool
     reads_closed: bool
+    verify_due: bool
     def __init__(self) -> None: ...
 
 
@@ -93,3 +94,4 @@ capped: bool
 round_note: str
 budget_spent: bool
 reads_closed: bool
+verify_due: bool

@@ -116,6 +116,9 @@ class SessionState:
         # True while a writing worker past READ_STOP_AT with nothing
         # changed runs a round: its read tools are refused unrun.
         self.reads_closed: bool = False
+        # True while a worker round runs whose final_answer is sent back
+        # once because it changed files and ran no tests since.
+        self.verify_due: bool = False
 
 
 _default = SessionState()

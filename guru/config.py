@@ -366,7 +366,13 @@ CONTROLLER_HINT = (
     " names the deliverables it did not write: re-delegate the remaining"
     " part from that, do not start the exploration over. Tests go in the"
     " same task as the code they test (its deliverables include the test"
-    " file): a later delegate round may never come."
+    " file): a later delegate round may never come. Gathering facts for"
+    " a later task is standard complexity, however large the codebase."
+    " A feature is done only when the running application uses it: the"
+    " round that builds a component also owns wiring it in (the file"
+    " that installs it is some task's deliverable). Spend no task on work"
+    " the user did not ask for (design notes, extra documents) unless the"
+    " project rules require it."
 )
 
 # The plan tool's description (guru.domain.tools._PLAN_SPEC); the field

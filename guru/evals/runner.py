@@ -408,6 +408,19 @@ def _fixture_env(repo: Path) -> dict:
     return env
 
 
+def fixture_home_files(repo: Path) -> list[str]:
+    """Files the fixture's tests left in their private HOME (see
+    :func:`_fixture_env`), relative and sorted: a test that writes to the
+    user's home directory — the real ``~/.guru`` outside the eval — shows
+    up here (eval 06075f330988: the new store's tests wrote to the real
+    usage database)."""
+    home = Path(repo).parent / '.guru-eval-tmp' / 'home'
+    if not home.is_dir():
+        return []
+    return sorted(p.relative_to(home).as_posix()
+                  for p in home.rglob('*') if p.is_file())
+
+
 FIXTURE_TAIL_LINES = 30
 
 
@@ -822,6 +835,7 @@ def run_case(case: Case, base_state: session.SessionState,
     tests_pass: Optional[bool] = None
     tests_tail = ''
     diff_path = ''
+    home_files: list[str] = []
     sandbox: Optional[dict] = None
     try:
         copy = prepare_fixture(case.fixture_git or case.fixture, workdir,
@@ -846,6 +860,7 @@ def run_case(case: Case, base_state: session.SessionState,
                 log.exc(f'saving the diff of {case.name} failed')
         if case.expect.fixture_tests_pass is not None:
             tests_pass, tests_tail = fixture_tests_result(copy)
+            home_files = fixture_home_files(copy)
     except Exception as e:                           # noqa: BLE001
         error = error or str(e) or type(e).__name__
     finally:
@@ -867,6 +882,7 @@ def run_case(case: Case, base_state: session.SessionState,
                          repo.rows('tasks')[tasks_before:]
                          if r.get('status') != 'running']
     obs.diff_path = diff_path
+    obs.fixture_home_files = home_files
     results = checks.evaluate(case.expect, obs)
     return CaseResult(
         case=case.name, passed=checks.passed(results),

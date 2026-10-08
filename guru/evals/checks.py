@@ -7,6 +7,7 @@ is graded by hand).
 """
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -47,6 +48,8 @@ class Observed:
     cost_usd: Optional[float] = None
     task_statuses: list[str] = field(default_factory=list)
     diff_path: str = ''
+    # Files the fixture's tests wrote into their private HOME.
+    fixture_home_files: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -228,6 +231,13 @@ def _task_status_none(e: Expect, o: Observed) -> CheckResult:
                        f'{_fmt(e.task_status_none)}')
 
 
+def _fixture_home_clean(e: Expect, o: Observed) -> CheckResult:
+    new = [f for f in o.fixture_home_files
+           if not any(fnmatch.fnmatch(f, g) for g in e.fixture_home_allow)]
+    return CheckResult('fixture_home_clean', not new, '' if not new else
+                       'tests wrote to HOME: ' + _fmt(new[:5]))
+
+
 # (name, is-configured predicate, check) in the order results are reported.
 _Check = Callable[[Expect, Observed], CheckResult]
 _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
@@ -256,6 +266,8 @@ _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
     ('max_cost_usd', lambda e: e.max_cost_usd is not None, _max_cost_usd),
     ('task_status_none', lambda e: bool(e.task_status_none),
      _task_status_none),
+    ('fixture_home_clean', lambda e: e.fixture_home_clean,
+     _fixture_home_clean),
 ]
 
 

@@ -1,7 +1,8 @@
 # Dogfood case (2026-10-07): the user's usage-dashboard request, phase-1
 # slice. In the real session the controller split it into three parallel
 # build workers; all three read for 40 rounds, wrote nothing and cost
-# ~$4.14. Pinned to main at the time of the request; run with the
+# ~$4.14. Pinned to main at the time of the request (9875ff4) plus the
+# project's AGENTS.md (branch eval-fixture/usage-store, 81dc231); run with the
 # Claude-tier routing and Opus as the controller, as in that session:
 #   --model 'SBP Litellm|aws/claude-5-5-opus'
 #   --routing evals/routing/claude-tiers.toml --allow-spend
@@ -17,7 +18,7 @@ tags = ["real", "build", "dogfood"]
 
 [fixture_git]
 path = "."
-ref = "9875ff4a8cfc443189b0375c3258e024af6d43c3"
+ref = "81dc231818e120e7b66d6d1568741401202754c1"
 
 [expect.behaviour]
 tools_used_any = ["write_file", "edit_file", "apply_patch"]
@@ -27,8 +28,15 @@ max_cost_usd = 20.0
 max_seconds = 2400
 
 [expect.content]
-files_changed_any = ["guru/domain/ledger.py", "guru/repositories/jsonl_ledger.py"]
+# Wired in: the running app installs the store where it installs every
+# implementation (AGENTS.md: guru/cli.py). Run 88eda59e9b79 built and
+# tested a store nothing installed; the rubric judge did not notice.
+files_changed_any = ["guru/cli.py"]
 fixture_tests_pass = true
+# The new code's tests must not write to the user's home; the allow-list is
+# what 9875ff4's own suite already leaves there (measured 2026-10-08).
+fixture_home_clean = true
+fixture_home_allow = [".guru/GURU.md", ".guru/adapters.toml", ".guru/guru.log", ".matplotlib/*"]
 
 [expect.rubric]
 text = "A new SQLite-backed usage store under ~/.guru (stdlib sqlite3; WAL or an equivalent busy timeout so concurrent guru processes can write) records one row per model call with adapter, model, token counts, cost, project and topic/task; the existing ledger call path (guru/domain/ledger.py record_call or the JSONL repository) writes to it without breaking when the DB is unavailable; new tests cover the schema, a write and a read-back with a temporary database; no web server or dashboard code; the answer reports the test run's result rather than a guess."

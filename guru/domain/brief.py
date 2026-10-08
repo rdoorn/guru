@@ -292,6 +292,36 @@ def build(root: Path, head_sha: str, budget_s: float = BUILD_BUDGET_S,
         make_targets=targets, conventions=conventions, truncated=truncated)
 
 
+# --- project rules -----------------------------------------------------------
+
+# The project's own conventions file, the first that exists at the root:
+# the instructions a human contributor reads (layering, defaults, test
+# isolation, ...). Read fresh each time (not cached in the brief, which is
+# keyed on HEAD) and cut at MAX_RULES_CHARS. Eval 06075f330988: a worker
+# broke four of the project's conventions it had no way to know.
+RULES_FILES = ('AGENTS.md', 'CLAUDE.md', '.guru/rules.md')
+MAX_RULES_CHARS = 6000
+
+
+def rules(root: Path) -> str:
+    """The project rules text under ``root`` (``''`` when none), cut at
+    ``MAX_RULES_CHARS`` with a closing note naming the file."""
+    for name in RULES_FILES:
+        path = Path(root) / name
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        text = text.strip()
+        if len(text) > MAX_RULES_CHARS:
+            text = (text[:MAX_RULES_CHARS]
+                    + f'\n… (cut; read {name} for the rest)')
+        return f'({name})\n{text}' if text else ''
+    return ''
+
+
 # --- render / slice ----------------------------------------------------------
 
 def estimate_tokens(text: str) -> int:

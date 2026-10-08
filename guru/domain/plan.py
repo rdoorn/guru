@@ -96,6 +96,10 @@ COVERAGE_MIN_CONCERNS = 2
 # share one. Soft problems: re-asked once, then the plan runs.
 DELIVERABLE_KINDS = ('build', 'refactor', 'docs')
 MAX_DELIVERABLES = 3
+# Kinds that report in their answer and own no files (eval 88eda59e9b79:
+# an explain task told to write a report file wrote nothing — it had no
+# write tools — and a later round was spent writing the file instead).
+REPORTING_KINDS = ('explain', 'review')
 _COORDINATOR_RE = re.compile(r'(?:\band\b|[,&;.?!\n])', re.IGNORECASE)
 
 # --- the texts the loop and the handler exchange with the model ------------
@@ -431,9 +435,11 @@ def ownership_problems(plan: Plan) -> list[str]:
     out: list[str] = []
     owner: dict[str, int] = {}
     for i, t in enumerate(plan.tasks, 1):
-        if t.deliverables and toolpolicy.for_kind(t.kind):
-            out.append(f'task {i} ({t.kind}) is read-only and cannot own'
-                       ' deliverables: drop them or make it a writing task')
+        if t.deliverables and (t.kind in REPORTING_KINDS
+                               or toolpolicy.for_kind(t.kind)):
+            out.append(f'task {i} ({t.kind}) reports in its answer and'
+                       ' owns no files: drop the deliverables or make it a'
+                       ' writing task')
         for path in t.deliverables:
             if path.endswith('/'):
                 out.append(f'task {i}: deliverable {path} is a directory:'
