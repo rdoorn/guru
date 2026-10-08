@@ -61,8 +61,8 @@ from rich.console import Console
 from guru import config, log, session, ui
 from guru.agents import Agent, AgentManager
 from guru.domain import brief as _brief
-from guru.domain import (conversation, decisions, ledger, plan, policy,
-                         routing, spend, tools)
+from guru.domain import (claims, conversation, decisions, ledger, plan,
+                         policy, routing, spend, tools)
 from guru.domain.brief import Brief
 from guru.repositories import briefs
 from guru.repositories import settings as routing_settings
@@ -1134,11 +1134,14 @@ class Orchestrator:
                      ' after one re-ask', '; '.join(
                          verdict.missing + verdict.undersplit
                          + verdict.ownership))
+        span = messages[conversation.request_start(messages):]
         if verdict.plan.outcome == 'answer':
-            return plan.ANSWER_ACK
-        rounds = plan.delegations_in(
-            messages[conversation.request_start(messages):])
-        if rounds >= plan.MAX_DELEGATE_ROUNDS:
+            return self._checked_answer(request, verdict.plan.answer,
+                                        followup, span)
+        rounds = plan.delegations_in(span)
+        # A failed answer check earns one more round to finish the work.
+        extra = 1 if claims.already_checked(span) else 0
+        if rounds >= plan.MAX_DELEGATE_ROUNDS + extra:
             log.info('plan: delegate refused after %d rounds for one'
                      ' request', rounds)
             return plan.delegate_cap_text(rounds)
@@ -1149,6 +1152,23 @@ class Orchestrator:
             return plan.refused_text(refusal)
         caller_state.turn_waiting = True
         return plan.delegated_text(titles, verdict.plan.tasks)
+
+    def _checked_answer(self, request: str, answer: str, followup: bool,
+                        span: list) -> str:
+        """The verdict on a controller's answer: delivered, or — once per
+        request, when it answers after delegating — sent back with the
+        problems the answer check found (``guru.domain.claims``)."""
+        if (not followup or not answer or not plan.delegations_in(span)
+                or claims.already_checked(span)):
+            return plan.ANSWER_ACK
+        problems = claims.run(request, answer)
+        if not problems:
+            return plan.ANSWER_ACK
+        log.info('answer check: %d problem(s): %s', len(problems),
+                 '; '.join(problems))
+        ui.console.print(f"[dim yellow]\\[CHECK][/dim yellow] answer vs"
+                         f" work: {len(problems)} problem(s); sent back")
+        return claims.problems_text(problems)
 
     def plan(self, args: dict) -> str:
         return self.do_plan(session.current(), args)

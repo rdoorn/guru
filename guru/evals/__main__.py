@@ -582,6 +582,26 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    home = Path(args.home).expanduser() if args.home else None
+    try:
+        res = runner.verify(args.ref, home=home)
+    except (ValueError, OSError) as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+    rows = [[name, 'PASS' if ok else 'FAIL',
+             (tail.splitlines() or [''])[-1][:90]]
+            for name, (ok, tail) in res.checks.items()]
+    print(_table(['check', 'result', 'last line'], rows))
+    print(f'home: {res.home}')
+    if res.home_files:
+        print('written to that home: ' + ', '.join(res.home_files[:20]))
+    for name, (ok, tail) in res.checks.items():
+        if not ok:
+            print(f'\n--- {name} ---\n{tail}')
+    return 0 if res.passed else 1
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog='python -m guru.evals',
@@ -710,6 +730,15 @@ def _parser() -> argparse.ArgumentParser:
     list_p.add_argument('--cases-dir', default=str(cases.CASES_DIR),
                         help=argparse.SUPPRESS)
     list_p.set_defaults(func=_cmd_list)
+
+    ver_p = sub.add_parser(
+        'verify', help="run a branch's flake8, mypy and pytest in a copy,"
+                       ' with HOME contained ([evals] home)')
+    ver_p.add_argument('ref', help='branch, tag or commit of this repo')
+    ver_p.add_argument('--home', default='',
+                       help='root of the per-run HOME (default: [evals]'
+                            ' home, else ~/.guru-evals)')
+    ver_p.set_defaults(func=_cmd_verify)
     return p
 
 

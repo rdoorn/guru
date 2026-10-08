@@ -274,3 +274,13 @@ class TestFixtureHomeClean:
         r = one(e, obs(fixture_home_files=['.guru/usage.db', '.guru/x']))
         assert not r.passed
         assert r.detail == "tests wrote to HOME: ['.guru/usage.db']"
+
+
+class TestFixtureLintPass:
+    def test_pass_and_fail(self) -> None:
+        e = Expect(fixture_lint_pass=True)
+        assert one(e, obs(fixture_lint_pass=True)).passed
+        r = one(e, obs(fixture_lint_pass=False,
+                       fixture_lint_tail="flake8: F401 'os' unused"))
+        assert not r.passed and "F401 'os' unused" in r.detail
+        assert not one(e, obs(fixture_lint_pass=None)).passed

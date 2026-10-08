@@ -188,8 +188,17 @@ PRICING_OVERRIDES: dict = {}
 #   model = "Ollama|qwen3:14b"
 #   num_ctx = 8192
 # ``python -m guru.evals run --model/--num-ctx`` override both.
+# ``[evals] home`` is the root under which ``python -m guru.evals verify``
+# makes a fresh HOME for each candidate branch's checks, so nothing they
+# write lands in the real ``~/.guru``; '' = ``~/.guru-evals``.
 EVALS_MODEL = ''
 EVALS_NUM_CTX = 8192
+EVALS_HOME = ''
+
+# The answer check (guru.domain.claims): the controller's answer to work
+# it delegated is compared with the changes before the user sees it.
+# settings.toml ``[decisions] answer_check = false`` turns it off.
+ANSWER_CHECK = True
 
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
@@ -600,7 +609,7 @@ def _apply_settings() -> None:
     """Apply settings.toml overrides (retention, tools, sampling, bench,
     decisions, ledger, pricing, evals)."""
     global WEB_SUMMARIZE_OVER_CHARS, OUTLINE_FILE_OVER_CHARS
-    global EVALS_MODEL, EVALS_NUM_CTX
+    global EVALS_MODEL, EVALS_NUM_CTX, EVALS_HOME
     global PREACTIVATE_TOOLS, SAMPLING, SAMPLING_PER_MODEL
     global BENCH_MODEL_TIMEOUT, FLAT_TOOLS
     global PROC_TIMEOUT_S, PROC_CPU_S, PROC_MEM_MB, PROC_FSIZE_MB, PROC_OUT_KB
@@ -644,6 +653,8 @@ def _apply_settings() -> None:
     except (TypeError, ValueError):
         pass
     dec = settings_section('decisions')
+    global ANSWER_CHECK
+    ANSWER_CHECK = bool(dec.get('answer_check', True))
     mode = str(dec.get('mode', DECISIONS_MODE))
     if mode not in DECISIONS_MODES:
         log.info('ignoring unknown [decisions] mode %r; expected one of %s',
@@ -695,6 +706,9 @@ def _apply_settings() -> None:
     if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) \
             and num_ctx >= 0:
         EVALS_NUM_CTX = num_ctx
+    home = ev.get('home', EVALS_HOME)
+    if isinstance(home, str):
+        EVALS_HOME = home.strip()
     ledger = settings_section('ledger')
     LEDGER_ENABLED = bool(ledger.get('enabled', True))
     LEDGER_TURN_LINE = bool(ledger.get('turn_line', True))

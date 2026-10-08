@@ -3297,3 +3297,73 @@ def test_fixture_home_files_lists_what_tests_left(tmp_path: Path) -> None:
     assert runner.fixture_home_files(copy) == ['.guru/usage.db']
     env = runner._fixture_env(copy)
     assert Path(env['HOME']) == home          # the same private HOME
+
+
+class TestVerify:
+    """``verify``: a candidate's checks in a copy, HOME contained."""
+
+    def _repo(self, tmp_path: Path, test_body: str) -> Path:
+        repo = tmp_path / 'cand'
+        (repo / 'tests').mkdir(parents=True)
+        (repo / 'tests' / 'test_x.py').write_text(test_body)
+        _git(repo, 'init', '-q')
+        _git(repo, 'add', '.')
+        _git(repo, '-c', 'user.name=t', '-c', 'user.email=t@t',
+             'commit', '-qm', 'c')
+        return repo
+
+    def test_writes_land_in_the_contained_home(self, tmp_path) -> None:
+        repo = self._repo(tmp_path, (
+            'import os\n'
+            'import pathlib\n'
+            '\n'
+            '\n'
+            'def test_writes_home():\n'
+            '    d = pathlib.Path(os.environ["HOME"]) / ".guru"\n'
+            '    d.mkdir(exist_ok=True)\n'
+            '    (d / "usage.db").write_text("x")\n'))
+        root = tmp_path / 'contained'
+        res = runner.verify('HEAD', repo=repo, home=root)
+        assert res.passed and set(res.checks) == {'flake8', 'pytest'}
+        assert res.home_files == ['.guru/usage.db']
+        run_home = Path(res.home)
+        assert run_home.parent == root and run_home.name.startswith(
+            'verify-')
+        assert (run_home / '.guru' / 'usage.db').is_file()
+        # The next run gets a fresh HOME: nothing carried over.
+        again = runner.verify('HEAD', repo=repo, home=root)
+        assert again.home != res.home
+
+    def test_a_failing_test_fails(self, tmp_path) -> None:
+        repo = self._repo(tmp_path, 'def test_no():\n    assert False\n')
+        res = runner.verify('HEAD', repo=repo, home=tmp_path / 'h')
+        assert not res.passed and res.home_files == []
+
+    def test_default_home_is_the_setting(self, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'EVALS_HOME', '~/elsewhere')
+        assert runner.contained_home() == Path('~/elsewhere').expanduser()
+        monkeypatch.setattr(config, 'EVALS_HOME', '')
+        assert runner.contained_home() == Path('~/.guru-evals').expanduser()
+
+
+def test_fixture_lint_result_runs_flake8_and_mypy(tmp_path: Path) -> None:
+    copy = tmp_path / 'c'
+    (copy / 'guru').mkdir(parents=True)
+    (copy / 'guru' / '__init__.py').write_text('import os\n')
+    ok, tail = runner.fixture_lint_result(copy)
+    assert not ok and 'F401' in tail
+    (copy / 'guru' / '__init__.py').write_text('X = 1\n')
+    assert runner.fixture_lint_result(copy)[0] is True
+    bare = tmp_path / 'bare'                 # no lint or typecheck targets
+    bare.mkdir()
+    assert runner.fixture_lint_result(bare) == (True, '')
+
+
+def test_a_provider_outage_is_named_not_an_empty_answer() -> None:
+    main = _agent('main', [{'role': 'user', 'content': 'p'}])
+    main.state.last_error = "RateLimitError('429 budget_exceeded')"
+    obs = runner._observe([main], 1.0, False, [], None, '')
+    assert obs.error == "provider error: RateLimitError('429 budget_exceeded')"
+    quiet = _agent('main', [{'role': 'user', 'content': 'p'}])
+    assert runner._observe([quiet], 1.0, False, [], None, '').error == \
+        'empty answer'

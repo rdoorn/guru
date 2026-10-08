@@ -6,7 +6,7 @@ import math
 from guru import session, ui
 from guru.adapters import turn
 from guru.adapters.base import FORCE_ANY, FORCE_PLAN
-from guru.domain import ledger, plan, tools
+from guru.domain import conversation, ledger, plan, tools
 
 
 class Forcing:
@@ -1018,3 +1018,50 @@ class TestVerifyBeforeFinal:
         s.script([self._write(), self._final('ok')])
         s.run(fake_repo)
         assert s.rendered == ['ok']
+
+
+class TestAnswerCheckInTheLoop:
+    """A controller answer sent back by the answer check: one more round,
+    and the human request stays the request (tool and text paths)."""
+
+    REQUEST = 'add a usage store and wire it in'
+
+    def _handler(self):
+        from guru.domain import claims
+        verdicts = iter([claims.problems_text(['cli.py not changed']),
+                         plan.ANSWER_ACK])
+        return lambda args: next(verdicts)
+
+    def test_tool_path(self, monkeypatch, fake_repo) -> None:
+        from guru.domain import claims
+        s = Scripted(monkeypatch, [], adapter=Forcing(), controller=True,
+                     request=self.REQUEST, handler=self._handler())
+        s.script([lambda: _assistant('', [('plan', {
+            'outcome': 'answer', 'answer': 'Wired in.'}, 'p1')]),
+            lambda: _assistant('', [('plan', {
+                'outcome': 'answer', 'answer': 'Not wired: cli.py.'},
+                'p2')])])
+        s.run(fake_repo)
+        assert s.rendered == ['Not wired: cli.py.']
+        assert conversation.request_in(session.messages) == self.REQUEST
+        assert claims.already_checked(session.messages)
+
+    def test_text_path(self, monkeypatch, fake_repo) -> None:
+        from guru.domain import claims
+        s = Scripted(monkeypatch, [], adapter=Lenient(), controller=True,
+                     request=self.REQUEST, handler=self._handler())
+        s.script([lambda: _assistant(
+            '{"outcome": "answer", "answer": "Wired in."}'),
+            lambda: _assistant(
+                '{"outcome": "answer", "answer": "Not wired: cli.py."}')])
+        s.run(fake_repo)
+        assert s.rendered == ['Not wired: cli.py.']
+        # The problems came back as a user message: a loop nudge, never
+        # the request, and it marks the request as checked.
+        sent = [m for m in session.messages if m.get('role') == 'user'
+                and m['content'].startswith(claims.PREFIX)]
+        assert len(sent) == 1
+        assert conversation.is_nudge(sent[0]['content'])
+        assert conversation.request_in(session.messages) == self.REQUEST
+        assert conversation.request_start(session.messages) == 1
+        assert claims.already_checked(session.messages)

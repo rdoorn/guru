@@ -373,3 +373,92 @@ class TestMailboxSynthesisViaPlan:
             == {len('agent1 says hi')}
         assert all(t['struggle']['protocol_violation'] == 0
                    for t in tasks if t['status'] == 'done')
+
+
+class TestAnswerCheck:
+    """The controller's answer after delegating is checked against the
+    work once per request; problems send it back with one more delegate
+    round to finish the work."""
+
+    class _Checker:
+        def __init__(self, problems):
+            self.problems, self.calls = problems, []
+
+        def check(self, request, answer):
+            self.calls.append((request, answer))
+            return list(self.problems)
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        from guru.domain import claims
+        yield
+        claims.set_checker(None)
+
+    def _install(self, problems):
+        from guru.domain import claims
+        c = self._Checker(problems)
+        claims.set_checker(c)
+        return c
+
+    _ANSWER = {'outcome': 'answer', 'answer': 'Done: store wired in.'}
+
+    def _history(self, rounds):
+        return TestDoPlan()._delegated_history(rounds)
+
+    def test_problems_send_the_answer_back(self, monkeypatch,
+                                           fake_repo) -> None:
+        from guru.domain import claims
+        c = self._install(['cli.py does not install the store'])
+        o, main = _orch(monkeypatch, messages=self._history(1))
+        out = o.do_plan(main.state, self._ANSWER)
+        assert out.startswith(claims.PREFIX + 'not delivered.')
+        assert '- cli.py does not install the store' in out
+        assert c.calls == [(_REQUEST, 'Done: store wired in.')]
+
+    def test_checked_once_per_request(self, monkeypatch, fake_repo) -> None:
+        from guru.domain import claims
+        c = self._install(['still wrong'])
+        msgs = self._history(1) + [
+            {'role': 'assistant', 'content': ''},
+            {'role': 'tool', 'tool_name': 'plan',
+             'content': claims.problems_text(['still wrong'])}]
+        o, main = _orch(monkeypatch, messages=msgs)
+        assert o.do_plan(main.state, self._ANSWER) == plan.ANSWER_ACK
+        assert c.calls == []
+
+    def test_one_more_delegate_round_after_a_failed_check(
+            self, monkeypatch, fake_repo) -> None:
+        from guru.domain import claims
+        msgs = self._history(plan.MAX_DELEGATE_ROUNDS) + [
+            {'role': 'assistant', 'content': ''},
+            {'role': 'tool', 'tool_name': 'plan',
+             'content': claims.problems_text(['x'])}]
+        o, main = _orch(monkeypatch, messages=msgs)
+        assert o.do_plan(main.state, _TWO).startswith(plan.DELEGATED_PREFIX)
+
+    def test_no_check_without_delegation_or_checker(
+            self, monkeypatch, fake_repo) -> None:
+        c = self._install(['p'])
+        o, main = _orch(monkeypatch)              # first turn, no delegation
+        assert o.do_plan(main.state, self._ANSWER) == plan.ANSWER_ACK
+        assert c.calls == []
+        from guru.domain import claims
+        claims.set_checker(None)
+        o, main = _orch(monkeypatch, messages=self._history(1))
+        assert o.do_plan(main.state, self._ANSWER) == plan.ANSWER_ACK
+
+    def test_a_clean_check_delivers(self, monkeypatch, fake_repo) -> None:
+        self._install([])
+        o, main = _orch(monkeypatch, messages=self._history(1))
+        assert o.do_plan(main.state, self._ANSWER) == plan.ANSWER_ACK
+
+    def test_a_crashing_checker_delivers(self, monkeypatch,
+                                         fake_repo) -> None:
+        from guru.domain import claims
+
+        class Boom:
+            def check(self, request, answer):
+                raise RuntimeError('provider down')
+        claims.set_checker(Boom())
+        o, main = _orch(monkeypatch, messages=self._history(1))
+        assert o.do_plan(main.state, self._ANSWER) == plan.ANSWER_ACK

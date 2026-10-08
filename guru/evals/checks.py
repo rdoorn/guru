@@ -50,6 +50,10 @@ class Observed:
     diff_path: str = ''
     # Files the fixture's tests wrote into their private HOME.
     fixture_home_files: list[str] = field(default_factory=list)
+    # flake8 + mypy over the copy (None: not checked) and, on failure, the
+    # last lines of their output.
+    fixture_lint_pass: Optional[bool] = None
+    fixture_lint_tail: str = ''
 
 
 @dataclass
@@ -231,6 +235,13 @@ def _task_status_none(e: Expect, o: Observed) -> CheckResult:
                        f'{_fmt(e.task_status_none)}')
 
 
+def _fixture_lint_pass(e: Expect, o: Observed) -> CheckResult:
+    ok = o.fixture_lint_pass is e.fixture_lint_pass
+    return CheckResult('fixture_lint_pass', ok, '' if ok else
+                       f'lint/typecheck {o.fixture_lint_pass}: '
+                       + o.fixture_lint_tail[-300:])
+
+
 def _fixture_home_clean(e: Expect, o: Observed) -> CheckResult:
     new = [f for f in o.fixture_home_files
            if not any(fnmatch.fnmatch(f, g) for g in e.fixture_home_allow)]
@@ -268,6 +279,8 @@ _CHECKS: list[tuple[str, Callable[[Expect], bool], _Check]] = [
      _task_status_none),
     ('fixture_home_clean', lambda e: e.fixture_home_clean,
      _fixture_home_clean),
+    ('fixture_lint_pass', lambda e: e.fixture_lint_pass is not None,
+     _fixture_lint_pass),
 ]
 
 

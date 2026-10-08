@@ -33,6 +33,8 @@ max_seconds = 2400
 # tested a store nothing installed; the rubric judge did not notice.
 files_changed_any = ["guru/cli.py"]
 fixture_tests_pass = true
+# The project's own gate (AGENTS.md: flake8 and mypy clean).
+fixture_lint_pass = true
 # The new code's tests must not write to the user's home; the allow-list is
 # what 9875ff4's own suite already leaves there (measured 2026-10-08).
 fixture_home_clean = true

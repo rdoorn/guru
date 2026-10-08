@@ -445,3 +445,12 @@ class TestProcLimitSettings:
     def test_tools_policy_path_under_project_dir(self) -> None:
         assert config.TOOLS_POLICY_PATH == (
             config.PROJECT_GURU_DIR / 'tools.toml')
+
+
+def test_evals_home_setting(tmp_path, monkeypatch) -> None:
+    path = tmp_path / 'settings.toml'
+    path.write_text('[evals]\nhome = " ~/loop-home "\n')
+    monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', path)
+    monkeypatch.setattr(config, 'EVALS_HOME', '')
+    config._apply_settings()
+    assert config.EVALS_HOME == '~/loop-home'

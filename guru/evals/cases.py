@@ -70,6 +70,8 @@ class Expect:
     # pinned snapshot's own suite already writes there).
     fixture_home_clean: bool = False
     fixture_home_allow: list[str] = field(default_factory=list)
+    # flake8 (guru, tests) and mypy (guru) pass in the copy afterwards.
+    fixture_lint_pass: Optional[bool] = None
     rubric: str = ''
 
 
@@ -132,6 +134,7 @@ _EXPECT_TYPES: dict[str, type] = {
     'fixture_tests_pass': bool, 'gate_verdict': str, 'gate_verdict_any': list,
     'max_cost_usd': float, 'task_status_none': list,
     'fixture_home_clean': bool, 'fixture_home_allow': list,
+    'fixture_lint_pass': bool,
 }
 _EXPECT_SECTIONS = ('behaviour', 'content', 'rubric')
 assert set(_EXPECT_TYPES) | {'rubric'} == {f.name for f in fields(Expect)}

@@ -13,8 +13,9 @@ from guru.adapters.base import Adapter
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
-from guru.domain import ledger, policy, tools
+from guru.domain import claims, ledger, policy, tools
 from guru.judges import quiet
+from guru.judges.claims import ClaimsReviewer
 from guru.repositories import settings as routing_settings
 from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
@@ -882,6 +883,10 @@ def _start(args: argparse.Namespace,
 
     with progress.step('judges') as step:
         judges.set_registry(REGISTRY, routing)   # llm: judges, gate reviewer
+        # The controller's answer to delegated work is checked against the
+        # changes once per request (guru.domain.claims).
+        claims.set_checker(ClaimsReviewer() if config.ANSWER_CHECK
+                           else None)
         installed = judges.install()
         if installed:
             log.info('shadow judges: %s', installed)
