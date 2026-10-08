@@ -149,9 +149,16 @@ for 40 rounds, wrote nothing, and reported `done`):
   alone so the prompt cache holds). Both notes count in the
   `budget_nudges` struggle column. Workers only (a sub-agent running a
   task); the main agent keeps the plain cap.
-- **Verify before reporting**: a worker that changed files and ran no
-  `run_tests` (or `sandbox_run`/`sandbox_python`) since has its first
-  `final_answer` sent back once (`VERIFY_REFUSAL`) while rounds remain.
+- **Whole-suite test runs**: `run_tests` with no target and no `-k` gets
+  at least `SUITE_TIMEOUT_S = 600` seconds of wall clock and CPU
+  (`guru/config.py`; the `[tools.limits]` defaults stay 120 s for every
+  other run); a timed-out whole suite tells the worker to run the tests
+  for what it changed.
+- **Verify before reporting**: a worker that changed files and has not
+  run `run_tests` (or `sandbox_run`/`sandbox_python`) and — when the
+  project's `lint` tool is enabled — `lint` since has its first
+  `final_answer` sent back once, naming what is missing, while rounds
+  remain.
 - **Project rules**: the first of `AGENTS.md`, `CLAUDE.md`,
   `.guru/rules.md` at the project root (`brief.RULES_FILES`, cut at
   `MAX_RULES_CHARS = 6000`) is read fresh into the controller's and every

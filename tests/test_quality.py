@@ -301,3 +301,37 @@ class TestLint:
     def test_denied_and_missing_path(self, project, tmp_path) -> None:
         assert 'denied' in quality.lint(str(tmp_path.parent / 'zz'))
         assert quality.lint('nope').startswith('No such path')
+
+
+class TestSuiteLimits:
+    """A whole-suite run gets a suite-sized budget; a targeted one keeps
+    the default."""
+
+    def test_whole_suite_gets_the_suite_budget(self, project,
+                                               monkeypatch) -> None:
+        seen: list = []
+        real = quality.procs.run
+
+        def spy(argv, root, limits):
+            seen.append((argv, limits))
+            return real(argv, root, limits)
+        monkeypatch.setattr(quality.procs, 'run', spy)
+        (project / 'test_a.py').write_text('def test_ok():\n    pass\n')
+        quality.run_tests()
+        quality.run_tests('test_a.py')
+        quality.run_tests(k='ok')
+        whole, target, filtered = (lim for _, lim in seen)
+        assert whole.timeout_s == whole.cpu_s == config.SUITE_TIMEOUT_S
+        assert target.timeout_s == filtered.timeout_s == \
+            config.PROC_TIMEOUT_S
+
+    def test_a_timed_out_suite_says_run_targeted_tests(
+            self, project, monkeypatch) -> None:
+        monkeypatch.setattr(config, 'SUITE_TIMEOUT_S', 1)
+        tools.set_policy(tools.ToolsPolicy(limits={'timeout_s': 1,
+                                                   'cpu_s': 1}))
+        (project / 'test_a.py').write_text(
+            'import time\n\n\ndef test_slow():\n    time.sleep(30)\n')
+        out = quality.run_tests()
+        assert out.startswith('timed out after 1s;')
+        assert 'run the tests for what you changed' in out

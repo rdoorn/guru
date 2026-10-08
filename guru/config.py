@@ -104,6 +104,11 @@ PROC_MEM_MB = 2048
 PROC_FSIZE_MB = 64
 PROC_OUT_KB = 256
 PROC_LIMIT_KEYS = ('timeout_s', 'cpu_s', 'mem_mb', 'fsize_mb', 'out_kb')
+# A whole-suite run_tests (no target, no -k) gets at least this much wall
+# clock and CPU: guru's own suite takes ~3 min and the 120 s default cut it
+# off every time, so verify workers re-ran it in pieces for ten minutes
+# (evals 4e6dcda17b7b, 7a03ce75026d).
+SUITE_TIMEOUT_S = 600
 
 # Sampling overrides applied on top of a model's own modelfile defaults (the
 # authoritative per-model source). Empty by default so each model keeps its

@@ -1,9 +1,38 @@
 """Shared test helpers: the in-memory ledger repository, a per-test reset
-of the default session's ledger accumulators and an isolated skill catalog."""
-import pytest
+of the default session's ledger accumulators and an isolated skill catalog.
 
-from guru import config, session, skills
-from guru.domain import ledger
+HOME points at a throwaway directory (under ``~/.guru-evals``) for the
+whole run, set before guru is imported (``config`` resolves ``~/.guru`` at
+import): no test, and no subprocess a test starts, writes to the user's
+real home (``GURU.md``, ``adapters.toml``, ``guru.log`` and the matplotlib
+font cache did).
+"""
+import atexit
+import os
+import shutil
+import tempfile
+
+_REAL_HOME = os.path.expanduser('~')
+# The container runtime keeps its client config and VM sockets under the
+# real home; the sandbox tests read them (never write), so they stay there.
+for _var, _dir in (('DOCKER_CONFIG', '.docker'), ('COLIMA_HOME', '.colima')):
+    if _var not in os.environ and os.path.isdir(
+            os.path.join(_REAL_HOME, _dir)):
+        os.environ[_var] = os.path.join(_REAL_HOME, _dir)
+# Under the real home (Colima shares only that with its VM, and the sandbox
+# tests mount their copies from HOME) but outside ~/.guru, next to the
+# contained HOMEs of ``python -m guru.evals verify``; removed at exit.
+_CONTAINED = os.path.join(_REAL_HOME, '.guru-evals')
+os.makedirs(_CONTAINED, exist_ok=True)
+_TEST_HOME = tempfile.mkdtemp(prefix='test-home-', dir=_CONTAINED)
+os.environ['HOME'] = _TEST_HOME
+os.environ['MPLCONFIGDIR'] = os.path.join(_TEST_HOME, '.matplotlib')
+atexit.register(shutil.rmtree, _TEST_HOME, True)
+
+import pytest  # noqa: E402
+
+from guru import config, session, skills  # noqa: E402
+from guru.domain import ledger  # noqa: E402
 
 
 @pytest.fixture(scope='session', autouse=True)

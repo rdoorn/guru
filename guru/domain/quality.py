@@ -14,12 +14,13 @@ gated by the read allow-list, not the write gates. Stdlib only.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import sys
 from pathlib import Path
 from typing import Optional
 
-from guru import log
+from guru import config, log
 from guru.domain import files, procs, toolpolicy
 
 _MAX_FAILURES = 10          # failing ids listed in the run_tests digest
@@ -46,6 +47,15 @@ _available: dict = {}
 
 def _limits() -> procs.Limits:
     return procs.Limits.from_dict(toolpolicy.active_policy().limits)
+
+
+def _suite_limits() -> procs.Limits:
+    """The limits for a whole-suite run: wall clock and CPU raised to at
+    least ``config.SUITE_TIMEOUT_S``."""
+    lim = _limits()
+    return dataclasses.replace(
+        lim, timeout_s=max(lim.timeout_s, config.SUITE_TIMEOUT_S),
+        cpu_s=max(lim.cpu_s, config.SUITE_TIMEOUT_S))
 
 
 def _log_output(verb: str, res: procs.ProcResult) -> None:
@@ -300,15 +310,20 @@ def run_tests(target: str = '', k: str = '', maxfail: int = 1,
     if rel:
         suffix = f'::{node}' if node and runner == 'pytest' else ''
         argv += ['--', rel + suffix]
-    res = procs.run(argv, root, _limits())
+    whole = not rel and not k
+    limits = _suite_limits() if whole else _limits()
+    res = procs.run(argv, root, limits)
     if res.denied:
         return f"Refused: {res.denied}"
     _log_output('run_tests', res)
     if res.returncode == -1 and not res.timed_out:
         return f"Cannot run {runner}: {res.stderr.strip()[:300]}"
     if res.timed_out:
-        return (f"timed out after {_limits().timeout_s}s;"
-                f" {_tests_ran(res.stdout)} tests ran")
+        hint = (' The whole suite is slower than that: run the tests for'
+                ' what you changed (target or k) instead of re-running it.'
+                if whole else ' Narrow the target or k.')
+        return (f"timed out after {limits.timeout_s}s;"
+                f" {_tests_ran(res.stdout)} tests ran.{hint}")
     if 'No module named' in res.stderr and not res.stdout.strip():
         return f"Cannot run {runner}: {res.stderr.strip()[:300]}"
     if runner == 'pytest':

@@ -560,10 +560,11 @@ class TestRoundBudget:
             ('read_file', {'path': 'a.py'}, 'r1'),
             ('write_file', {'path': 'b.py', 'content': 'x'}, 'w1')]),
             lambda: _assistant('', [('read_file', {'path': 'c.py'}, 'r2')]),
-            lambda: _assistant('', [('run_tests', {}, 't')]),
+            lambda: _assistant('', [('run_tests', {}, 't'),
+                                    ('lint', {}, 'l')]),
             self._final()])
         s.run()
-        read, write, read2, _tests = self._results()
+        read, write, read2, _tests, _lint = self._results()
         assert read.endswith('[guru] round 1/40 · files changed: 0')
         assert '[guru]' not in write
         assert read2.endswith('[guru] round 2/40 · files changed: 1')
@@ -599,7 +600,8 @@ class TestRoundBudget:
             + [lambda i=i: _assistant('', [('read_file',
                                             {'path': f'{i}.py'}, 'r')])
                for i in range(25)]
-            + [lambda: _assistant('', [('run_tests', {}, 't')]),
+            + [lambda: _assistant('', [('run_tests', {}, 't'),
+                                       ('lint', {}, 'l')]),
                self._final()])
         s.run()
         assert all(turn.CHECKPOINT_TEXT not in r for r in self._results())
@@ -683,10 +685,11 @@ class TestRoundBudget:
                      'path': 'a.py', 'content': 'x'}, 'w')])]
                  + [lambda: _assistant('', [('read_file',
                                              {'path': 'z.py'}, 'r')]),
-                    lambda: _assistant('', [('run_tests', {}, 't')]),
+                    lambda: _assistant('', [('run_tests', {}, 't'),
+                                            ('lint', {}, 'l')]),
                     self._final()])
         s.run()
-        assert not self._results()[-2].startswith(turn.READ_REFUSAL)
+        assert not self._results()[-3].startswith(turn.READ_REFUSAL)
 
     def test_reads_stay_open_for_a_reading_kind(self, monkeypatch) -> None:
         s = self._worker(monkeypatch, kind='explain')
@@ -976,7 +979,8 @@ class TestVerifyBeforeFinal:
     def test_untested_change_is_sent_back_once(self, monkeypatch) -> None:
         s = self._worker(monkeypatch)
         s.script([self._write(), self._final('first'),
-                  lambda: _assistant('', [('run_tests', {}, 't')]),
+                  lambda: _assistant('', [('run_tests', {}, 't'),
+                                          ('lint', {}, 'l')]),
                   self._final('tested')])
         s.run()
         assert s.rendered == ['tested']
@@ -994,7 +998,8 @@ class TestVerifyBeforeFinal:
     def test_tested_change_goes_through(self, monkeypatch) -> None:
         s = self._worker(monkeypatch)
         s.script([self._write(),
-                  lambda: _assistant('', [('run_tests', {}, 't')]),
+                  lambda: _assistant('', [('run_tests', {}, 't'),
+                                          ('lint', {}, 'l')]),
                   self._final('ok')])
         s.run()
         assert s.rendered == ['ok']
@@ -1002,8 +1007,40 @@ class TestVerifyBeforeFinal:
     def test_tests_in_the_same_round_count(self, monkeypatch) -> None:
         s = self._worker(monkeypatch)
         s.script([self._write(), lambda: _assistant('', [
-            ('run_tests', {}, 't'), ('final_answer', {'text': 'ok'}, 'f')])])
+            ('run_tests', {}, 't'), ('lint', {}, 'l'),
+            ('final_answer', {'text': 'ok'}, 'f')])])
         s.run()
+        assert s.rendered == ['ok']
+
+    def test_tests_without_lint_are_sent_back_for_lint(
+            self, monkeypatch) -> None:
+        s = self._worker(monkeypatch)
+        s.script([self._write(),
+                  lambda: _assistant('', [('run_tests', {}, 't')]),
+                  self._final('first'),
+                  lambda: _assistant('', [('lint', {}, 'l')]),
+                  self._final('linted')])
+        s.run()
+        assert s.rendered == ['linted']
+        sent = [m['content'] for m in session.messages
+                if m.get('tool_name') == 'final_answer']
+        assert sent[0].startswith(turn.VERIFY_REFUSAL + 'lint since.')
+
+    def test_neither_names_both(self) -> None:
+        text = turn.verify_refusal(frozenset({'tests', 'lint'}))
+        assert text.startswith(turn.VERIFY_REFUSAL + 'tests or lint since.')
+        assert 'run_tests' in text and 'lint on the files' in text
+
+    def test_lint_not_required_when_disabled(self, monkeypatch) -> None:
+        tools.set_policy(tools.ToolsPolicy(disabled={'lint'}))
+        try:
+            s = self._worker(monkeypatch)
+            s.script([self._write(),
+                      lambda: _assistant('', [('run_tests', {}, 't')]),
+                      self._final('ok')])
+            s.run()
+        finally:
+            tools.set_policy(None)
         assert s.rendered == ['ok']
 
     def test_no_change_no_check(self, monkeypatch) -> None:

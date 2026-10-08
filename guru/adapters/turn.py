@@ -132,11 +132,28 @@ READS_CLOSED_TEXT = (
 # A worker's first final_answer after changing files with no test run
 # since is sent back once (eval 06075f330988: a build worker wrote the
 # store and its tests, ran only check_syntax, and a whole verify task had
-# to follow). VERIFY_TOOLS count as verification.
+# to follow). VERIFY_TOOLS count as testing; the project's ``lint`` tool
+# (when enabled) is required too — evals 3f228ce4ebad, c707b5d8e91e,
+# dc6ad49a1715 all shipped flake8 errors after their tests passed.
 VERIFY_TOOLS = frozenset(('run_tests', 'sandbox_run', 'sandbox_python'))
-VERIFY_REFUSAL = ('Not delivered: you changed files and ran no tests since.'
-                  ' Run run_tests on what you changed (the targeted tests'
-                  ' first), fix what fails, then call final_answer again.')
+LINT_TOOL = 'lint'
+VERIFY_REFUSAL = 'Not delivered: you changed files and ran no '
+
+
+def verify_refusal(missing: frozenset) -> str:
+    """The result of a final_answer sent back for ``missing`` checks
+    (``tests``, ``lint``); always starts with ``VERIFY_REFUSAL``."""
+    what = ' or '.join(n for n in ('tests', 'lint') if n in missing)
+    steps = []
+    if 'tests' in missing:
+        steps.append('run_tests on what you changed (the targeted tests'
+                     ' first)')
+    if 'lint' in missing:
+        steps.append('lint on the files you changed')
+    return (f"{VERIFY_REFUSAL}{what} since. Run {' and '.join(steps)},"
+            ' fix what they report, then call final_answer again.')
+
+
 READ_REFUSAL = ('Refused: reading is closed for this task until you change'
                 ' a file; this call did not run. Write now, or call'
                 ' final_answer with what blocks you.')
@@ -169,13 +186,17 @@ def tool_result(name: str, args: dict, duplicate: bool,
     the round's budget footer on the first result of the round
     (``session.round_note``, consumed here). ``execute`` defaults to
     ``tools.execute_tool`` (tests pass a stub)."""
-    if name in VERIFY_TOOLS:
-        session.verify_due = False      # tested earlier in this round
+    missing = session.verify_missing
+    if name in VERIFY_TOOLS:            # checked earlier in this round
+        missing = missing - {'tests'}
+    elif name == LINT_TOOL:
+        missing = missing - {'lint'}
+    session.verify_missing = missing
     if session.budget_spent and name != 'final_answer':
         content = BUDGET_REFUSAL
-    elif session.verify_due and name == 'final_answer':
-        session.verify_due = False      # sent back once per turn
-        content = VERIFY_REFUSAL
+    elif missing and name == 'final_answer':
+        session.verify_missing = frozenset()   # sent back once per turn
+        content = verify_refusal(missing)
     elif session.reads_closed and name in config.DELEGATION_READ_TOOLS:
         content = READ_REFUSAL
     elif duplicate:
@@ -378,7 +399,7 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     session.round_note = ''
     session.budget_spent = False
     session.reads_closed = False
-    session.verify_due = False
+    session.verify_missing = frozenset()
     if not session.task_id:
         # A sub-agent executing a task keeps the turn_id it inherited.
         session.turn_id = ledger.new_turn_id()
@@ -503,13 +524,13 @@ def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
                 session.round_note = budget.note(rounds, cap)
                 session.budget_spent = rounds > cap - HANDOFF_ROUNDS
                 session.reads_closed = budget.reads_closed(rounds, cap)
-                session.verify_due = budget.verify_due(rounds, cap)
+                session.verify_missing = budget.verify_missing(rounds, cap)
             before = len(session.messages)
             run_tools(pending)
             session.round_note = ''
             session.budget_spent = False
             session.reads_closed = False
-            session.verify_due = False
+            session.verify_missing = frozenset()
             budget.saw(session.messages[before:])
             _after_tools(rnd, turn0, before)
 
@@ -600,15 +621,22 @@ class _Budget:
         self.checkpointed = False
         self.last_called = False
         self.read_stop_noted = False
-        self.unverified = False         # changed files since the last test
+        self.untested = False           # changed files since the last test
+        self.unlinted = False           # ... since the last lint
         self.verify_asked = False
 
-    def verify_due(self, rounds: int, cap: int) -> bool:
-        """Whether a final_answer this round is sent back to verify: files
-        changed and untested since, not asked before, and rounds left to
-        run the tests."""
-        return (self.unverified and not self.verify_asked
-                and rounds < cap - HANDOFF_ROUNDS)
+    def verify_missing(self, rounds: int, cap: int) -> frozenset:
+        """The checks a final_answer this round is sent back for: tests
+        and (when the ``lint`` tool is enabled) lint not run since files
+        changed — once per turn, while rounds remain to run them."""
+        if self.verify_asked or rounds >= cap - HANDOFF_ROUNDS:
+            return frozenset()
+        missing = set()
+        if self.untested:
+            missing.add('tests')
+        if self.unlinted and tools.is_enabled(LINT_TOOL):
+            missing.add('lint')
+        return frozenset(missing)
 
     def _idle_writer(self) -> bool:
         """A writing task that has changed nothing (and is not editing a
@@ -630,11 +658,13 @@ class _Budget:
             args = m.get('tool_args')
             content = str(m.get('content', ''))
             for p in changed_paths(name, args, content):
-                self.unverified = True
+                self.untested = self.unlinted = True
                 if p not in self.changed:
                     self.changed.append(p)
             if name in VERIFY_TOOLS:
-                self.unverified = False
+                self.untested = False
+            if name == LINT_TOOL:
+                self.unlinted = False
             if (name == 'final_answer'
                     and content.startswith(VERIFY_REFUSAL)):
                 self.verify_asked = True
