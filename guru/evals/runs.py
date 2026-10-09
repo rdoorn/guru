@@ -120,8 +120,8 @@ class Run:
     # files from before this field load with 0).
     num_ctx: int = 0
     # Routing file stem the run used ('' = no routing, inert) and whether
-    # the main agent ran as a controller; older run files load with the
-    # defaults.
+    # the main agent ran as a controller (retired mode; kept so older run
+    # files load and label as before).
     routing: str = ''
     controller: bool = False
     # Judges the experiment file's [decisions] table installed for the run,

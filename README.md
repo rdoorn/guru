@@ -148,8 +148,8 @@ The same ledger holds a `decisions` stream: guru's small closed-form
 decisions — does this task need a security / architecture / reliability
 reviewer, is a fetched page a prompt-injection attempt — can be handed to a
 fast local judge alongside the built-in heuristic (the `stall` point is
-retired: the turn contract forces a tool call instead of judging a reply;
-its config keys are accepted and ignored). In `shadow` mode judges only *observe*: the heuristic still
+retired in favour of the turn loop's stall monitor; its config keys are
+accepted and ignored). In `shadow` mode judges only *observe*: the heuristic still
 decides, and both answers are logged so the first few hundred can be
 reviewed before any judge is trusted. In `active` mode the points listed
 under `[decisions.active]` take the judge's answer: the judge runs
@@ -175,7 +175,7 @@ labels_margin = 0.15            # active labels: judge's top tier must beat the
 stall = "ollama"                # small decoder, JSON-constrained answer
 panel = "encoder"               # zero-shot NLI encoder (needs the extra)
 injection = "injection"         # prompt-injection classifier (needs the extra)
-labels = "decide"               # the controller's kind/complexity labels
+labels = "decide"               # the lead's kind/complexity labels
 [decisions.active]              # active mode only: which points the judge decides
 stall = true
 labels = true
@@ -185,8 +185,8 @@ stall = 0.6
 
 One point acts on a judge's verdict: `labels`, a margin-gated
 *tie-breaker* for the complexity label
-a controller puts on a spawned task — the judge's tier routes the task
-only when it differs from the controller's and beats the runner-up by
+the lead puts on a spawned task — the judge's tier routes the task
+only when it differs from the lead's and beats the runner-up by
 `labels_margin` (0.15); the task row's `reason` then says
 `labels:judge override standard->hard (0.57 vs 0.33)`, and a judge that
 lost on margin leaves a row with `fallback_reason = "margin"` (the kind
@@ -236,6 +236,20 @@ files of the same agent to see what moved in the cached prefix; the
 `calls` ledger stream has the matching `cache_read` / `cache_write`
 counts.
 
+## Usage dashboard
+
+Every model call guru makes — adapter, model, tokens, cost, project and
+the request's topic — goes to a SQLite store at `~/.guru/usage.db` (file
+0600), shared by every guru process; sub-agents carry their request's
+topic, eval runs are marked `source = eval`. Each request gets a short
+topic label from the cheapest routed remote model in the background (the
+request text when none can be used). One guru among many serves a
+read-only dashboard on `http://127.0.0.1:7340` (`[dashboard] port`): the
+first to bind serves, the others show where it is and retry, taking over
+when it stops. `/dashboard` prints where it is served; `[ledger] usage_db
+= false` or `[dashboard] enabled = false` turn the parts off. Details in
+`docs/defaults.md` (Usage store and dashboard).
+
 ## Multi-agent
 
 guru runs a hybrid multi-agent UI: the main agent lives in the normal terminal
@@ -247,12 +261,12 @@ context and return only their conclusion, keeping the main context small.
 `Ctrl+N` spawns and views a new agent; `Shift+Right`/`Shift+Left` move between
 viewers.
 
-## Routing (controller and ladder)
+## Routing (the lead and the ladder)
 
 Sub-agent tasks are *routed*: the model that runs a spawned task is picked
 from a ladder of Claude tiers (cheapest first) by the task's labels rather
 than inherited from the parent. The `spawn` tool carries two labels the
-controller fills in — `kind` (`debug`, `build`, `refactor`, `review`,
+lead fills in — `kind` (`debug`, `build`, `refactor`, `review`,
 `explain`, `docs`, `ops`, `other`) and `complexity` (`trivial`, `standard`,
 `hard`) — and `[routing]` in `~/.guru/settings.toml` says what to do with
 them.
@@ -269,7 +283,6 @@ created if missing. For a LiteLLM adapter named `SBP Litellm` it reads:
 ```toml
 [routing]
 mode = "local-and-remote"   # local-only | local-and-remote | remote-only | off
-controller = true           # the main agent only spawns, checks and joins
 complexity_router = true    # lowest rung whose max_complexity covers the task
 type_router = true          # review tasks use [[routing.ladders.review]]
 spend_confirm = "ask"       # ask (once per run) | auto | never
@@ -320,19 +333,16 @@ For an `anthropic` adapter the model ids are the first-party ones
 the `judge` extra (`uv sync --extra judge`) `labels` is written `false`
 with a note: the encoder judge is then only observed (`panel` is shadow
 either way).
-The measurements behind the block used Haiku 4.5 as the main (controller)
-model — pick it in `/models`; the routing table does not set the main
-model.
+The routing table does not set the main (lead) model: pick it in
+`/models`.
 
 **Inspecting and turning it off.** `/routing` prints the mode and flags,
 every ladder's rungs and the judge per decision point (active / shadow,
 installed or not). `/routing off` writes `mode = "off"` into the table
 (remembering the previous mode in a trailing `# was "…"` comment, touching
-no other line) and reloads: routing, the controller hint on new agents,
-secret scan and redaction all behave as if no `[routing]` table existed.
-`/routing on` restores the previous mode. Both take effect in the running
-process; the main agent keeps its current controller/hands-on tool set
-until the next start.
+no other line) and reloads: routing, secret scan and redaction all behave
+as if no `[routing]` table existed. `/routing on` restores the previous
+mode. Both take effect in the running process.
 
 **How a task is routed.** With `complexity_router` on, a task takes the
 lowest surviving rung whose `max_complexity` is at least its complexity;
@@ -340,7 +350,7 @@ off, the ladder's `default` rung. With `type_router` on, a task whose
 `kind` has a per-kind ladder (`[[routing.ladders.<kind>]]`) uses it — the
 default block gives `review` its own ladder starting at Sonnet, so a
 trivial-labelled review never lands on Haiku; every other kind uses the
-default ladder. Like `controller`, `type_router` needs no setting: it is on
+default ladder. `type_router` needs no setting: it is on
 whenever a per-kind ladder is configured and `type_router = false` turns it
 off. A rung naming an adapter that is not configured is dropped
 with a warning at startup; an invalid table logs a warning and the defaults
@@ -366,76 +376,48 @@ listed verbatim in the task row's `reason` (and its `route`). Ollama stays
 the local-only option: point the rungs at an Ollama adapter for a
 `local-only` setup, and at the sidecar for the `ollama` judge.
 
-**Controller mode.** `controller = true` turns the main agent into a
-coordinator that never executes a task itself. Its only tool is `plan`,
-and every reply is one forced `plan` call (`guru/domain/plan.py`):
-`{outcome: "answer" | "delegate", answer?, tasks?: [{goal, kind,
-complexity, files?, role?, skill?}]}`. `answer` is the reply (greetings,
-clarifications, follow-ups on delivered results — no worker runs; a
-simple question has no task). `delegate` hands the tasks to guru, which
-validates the plan in code — known `kind`/`complexity`, at least one task,
-and when the request names several concerns (correctness, security,
-performance, reliability, design, tests, docs — noun forms only; "fix",
-"test", "auth" and other everyday task words do not count) joined by
-"and", a comma, "&" or a sentence break, every named concern must appear
-in some task goal (`plan.coverage_concerns`; the handler reads the full
-request, not the ledger's 1000-character `request` column) — spawns every
-task on its routed rung (a `review` task takes the review ladder), joins
-them and ends the turn; the joined results resume the controller, which
-answers with `plan` again. A rejected plan gets one re-ask naming the
-problem; a second malformed plan ends the turn on a plain-text fallback
-with `protocol_violation = 1` in the row's `struggle` counters. `answer` is
-never rejected: an `answer` without text takes the round's own assistant
-text, and only when both are empty does the loop's empty-reply re-prompt
-apply (once, then the fallback). `plan` and `final_answer` are never
-suppressed as duplicate calls (the same plan again after a coverage
-re-ask is the accepted second try); a second `plan` in one round is
-refused unrun and the first one's verdict stands. A controller that keeps
-planning without an accepted plan is stopped after `turn._MAX_ROUNDS`
-(12) rounds, any other agent after `_MAX_TOOL_ROUNDS` (40) tool rounds:
-the turn ends on the last text with `protocol_violation`. One user request
-gets at most `plan.MAX_DELEGATE_ROUNDS` (3) `delegate` plans (counted in
-the history from the request, `plan.delegations_in`): the fourth is
-refused with a text that says to answer from the results in hand. The
-`plan` tool's own description states the controller's contract (it has no
-other tools; anything that needs a file, a command, a package, a test or
-the sandbox is delegated) — there is no prose hint and no heuristic on the
-answer text. The key
-defaults to on as soon as any ladder rung is configured; set
-`controller = false` next to a ladder to keep the main agent hands-on
-(`spawn`/`check`/`join`), and it is off without a ladder. A controller
-that does the work anyway is measured, not punished: the turn row carries
-`controller_executed = true` when it attempted any other tool or answered
-with more than 600 characters without delegating.
+**The lead.** The main agent is the lead (`config.LEAD_HINT`): it keeps
+the overview of the request, does small work itself and spawns workers for
+parts that can run in parallel, each with a self-contained task (goal,
+files and interfaces, what it already knows). Workers report back; the
+lead joins them, reviews what they changed, integrates the parts and
+verifies the whole (full tests, lint, the running application uses the new
+code) before it answers. In a sandbox project each worker's copy diff
+comes back with its report; the lead merges it into its own copy with
+`apply_work(<worker>)`, tests there and submits the integrated change once
+through the gate. (The former controller mode — a tool-less main agent
+answering with one forced `plan` call — is retired; a `controller` key in
+`[routing]` is ignored.)
 
-**Turn contract.** Every other agent (workers, a hands-on main agent) ends
-its turn with a tool call: the tools it needs, then `final_answer(text)`.
-Adapters that can force a tool call do — Anthropic `tool_choice: any`
-(the Messages API rejects it together with extended thinking, so the
-controller's `plan` round is sent without thinking and a worker round is
-forced only on an adapter with `thinking = false`), LiteLLM `tool_choice:
-required` (a proxy that rejects it gets one retry without and forcing is
-turned off for that adapter). On a forcing adapter a text-only reply is a
-protocol violation: one deterministic re-prompt, then the text is the
-answer and `protocol_violation` is bumped. Ollama cannot force: a text
-reply is the answer, and a controller's text is parsed for the plan
-object first. The old preamble heuristic and its stall nudge are gone
-(`stall_nudges` stays a column, reading 0).
+**The turn loop.** Nothing is forced: a reply without a tool call ends the
+turn — the lead's answer, a worker's report — so a thinking model keeps
+its reasoning on every round (forcing `tool_choice` turns Anthropic's
+extended thinking off without an error). Thinking is on by default:
+`[thinking] lead = "high"`, `worker = "medium"` (`low`/`medium`/`high`/
+`off`); LiteLLM sends `reasoning_effort`, Anthropic adaptive thinking.
+There is no round cap. The stall monitor counts rounds without progress
+(no file changed and no tool result not seen before in the turn; timings
+ignored): after 20 the agent gets one warning, after 5 more the turn ends
+— a worker's with a handoff (files changed and read, its last text; task
+status `stalled`) so the lead decides what next. An answer from an agent
+that changed files and did not run the tests (and lint, when enabled)
+since is sent back once; the lead's answer to a request it worked on goes
+through the answer check (`[decisions] answer_check`).
 
 **Judges on the routing seam.** Two decision points can act on the routing
 seam (`[decisions] mode = "active"`, see **Ledger and decisions**); the
 default block activates `labels` and keeps `panel` shadow.
-`labels` is a margin-gated tie-breaker for the controller's complexity
+`labels` is a margin-gated tie-breaker for the lead's complexity
 label — the encoder judge's tier routes the task only when it differs from
-the controller's and beats the runner-up by `labels_margin` (the task
+the lead's and beats the runner-up by `labels_margin` (the task
 row's `reason` then says `labels:judge override standard->hard (0.57 vs
 0.33)`); `panel`, when active, asks the same judge `needs_security` over every
-`review`-kind task a controller spawns without a security reviewer (role
+`review`-kind task the lead spawns without a security reviewer (role
 `security-engineer` or a skill containing `security`), and on *yes* guru
 spawns one extra `security-engineer` worker on the same task with the
 `/review` panel's security focus — once per parent turn, routed like the
 task it shadows, its row's `reason` opening with `origin:panel
-(needs_security)`, and the controller told to join it. A shadow judge, a
+(needs_security)`, and the lead told to join it. A shadow judge, a
 timeout, an error or a missing judge adds nothing. `injection` stays shadow.
 
 **Spend confirmation.** In `ask` mode the first task that would run on a
@@ -579,7 +561,7 @@ name the defaults inline.
     benchmark; a model that stalls past it is cancelled and recorded as a
     timeout (default `600`; `0` disables the guard).
 - `[routing]`, `[[routing.ladder]]`, `[[routing.ladders.<kind>]]` — see
-  **Routing (controller and ladder)** above (written for you at startup when
+  **Routing (the lead and the ladder)** above (written for you at startup when
   a remote adapter is enabled; `/routing off` turns it off).
 - `[decisions]`, `[ledger]` (`enabled`, `turn_line`, both `true`),
   `[pricing."<model>"]` — see **Ledger and decisions** above.
@@ -650,9 +632,9 @@ Registry tools:
   `code_health`, `sandbox_submit`, `request_dependency`; advertised only
   in a project with a provisioned sandbox image (see Sandbox below).
 
-`search_tools`, `use_skill`, `final_answer` and (for delegation-capable
-agents) `spawn`, `check`, `join` are always available and not part of the
-registry; a controller has `plan` alone (see **Controller mode**).
+`search_tools`, `use_skill` and (for delegation-capable agents) `spawn`,
+`check`, `join` — plus `apply_work` in a sandbox project — are always
+available and not part of the registry.
 
 **Strict arguments.** Every call -- registry or always-on tool -- is
 validated against the tool's spec before anything runs
@@ -701,9 +683,9 @@ leave briefs under your home. Outline signatures show defaults as `...`
 its system context (`[project brief]`): the map, the test command, then
 the outline of every module the task names (by path, basename or stem) and
 the location of every code-like symbol it names, cut at a 4-chars-per-token
-estimate. The controller gets `brief.render_map(brief)` in its system
+estimate. The lead gets `brief.render_map(brief)` in its system
 context (`[project map]`). The orchestrator loads the brief once per
-(root, HEAD) and hands the same object to the controller and every child
+(root, HEAD) and hands the same object to the lead and every child
 (`Orchestrator.project_brief`); a brief that cannot be built is logged and
 left out — it is a saving, never a dependency.
 
@@ -782,8 +764,8 @@ timeout_s = 60             # per-project subprocess ceilings (see [tools.limits]
 
 No file means everything is enabled. `disabled` wins over `enabled`; a
 non-empty `enabled` list is an allowlist for registry tools. The always-on
-tools (`search_tools`, `use_skill`, `final_answer`, `spawn`, `check`,
-`join`, and a controller's `plan`) are never subject to it. A disabled tool is not advertised at all — it is not
+tools (`search_tools`, `use_skill`, `spawn`, `check`, `join`,
+`apply_work`) are never subject to it. A disabled tool is not advertised at all — it is not
 pre-activated, `search_tools` does not return it and it is absent from the
 tool schemas the model sees — and if the model names it anyway the call
 answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
@@ -793,13 +775,13 @@ answers `Tool '<name>' is disabled by .guru/tools.toml` and is recorded with
 unknown runner, bad limit, broken TOML) or unreadable, guru reports the
 problem at startup (naming the file) and disables *every* registry tool
 until it is fixed or removed — only `search_tools`, `use_skill`,
-`final_answer`, `spawn`, `check`, `join` (or a controller's `plan`) remain. A policy meant to restrict tools can never widen
+`spawn`, `check`, `join`, `apply_work` remain. A policy meant to restrict tools can never widen
 them by mistake.
 
 **Audit.** Every tool call — allowed, refused or unknown — writes one row to
 the ledger's `tool_events` stream (tool, args head, seconds, bytes produced
 vs shown to the model, files touched, denial: `policy`, `mode` or
-`controller`). `/tools` shows the last turn's rows; `bench/ledger_report.py`
+`kind`). `/tools` shows the last turn's rows; `bench/ledger_report.py`
 aggregates them per tool in its **Tools** section.
 
 ### Sandbox

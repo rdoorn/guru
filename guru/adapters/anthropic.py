@@ -43,8 +43,7 @@ from typing import Optional, Union
 
 from guru import log, session, startup, ui
 from guru.adapters import turn
-from guru.adapters.base import (FORCE_PLAN, JSON_ONLY, Adapter, ModelInfo,
-                                dump_request, is_tool_choice_error,
+from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo, dump_request,
                                 parameters_schema)
 from guru.domain import ledger, pricing, tools
 
@@ -53,15 +52,11 @@ from guru.domain import ledger, pricing, tools
 _MAX_TOKENS = 16000
 _DEFAULT_CONTEXT = 200000
 CACHE_CONTROL = {'type': 'ephemeral'}
-# Tool forcing (the turn contract, guru.adapters.turn): ``tool_choice any``
-# makes the model answer with a tool call. The Messages API rejects it
-# together with extended thinking, so a forced round is sent without
-# ``thinking``: the controller's ``plan`` round always (a structured
-# decision), a worker round only on an adapter configured with
-# ``thinking = false`` (a thinking worker keeps its reasoning and its text
-# reply is taken as the answer, like Ollama's). A rejected ``tool_choice``
-# turns forcing off for this adapter after one retry without it.
-TOOL_CHOICE_ANY = {'type': 'any'}
+# Thinking: adaptive extended thinking on every turn round while the
+# adapter has ``thinking`` on and the round's effort
+# (guru.adapters.turn.reasoning_effort) is not off. No ``tool_choice`` is
+# ever sent: the Messages API rejects forcing together with thinking.
+THINKING = {'type': 'adaptive', 'display': 'summarized'}
 
 
 # --- pure translation helpers (unit-tested) ----------------------------------
@@ -287,10 +282,6 @@ class AnthropicAdapter(Adapter):
         self.thinking = thinking
         self.cache = bool(cache)
         self._context_by_model: dict = {}
-        self._force_ok = True         # cleared after a tool_choice error
-
-    def forces(self, tool: str) -> bool:
-        return self._force_ok and (tool == FORCE_PLAN or not self.thinking)
 
     # --- client construction -------------------------------------------------
 
@@ -460,7 +451,7 @@ class AnthropicAdapter(Adapter):
         anth_tools = cached_tools(tool_defs(tools.active_specs()), self.cache)
         system_field = system_blocks(system, self.cache)
 
-        def request(force: bool) -> dict:
+        def request() -> dict:
             kwargs: dict = {
                 'model': session.model,
                 'max_tokens': _MAX_TOKENS,
@@ -469,35 +460,23 @@ class AnthropicAdapter(Adapter):
             }
             if system_field is not None:
                 kwargs['system'] = system_field
-            if force and anth_tools:
-                kwargs['tool_choice'] = dict(TOOL_CHOICE_ANY)
-            elif self.thinking:
-                kwargs['thinking'] = {
-                    'type': 'adaptive', 'display': 'summarized'}
+            if self.thinking and turn.reasoning_effort():
+                kwargs['thinking'] = dict(THINKING)
             return kwargs
 
         def step():
             """One Messages API round; returns (text, [(name, input, block)])
-            or None on error (printed) — the shared loop handles cancel.
-            A forced round (see ``TOOL_CHOICE_ANY``) that the API rejects
-            for its ``tool_choice`` is retried once unforced."""
-            forced = turn.forced_tool()
-            force = forced is not None and self.forces(forced)
+            or None on error (printed) — the shared loop handles cancel."""
             t0 = time.perf_counter()
             try:
-                try:
-                    resp = self._create(client, **request(force))
-                except Exception as e:
-                    if not (force and is_tool_choice_error(e)):
-                        raise
-                    log.warning('%s rejected tool_choice (%s); forcing off',
-                                self.name, str(e)[:120])
-                    self._force_ok = False
-                    resp = self._create(client, **request(False))
+                resp = self._create(client, **request())
             except Exception as e:
                 _note_error(e)
                 ui.console.print(f"[red]Anthropic error: {e}[/red]")
                 return None
+            # Cut at the output limit: the calls' arguments are unreliable.
+            session.output_cut = (getattr(resp, 'stop_reason', None)
+                                  == 'max_tokens')
             if getattr(resp, 'stop_reason', None) == 'refusal':
                 ledger.bump('refusals')
 

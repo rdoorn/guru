@@ -733,3 +733,16 @@ class TestRequestIn:
         # provider objects, not only dicts
         assert conversation.request_in(
             [SimpleNamespace(role='user', content='hi')]) == 'hi'
+
+
+class TestSandboxRuleByRole:
+    def test_worker_is_not_told_to_submit(self, monkeypatch) -> None:
+        from guru import config, session
+        from guru.domain import tools
+        monkeypatch.setattr(tools, '_sandbox_available', lambda: True)
+        monkeypatch.setattr(session, 'task_id', 't1')
+        block = conversation.project_block()
+        assert config.SANDBOX_WORKER_RULE in block
+        assert 'sandbox_submit' not in block
+        monkeypatch.setattr(session, 'task_id', '')
+        assert config.SANDBOX_RULE in conversation.project_block()

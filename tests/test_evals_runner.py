@@ -243,8 +243,11 @@ class TestRunCase:
         assert canned['mode'] == config.MODE_AUTO
         assert str(cwd) in canned['read']
         assert str(cwd) in canned['write']
-        assert isinstance(canned['repo'], JsonlLedger)
+        # The run ledger, fanned out to the shared usage store (eval).
+        assert isinstance(canned['repo'].primary, JsonlLedger)
         assert canned['repo'].dir == tmp_path / 'out' / 'ledger'
+        [store] = canned['repo'].extra
+        assert store.source == 'eval'
         ask_domain, ask_path = canned['askers']
         assert ask_domain('web?') is False and ask_path('path?') is False
         assert canned['ledger_enabled'] is True
@@ -1031,7 +1034,7 @@ class TestGuards:
 ROUTING_TOML = '''
 [routing]
 mode = "local-and-remote"
-controller = true
+controller = true           # retired key: accepted and ignored
 complexity_router = true
 spend_confirm = "auto"
 secret_scan = true
@@ -1057,7 +1060,7 @@ class TestRoutingFile:
         p = tmp_path / 'exp.toml'
         p.write_text(ROUTING_TOML)
         rs = runner.load_routing_file(p)
-        assert rs.present is True and rs.controller is True
+        assert rs.present is True and not hasattr(rs, 'controller')
         assert rs.spend_confirm == 'auto'
         assert [r.model for r in rs.ladders['default']] == [
             'small', 'aws/claude-5-sonnet']
@@ -1103,7 +1106,7 @@ class TestDecisionsFile:
         assert ds.points == {'panel': 'encoder', 'injection': 'injection'}
         assert ds.active == {} and ds.thresholds == {}
         # the same file still parses as a routing file
-        assert runner.load_routing_file(p).controller is True
+        assert runner.load_routing_file(p).present is True
 
     def test_no_table_is_none(self, tmp_path: Path) -> None:
         p = tmp_path / 'exp.toml'
@@ -1137,7 +1140,6 @@ def routed(monkeypatch):
     async def fake_run(self, prompt, timeout=None):
         seen['registry'] = self.registry
         seen['routing'] = self._routing_settings
-        seen['controller'] = self.controller
         seen['spend_asker'] = spend._asker
         seen['spend_granted'] = spend._asker(spend.QUESTION) \
             if spend._asker is not None else None
@@ -1163,16 +1165,14 @@ class TestRunCaseRouting:
         runner.run_case(_case(), base, [base.adapter], tmp_path)
         assert routed['registry'] is None
         assert routed['routing'] is None
-        assert routed['controller'] is False
         assert routed['spend_asker'] is runner._deny
         assert routed['spend_granted'] is False
         assert spend._asker is None                  # restored
 
-    def test_registry_routing_and_controller(self, tmp_path: Path,
-                                             routed) -> None:
+    def test_registry_and_routing(self, tmp_path: Path, routed) -> None:
         from guru.repositories.adapters import AdapterRegistry
         base = _base()
-        settings = _routing(controller=True)
+        settings = _routing()
         routing = runner.Routing(settings, AdapterRegistry([base.adapter]),
                                  name='exp')
         res = runner.run_case(_case(), base, [base.adapter], tmp_path,
@@ -1180,7 +1180,6 @@ class TestRunCaseRouting:
         assert routed['registry'] is routing.registry
         assert routed['registry'].get('Fake') is base.adapter
         assert routed['routing'] is settings
-        assert routed['controller'] is True
         assert res.routes == []
 
     def test_allow_spend_grants_and_restores(self, tmp_path: Path,
@@ -1226,20 +1225,21 @@ class TestRunSuiteRouting:
                                                  routed) -> None:
         from guru.repositories.adapters import AdapterRegistry
         base = _base()
-        settings = _routing(controller=True, secret_scan=False)
+        settings = _routing(secret_scan=False)
         run = runner.run_suite([_case(name='a')], 'Fake|base-model',
                                tmp_path, base_state=base,
                                adapters=[base.adapter],
                                trajectory_dir=tmp_path, routing=settings,
                                routing_name='exp-b')
-        assert run.routing == 'exp-b' and run.controller is True
+        # the runner no longer sets the retired controller flag
+        assert run.routing == 'exp-b' and run.controller is False
         assert isinstance(routed['registry'], AdapterRegistry)
         assert routed['registry'].get('Fake') is base.adapter
         assert routed['routing'] is settings
-        assert run.model_label() == 'Fake|base-model+routed:exp-b+controller'
+        assert run.model_label() == 'Fake|base-model+routed:exp-b'
         assert runs.load(next(tmp_path.glob('*.json'))).routing == 'exp-b'
         traj = (tmp_path / runs.TRAJECTORY_FILE).read_text()
-        assert '+routed:exp-b+controller' in traj
+        assert '+routed:exp-b' in traj and '+controller' not in traj
 
     def test_without_routing_records_defaults(self, tmp_path: Path,
                                               routed) -> None:
@@ -1478,7 +1478,6 @@ class TestCliRouting:
             seen.update(kw)
             r = runs.Run(run_id='rid', ts=runs.now_ts(), model='Fake|m',
                          git_sha='', routing=kw['routing_name'],
-                         controller=kw['routing'].controller,
                          cases=[runs.CaseResult(
                              case='a', passed=True, checks=[],
                              observed={'seconds': 1.0}, rubric='',
@@ -1493,13 +1492,13 @@ class TestCliRouting:
                          '--routing', str(rfile)])
         assert code == 0
         assert isinstance(seen['routing'], rs.RoutingSettings)
-        assert seen['routing'].controller is True
+        assert seen['routing'].present is True
         assert seen['routing_name'] == 'exp-b'
         assert seen['allow_spend'] is False
         out = capsys.readouterr().out
         assert 'routes: Fake|small, Remote|big' in out
-        assert 'model Fake|m+routed:exp-b+controller' in out
-        assert 'routing exp-b (controller)' in out
+        assert 'model Fake|m+routed:exp-b' in out
+        assert 'controller' not in out
 
     def test_decisions_table_is_parsed_and_judges_printed(
             self, tmp_path: Path, capsys, monkeypatch) -> None:
@@ -3109,7 +3108,7 @@ class TestCliMatrix:
                          '--out', str(tmp_path / 'r')])
         assert code == 0
         assert isinstance(seen['routing'], RoutingSettings)
-        assert seen['routing'].controller is True
+        assert [r.model for r in seen['routing'].ladders['default']] == ['w']
         assert seen['routing_name'] == 'exp'
         assert seen['decisions'] is not None
         assert seen['decisions'].mode == 'shadow'

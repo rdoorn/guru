@@ -30,10 +30,10 @@ class SessionState:
     active_skill: Optional[str]
     cancel_requested: bool
     can_spawn: bool
-    controller: bool
     agent_id: str
     task_id: str
     turn_id: str
+    topic_id: str
     task_text: str
     task_kind: str
     call_count: int
@@ -44,11 +44,9 @@ class SessionState:
     last_error: str
     turn_waiting: bool
     check_polls: int
-    capped: bool
+    stalled: bool
     round_note: str
-    budget_spent: bool
-    reads_closed: bool
-    verify_missing: frozenset
+    output_cut: bool
     def __init__(self) -> None: ...
 
 
@@ -76,10 +74,10 @@ active_role: Optional[str]
 active_skill: Optional[str]
 cancel_requested: bool
 can_spawn: bool
-controller: bool
 agent_id: str
 task_id: str
 turn_id: str
+topic_id: str
 task_text: str
 task_kind: str
 call_count: int
@@ -90,8 +88,6 @@ struggle: dict[str, int]
 last_error: str
 turn_waiting: bool
 check_polls: int
-capped: bool
+stalled: bool
 round_note: str
-budget_spent: bool
-reads_closed: bool
-verify_missing: frozenset
+output_cut: bool

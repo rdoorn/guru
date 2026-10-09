@@ -96,19 +96,6 @@ def openai_tool_defs(specs: list) -> list:
             for spec in specs]
 
 
-# Turn-contract forcing (guru.adapters.turn.forced_tool): what the loop
-# asks an adapter to force this round.
-FORCE_PLAN = 'plan'      # a controller round: the ``plan`` tool
-FORCE_ANY = 'any'        # a worker round: any tool (or ``final_answer``)
-
-
-def is_tool_choice_error(exc: Exception) -> bool:
-    """Whether a provider error is about the ``tool_choice`` we sent (the
-    forced round is then retried without it). Shared by the Anthropic and
-    LiteLLM adapters."""
-    return 'tool_choice' in str(exc).lower()
-
-
 @dataclass
 class ModelInfo:
     """A selectable model, grouped in /models under its adapter."""
@@ -187,14 +174,6 @@ class Adapter(ABC):
     @abstractmethod
     def summarise(self, transcript: str) -> str:
         """Return a concise summary of a conversation transcript."""
-
-    def forces(self, tool: str) -> bool:
-        """Whether this adapter forces a tool call for a round the loop
-        marks ``tool`` (:data:`FORCE_PLAN` or :data:`FORCE_ANY`). A
-        forcing adapter's text-only reply is a protocol violation
-        (``guru.adapters.turn``); a non-forcing one's text is the answer.
-        The default cannot force."""
-        return False
 
     def complete(self, prompt: str, max_tokens: int = 1024,
                  model: str = '') -> str:

@@ -804,7 +804,7 @@ def render_markdown(report: dict) -> str:
     t = report['turns']
     out += ['## Turns', '']
     out += _table(['turns', 'cost', 'seconds p50', 'seconds p95',
-                   'controller executed', 'tasks spawned'],
+                   'controller executed (legacy)', 'tasks spawned'],
                   [[t['n'], _money(t['cost_usd']), _secs(t['seconds_p50']),
                     _secs(t['seconds_p95']), t['controller_executed'],
                     t['tasks_spawned']]] if t['n'] else [])

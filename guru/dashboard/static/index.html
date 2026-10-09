@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>guru · usage</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="viz-root">
+<header class="bar">
+  <h1>guru <span class="muted">usage</span></h1>
+  <div class="filters" role="group" aria-label="Filters">
+    <div class="seg" id="range" role="radiogroup" aria-label="Time range">
+      <button data-range="today">Today</button>
+      <button data-range="7d" aria-checked="true">7 days</button>
+      <button data-range="30d">30 days</button>
+      <button data-range="all">All</button>
+    </div>
+    <label class="muted">Source
+      <select id="source">
+        <option value="all">All</option>
+        <option value="cli">Interactive</option>
+        <option value="eval">Evals</option>
+      </select>
+    </label>
+  </div>
+</header>
+
+<main>
+  <section class="tiles" id="tiles" aria-label="Totals"></section>
+
+  <section class="card">
+    <h2>Cost per day <span class="muted">by model</span></h2>
+    <div id="legend" class="legend"></div>
+    <div id="daily" class="chart"></div>
+    <details><summary>Table</summary><div id="daily-table"></div></details>
+  </section>
+
+  <div class="grid">
+    <section class="card"><h2>By model</h2>
+      <div id="bars-model" class="chart"></div><div id="table-model"></div>
+    </section>
+    <section class="card"><h2>By project</h2>
+      <div id="bars-project" class="chart"></div><div id="table-project"></div>
+    </section>
+  </div>
+  <section class="card"><h2>By topic</h2>
+    <div id="bars-topic" class="chart"></div><div id="table-topic"></div>
+  </section>
+
+  <section class="card">
+    <h2>Recent calls</h2>
+    <div id="calls"></div>
+    <div class="pager">
+      <button id="prev">Newer</button>
+      <span id="page" class="muted"></span>
+      <button id="next">Older</button>
+    </div>
+  </section>
+  <p id="error" class="error" hidden></p>
+</main>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

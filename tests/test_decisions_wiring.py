@@ -49,9 +49,9 @@ def _loop(replies, monkeypatch, fake_repo, can_spawn=False, tool_rounds=(),
 
 
 class TestStallPointRetired:
-    """The stall point no longer acts: the turn contract (a forced tool
-    call, guru.adapters.turn) replaced the preamble heuristic and its
-    nudge, so no ``stall`` question is shadowed or decided any more."""
+    """The stall point no longer acts: a text reply ends the turn and the
+    stall monitor (guru.adapters.turn) replaced the preamble heuristic and
+    its nudge, so no ``stall`` question is shadowed or decided any more."""
 
     def test_no_stall_question_on_a_text_answer(self, monkeypatch,
                                                 fake_repo):
@@ -81,10 +81,12 @@ class TestPanelShadow:
         assert panel[0][2] is None       # no single heuristic for 3 questions
         assert panel[0][3][0] == 'Task: review the login code'
 
-    def test_panel_asked_once_even_when_nudged(self, monkeypatch, fake_repo):
-        """The delegation nudge sends the model round again; the panel
-        questions are still asked once per turn."""
-        monkeypatch.setattr(turn, '_should_delegate', lambda: True)
+    def test_panel_asked_once_even_when_sent_back(self, monkeypatch,
+                                                  fake_repo):
+        """A send-back (verify or answer check) sends the model round
+        again; the panel questions are still asked once per turn."""
+        backs = iter(['Check again.', ''])
+        monkeypatch.setattr(turn, '_send_back', lambda m, t: next(backs))
         calls, _ = _loop(["Full assessment.", "Here is my review."],
                          monkeypatch, fake_repo, can_spawn=True, nudge=True)
         assert [c[0] for c in calls] == ['panel']
@@ -112,14 +114,15 @@ class TestPanelShadow:
             {'role': 'user', 'content': 'real request'},
             {'role': 'assistant', 'content': "Let me…"},
             {'role': 'user', 'content': turn._NUDGE_TEXT},
-            {'role': 'assistant', 'content': "Let me…"},
-            {'role': 'user', 'content': turn._DELEGATION_TEXT}])
-        assert turn._turn_request() == 'real request'
+            {'role': 'assistant', 'content': "Done."},
+            {'role': 'user',
+             'content': turn.verify_refusal(frozenset({'tests'}))}])
+        assert turn.turn_request() == 'real request'
 
     def test_request_empty_without_user_message(self, monkeypatch):
         monkeypatch.setattr(session, 'messages', [
             {'role': 'system', 'content': 's'}])
-        assert turn._turn_request() == ''
+        assert turn.turn_request() == ''
 
 
 class TestTurnRecord:
@@ -138,18 +141,16 @@ class TestTurnRecord:
         assert row['turn_id'] and row['seconds'] >= 0
         assert row['turn_id'] == session.turn_id
         assert row['agent'] == 'main'
-        assert row['controller_executed'] is False   # not a controller yet
+        assert row['controller_executed'] is False   # always, now
         assert row['cost_usd'] == 0.0                # no priced calls
 
     def test_waiting_turn_still_writes_row(self, monkeypatch, fake_repo):
         """A turn ended by a join (``session.turn_waiting``) has no answer
-        but still closes with exactly one TurnRecord (a hands-on
-        delegation-capable agent; a controller delegates through plan)."""
+        but still closes with exactly one TurnRecord."""
         _quiet(monkeypatch)
         monkeypatch.setattr(session, 'messages', [
             {'role': 'user', 'content': 'review the login code'}])
         monkeypatch.setattr(session, 'can_spawn', True)
-        monkeypatch.setattr(session, 'controller', False)
         steps = iter([('', [('spawn', {'task': 'x'}, None)]),
                       ('', [('join', {'targets': 'agent1'}, None)])])
 
@@ -248,32 +249,17 @@ class TestTurnStruggleAndCost:
 
     def test_protocol_violation_counted_as_delta(self, monkeypatch,
                                                  fake_repo):
-        """A forcing adapter, two text-only replies: one re-prompt, then
-        the text is the answer and this turn's delta is 1."""
-        class Forcing:
-            name = 'forcing'
-
-            def forces(self, tool):
-                return True
-        monkeypatch.setattr(session, 'adapter', Forcing())
+        """An empty reply (no text, no tool call) is a protocol
+        violation; this turn's delta is 1 over the earlier turns'."""
         session.struggle['protocol_violation'] = 3    # from earlier turns
         session.struggle['stall_nudges'] = 2
-        _, turns = _loop(["Let me look:", "Done."], monkeypatch, fake_repo,
-                         nudge=True)
+        _, turns = _loop([""], monkeypatch, fake_repo)
         [row] = turns
         assert row['struggle']['protocol_violation'] == 1
         assert row['struggle']['stall_nudges'] == 0     # never bumped now
         assert row['struggle']['delegation_nudges'] == 0
         assert session.struggle['protocol_violation'] == 4
         assert set(row['struggle']) == set(session.STRUGGLE_KEYS)
-
-    def test_delegation_nudge_counted(self, monkeypatch, fake_repo):
-        monkeypatch.setattr(turn, '_should_delegate', lambda: True)
-        _, turns = _loop(["Full assessment.", "Report."], monkeypatch,
-                         fake_repo, can_spawn=True, nudge=True)
-        [row] = turns
-        assert row['struggle']['delegation_nudges'] == 1
-        assert session.struggle['delegation_nudges'] == 1
 
     def test_turn_cost_is_delta(self, monkeypatch, fake_repo):
         _quiet(monkeypatch)

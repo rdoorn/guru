@@ -2,7 +2,8 @@
 Colima runtime faked: run/python/diff digests and refusals, the submit
 paths per verdict and access mode (a real ``apply_patch`` on a temp
 project), the per-task copy lifecycle, the tool-registry wiring
-(advertising, pre-activation, controller) and ``/sandbox status|gate``."""
+(advertising, pre-activation, the lead/worker split), the lead's
+``apply_work`` merge of a worker's copy and ``/sandbox status|gate``."""
 import json
 import shutil
 from pathlib import Path
@@ -702,12 +703,10 @@ class TestSubmit:
         monkeypatch.setattr(colima, 'diff', gone)
         assert verbs.sandbox_submit('intent') == verbs.COPY_GONE
 
-    def test_copy_lock_holds_from_review_to_apply(self, sandboxed,
-                                                  monkeypatch) -> None:
+    def test_copy_lock_holds_from_review_to_apply(self, sandboxed) -> None:
         import threading
         root, fake = sandboxed
         fake.diff_text = MOD_DIFF
-        monkeypatch.setattr(session, 'task_id', 'T1')
         entered, release = threading.Event(), threading.Event()
 
         class Slow(FakeReviewer):
@@ -724,7 +723,7 @@ class TestSubmit:
                 'out', verbs.sandbox_submit('intent')))
         submitter.start()
         assert entered.wait(5)
-        cleaner = threading.Thread(target=verbs.cleanup_task, args=('T1',))
+        cleaner = threading.Thread(target=verbs.cleanup_all)
         cleaner.start()
         cleaner.join(0.3)
         assert cleaner.is_alive()             # blocked on the copy lock
@@ -736,6 +735,58 @@ class TestSubmit:
         assert 'Applied patch:' in result['out']
         assert (root / 'pkg' / 'mod.py').read_text().endswith('return 2\n')
         assert not copy.exists() and verbs.copies() == {}
+
+    def test_gate_review_off_decides_on_the_rules(
+            self, sandboxed, monkeypatch, fake_repo) -> None:
+        root, fake = sandboxed
+        monkeypatch.setattr(config, 'GATE_REVIEW', False)
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        calls: list = []
+        real = gate.decide_unreviewed
+        monkeypatch.setattr(gate, 'decide_unreviewed',
+                            lambda flags: calls.append(flags) or real(flags))
+        fake.diff_text = MOD_DIFF
+        out = verbs.sandbox_submit('make f return 2 as asked')
+        assert out.startswith('Gate verdict: intended\n')
+        assert 'reviewer off; rules passed' in out and 'Applied patch' in out
+        assert (root / 'pkg' / 'mod.py').read_text().endswith('return 2\n')
+        assert reviewer.calls == [] and calls == [[]]
+        ledger.flush()
+        assert [r for r in fake_repo.stream('decisions')
+                if r['point'] == 'gate'] == []
+
+    def test_gate_review_off_still_refuses_and_asks(
+            self, sandboxed, monkeypatch) -> None:
+        root, fake = sandboxed
+        monkeypatch.setattr(config, 'GATE_REVIEW', False)
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        fake.diff_text = EXEC_DIFF
+        out = verbs.sandbox_submit('intent')
+        assert out.startswith('Refused: the quality gate found the change '
+                              'suspicious')
+        fake.diff_text = FAT_DIFF                   # a blocking health flag
+        asked: list = []
+        provision.set_approve_asker(lambda q: asked.append(q) or False)
+        out = verbs.sandbox_submit('intent')
+        assert 'unclear' in out and len(asked) == 1
+        assert reviewer.calls == []
+        assert (root / 'pkg' / 'mod.py').read_text() == MOD
+
+    def test_a_worker_does_not_submit(self, sandboxed, monkeypatch,
+                                      fake_repo) -> None:
+        root, fake = sandboxed
+        fake.diff_text = MOD_DIFF
+        reviewer = FakeReviewer()
+        decisions.set_judge('gate', reviewer)
+        monkeypatch.setattr(session, 'task_id', 'T1')
+        verbs.sandbox_run(['pytest'])
+        assert verbs.sandbox_submit('intent') == verbs.WORKER_SUBMIT
+        assert reviewer.calls == []
+        assert (root / 'pkg' / 'mod.py').read_text() == MOD
+        assert len(verbs.copies()) == 1             # the copy is kept
+        assert _events(fake_repo, 'submit') == []
 
     def test_question_verdict(self) -> None:
         q = verbs.SUBMIT_QUESTION.format(state='intended') + '\nIntent: x'
@@ -911,22 +962,28 @@ class TestCopies:
         (_key, again), = verbs.copies().items()
         assert again.is_dir() and again != copy
 
-    def test_orchestrator_finish_task_cleans_up(self, monkeypatch,
-                                                fake_repo) -> None:
+    def test_orchestrator_keeps_a_done_workers_copy(self, monkeypatch,
+                                                    fake_repo) -> None:
+        """A finished worker's copy stays for the lead's apply_work; a
+        failed worker's goes with its task."""
         from guru.orchestrator import Orchestrator
         cleaned: list = []
         monkeypatch.setattr(verbs, 'cleanup_task', cleaned.append)
         o = Orchestrator()
         main = o.manager.active
         main.busy = True
-        child = o._make_child(main, task='do it')
-        child.queue.clear()
-        child.started = 0.0
-        assert child.state.task_text == 'do it'
-        task_id = child.task_rec.task_id
-        child.state.messages.append({'role': 'assistant', 'content': 'A'})
-        o.on_done(child)
-        assert cleaned == [task_id]
+        ids = []
+        for status in ('thinking', 'error'):
+            child = o._make_child(main, task='do it')
+            child.queue.clear()
+            child.started = 0.0
+            assert child.state.task_text == 'do it'
+            ids.append(child.task_rec.task_id)
+            child.state.messages.append({'role': 'assistant',
+                                         'content': 'A'})
+            child.status = status
+            o.on_done(child)
+        assert cleaned == [ids[1]]
 
 
 # --- tool registry wiring ----------------------------------------------------
@@ -994,7 +1051,6 @@ class TestToolWiring:
         root, _fake = sandboxed
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         called: list = []
         monkeypatch.setitem(tools.TOOL_REGISTRY[name], 'fn',
                             lambda **kw: called.append(kw) or 'ran')
@@ -1025,26 +1081,27 @@ class TestToolWiring:
         assert names == set(tools.TOOL_REGISTRY) - set(tools.SANDBOX_TOOLS)
         assert tools.DIRECT_WRITE_TOOLS <= names
 
-    def test_controller_never_gets_the_verbs(self, monkeypatch) -> None:
+    def test_lead_and_worker_tool_sets(self, monkeypatch) -> None:
         from guru import ui
         monkeypatch.setattr(verbs, 'available', lambda project=None: True)
-        base, names = tools.initial_tools(can_spawn=True, controller=True)
-        assert base == [tools.plan] and names == set()
-        assert not {s['name'] for s in tools.specs_for(
-            set(tools.SANDBOX_TOOLS), True, controller=True)} & set(
-                tools.SANDBOX_TOOLS)
+        monkeypatch.setattr(session, 'task_id', '')
+        base, names = tools.initial_tools(can_spawn=True)
+        assert tools.apply_work in base and tools.sandbox_submit in base
+        monkeypatch.setattr(session, 'task_id', 'T1')
+        base, names = tools.initial_tools(can_spawn=False)
+        assert names == {'read_file', *tools.SANDBOX_TOOLS} - {
+            'sandbox_submit'}
+        assert tools.apply_work not in base
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', True)
-        assert tools.execute_tool('sandbox_run', {'argv': 'pytest'}) == \
-            'Unknown tool: sandbox_run'
+        assert tools.execute_tool('sandbox_submit', {'intent': 'x'}) == \
+            verbs.WORKER_SUBMIT
 
     def test_execute_tool_refuses_when_not_provisioned(
             self, monkeypatch, tmp_path) -> None:
         from guru import ui
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         monkeypatch.setattr(config, 'PROJECT_GURU_DIR', tmp_path / '.guru')
         monkeypatch.setattr(config, 'SANDBOX_HOME', tmp_path / 'sbhome')
         out = tools.execute_tool('sandbox_python', {'code': 'print(1)'})
@@ -1057,7 +1114,6 @@ class TestToolWiring:
         _root, fake = sandboxed
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         out = tools.execute_tool('sandbox_run', {'argv': ['pytest', '-q']})
         assert out.startswith('exit 0')
         # A JSON list in a string is what a provider sends; a plain command
@@ -1072,6 +1128,95 @@ class TestToolWiring:
         assert out.startswith('Recorded dependency request six>=1')
         assert [r.spec for r in images.pending_requests(verbs.spec_for())] \
             == ['six>=1']
+
+
+# --- worker_diff / apply_work ------------------------------------------------
+
+class TestApplyWork:
+    """A worker's copy reaches the lead as a diff (``worker_diff``); the
+    lead merges it into its own copy (``apply_work``)."""
+
+    @staticmethod
+    def _worker_copy(monkeypatch, task_id: str = 'T1') -> Path:
+        monkeypatch.setattr(session, 'task_id', task_id)
+        verbs.sandbox_run(['pytest'])
+        monkeypatch.setattr(session, 'task_id', '')
+        [path] = [p for (_proj, who), p in verbs.copies().items()
+                  if who == task_id]
+        return path
+
+    def test_worker_diff(self, sandboxed, monkeypatch) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = MOD_DIFF
+        assert verbs.worker_diff('T1') == ''           # no copy yet
+        self._worker_copy(monkeypatch)
+        assert verbs.worker_diff('T1') == MOD_DIFF
+        fake.diff_error = RuntimeError('git down')
+        assert verbs.worker_diff('T1') == ''
+        assert len(verbs.copies()) == 1                # still kept
+
+    def test_worker_diff_without_a_sandbox(self, tmp_path,
+                                           monkeypatch) -> None:
+        monkeypatch.setattr(config, 'PROJECT_GURU_DIR', tmp_path / '.guru')
+        monkeypatch.setattr(config, 'SANDBOX_HOME', tmp_path / 'sbhome')
+        assert verbs.worker_diff('T1') == ''
+        assert verbs.apply_work('T1') == verbs.NOT_PROVISIONED
+
+    def test_nothing_to_apply(self, sandboxed, monkeypatch) -> None:
+        _root, fake = sandboxed
+        applied: list = []
+        monkeypatch.setattr(colima, 'apply_diff',
+                            lambda *a: applied.append(a) or '')
+        assert verbs.apply_work('T1').startswith(
+            'Nothing to apply: task T1 has no sandbox copy')
+        self._worker_copy(monkeypatch)                 # unchanged copy
+        assert verbs.apply_work('T1') == (
+            'Nothing to apply: task T1 left no sandbox changes.')
+        assert applied == []
+
+    def test_truncated_diff_is_refused(self, sandboxed, monkeypatch):
+        _root, fake = sandboxed
+        fake.diff_text = MOD_DIFF + '\n[diff truncated]\n'
+        worker = self._worker_copy(monkeypatch)
+        applied: list = []
+        monkeypatch.setattr(colima, 'apply_diff',
+                            lambda *a: applied.append(a) or '')
+        out = verbs.apply_work('T1')
+        assert out.startswith('Refused: ') and 'too large' in out
+        assert applied == [] and worker.is_dir()
+
+    def test_failed_merge_keeps_the_worker_copy(self, sandboxed,
+                                                monkeypatch) -> None:
+        _root, fake = sandboxed
+        fake.diff_text = MOD_DIFF
+        worker = self._worker_copy(monkeypatch)
+        monkeypatch.setattr(colima, 'apply_diff',
+                            lambda copy, project, diff: 'error: patch failed')
+        out = verbs.apply_work('T1')
+        assert out.startswith('Refused: ') and 'error: patch failed' in out
+        assert worker.is_dir()
+        assert ('T1' in {who for _proj, who in verbs.copies()})
+
+    def test_merge_discards_the_worker_copy(self, sandboxed, monkeypatch,
+                                            fake_repo) -> None:
+        root, fake = sandboxed
+        fake.diff_text = MOD_DIFF
+        worker = self._worker_copy(monkeypatch)
+        applied: list = []
+        monkeypatch.setattr(colima, 'apply_diff',
+                            lambda *a: applied.append(a) or '')
+        out = verbs.apply_work('T1')
+        assert out.startswith('Applied patch')
+        assert 'pkg/mod.py | +1 -1' in out and 'sandbox_submit' in out
+        assert not worker.exists()
+        lead = verbs.copies()
+        assert [who for _proj, who in lead] == ['main']
+        [(copy, project, diff)] = applied
+        assert copy == lead[(str(root), 'main')]
+        assert project == root and diff == MOD_DIFF
+        assert (root / 'pkg' / 'mod.py').read_text() == MOD   # not real
+        [ev] = _events(fake_repo, 'apply_work')
+        assert ev['ok'] is True
 
 
 # --- /sandbox status | gate --------------------------------------------------
@@ -1161,21 +1306,6 @@ class TestTurnTally:
         assert verbs._tally == {(str(root), 'main', 'turn-2'):
                                 gate.Tally(2, 2, 2)}
         assert verbs.cleanup_all() == 0 and verbs._tally == {}
-
-    def test_task_tally_ignores_the_turn(self, sandboxed, monkeypatch):
-        root, fake = sandboxed
-        for n in 'ab':
-            (root / 'pkg' / f'{n}.py').write_text('X = 1\n')
-        decisions.set_judge('gate', FakeReviewer())
-        monkeypatch.setattr(session, 'task_id', 'T1')
-        monkeypatch.setattr(session, 'turn_id', 'turn-1')
-        fake.diff_text = self._gone('a')
-        assert verbs.sandbox_submit('remove a').startswith('Gate verdict')
-        monkeypatch.setattr(session, 'turn_id', 'turn-2')
-        fake.diff_text = self._gone('b')
-        assert verbs.sandbox_submit('remove b').startswith('Gate verdict')
-        assert verbs._tally == {(str(root), 'T1', ''): gate.Tally(2, 2, 2)}
-        assert verbs.cleanup_task('T1') == 0 and verbs._tally == {}
 
     def test_task_tally_helper_is_gone(self) -> None:
         assert not hasattr(verbs, 'task_tally')

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from guru import config, session
+from guru import config
 from guru.domain import tools
 from guru.evals import runs
 
@@ -43,7 +43,6 @@ def copy(tmp_path, monkeypatch) -> Path:
     from guru import ui
     monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
     monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-    monkeypatch.setattr(session, 'controller', False)
     monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', set())
     monkeypatch.setattr(config, 'ALLOWED_WRITE_DIRS', set())
     monkeypatch.setattr(config, 'MODE', config.MODE_ASK)
@@ -56,6 +55,7 @@ class TestTasks:
         expected = (set(tools.TOOL_REGISTRY) - set(tools.SANDBOX_TOOLS)
                     | tools.ALWAYS_ON_TOOLS) - tc.LOOP_TOOLS
         assert covered == expected
+        assert tc.LOOP_TOOLS == {'apply_work'}
         assert len(covered) == len(tc.TASKS)          # no duplicates
         web = {t.tool for t in tc.TASKS if t.web}
         assert web == {'web_search', 'web_fetch', 'fetch_github_releases'}

@@ -14,7 +14,7 @@ class TestDefaults:
     def test_empty_section_gives_documented_defaults(self) -> None:
         s = load_routing({})
         assert s == RoutingSettings(
-            mode='local-and-remote', controller=False,
+            mode='local-and-remote',
             complexity_router=True, type_router=False,
             spend_confirm='ask', secret_scan=True, ladders={})
 
@@ -37,7 +37,7 @@ class TestDefaults:
         monkeypatch.setattr(config, 'GLOBAL_SETTINGS_PATH', p)
         s = load_routing()
         assert s.mode == 'local-only'
-        assert s.controller is True
+        assert not hasattr(s, 'controller')
 
     def test_missing_settings_toml_gives_defaults(
             self, tmp_path, monkeypatch) -> None:
@@ -52,7 +52,7 @@ class TestDefaults:
         rung = {'adapter': 'A', 'model': 'm', 'max_complexity': 'hard'}
         assert load_routing({'ladder': [rung]}).type_router is False
         s = load_routing({'ladder': [rung], 'ladders': {'review': [rung]}})
-        assert s.type_router is True and s.controller is True
+        assert s.type_router is True
         assert load_routing({'ladders': {'review': []}}).type_router is False
         s = load_routing({'ladders': {'review': [rung]},
                           'type_router': False})
@@ -62,12 +62,12 @@ class TestDefaults:
 class TestScalars:
     def test_all_scalars_parsed(self) -> None:
         s = load_routing({
-            'mode': 'remote-only', 'controller': True,
+            'mode': 'remote-only',
             'complexity_router': False, 'type_router': True,
             'spend_confirm': 'never', 'secret_scan': False})
-        assert (s.mode, s.controller, s.complexity_router, s.type_router,
+        assert (s.mode, s.complexity_router, s.type_router,
                 s.spend_confirm, s.secret_scan) == (
-            'remote-only', True, False, True, 'never', False)
+            'remote-only', False, True, 'never', False)
 
     @pytest.mark.parametrize('mode', ['local', 'LOCAL-ONLY', 'remote', ''])
     def test_bad_mode_raises(self, mode) -> None:
@@ -79,7 +79,7 @@ class TestScalars:
         with pytest.raises(ValueError, match='spend_confirm'):
             load_routing({'spend_confirm': value})
 
-    @pytest.mark.parametrize('key', ['controller', 'complexity_router',
+    @pytest.mark.parametrize('key', ['complexity_router',
                                      'type_router', 'secret_scan'])
     def test_non_bool_flag_raises(self, key) -> None:
         with pytest.raises(ValueError, match=key):
@@ -284,35 +284,25 @@ class TestDecisionsSettings:
             load_decisions({'labels_margin': value})
 
 
-class TestControllerDefault:
-    """``controller`` defaults to on when any ladder rung is configured;
-    an explicit value always wins."""
+class TestRetiredControllerKey:
+    """The retired ``controller`` key (the main agent is always the lead)
+    is accepted and ignored, whatever its value, so older settings files
+    keep loading."""
 
     _RUNG = {'adapter': 'A', 'model': 'm', 'max_complexity': 'hard'}
 
-    def test_ladder_without_controller_key_turns_it_on(self) -> None:
-        assert load_routing({'ladder': [self._RUNG]}).controller is True
-        assert load_routing(
-            {'ladders': {'review': [self._RUNG]}}).controller is True
+    @pytest.mark.parametrize('value', [True, False, 'not-a-bool'])
+    def test_accepted_and_ignored(self, value) -> None:
+        s = load_routing({'controller': value, 'ladder': [self._RUNG]})
+        assert s == load_routing({'ladder': [self._RUNG]})
+        assert not hasattr(s, 'controller')
 
-    def test_no_ladder_leaves_it_off(self) -> None:
-        assert load_routing({}).controller is False
-        assert load_routing({'mode': 'local-only'}).controller is False
-        assert load_routing({'ladder': []}).controller is False
+    def test_alone_still_marks_the_table_present(self) -> None:
+        assert load_routing({'controller': True}).present is True
 
-    def test_explicit_false_with_ladder_stays_off(self) -> None:
-        s = load_routing({'controller': False, 'ladder': [self._RUNG]})
-        assert s.controller is False
-
-    def test_explicit_true_without_ladder_stays_on(self) -> None:
-        assert load_routing({'controller': True}).controller is True
-
-    def test_dataclass_resolves_the_default_too(self) -> None:
-        rung = RungSpec('A', 'm', 'hard')
-        assert RoutingSettings(ladders={'default': [rung]}).controller is True
-        assert RoutingSettings().controller is False
-        assert RoutingSettings(controller=False,
-                               ladders={'default': [rung]}).controller is False
+    def test_dataclass_has_no_controller_field(self) -> None:
+        with pytest.raises(TypeError):
+            RoutingSettings(controller=True)     # type: ignore[call-arg]
 
 
 class TestToolsPolicyLoader:

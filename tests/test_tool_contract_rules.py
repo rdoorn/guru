@@ -11,7 +11,6 @@ from guru.domain import files, routing, toolpolicy, tools
 def _quiet(monkeypatch):
     monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
     monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-    monkeypatch.setattr(session, 'controller', False)
     monkeypatch.setattr(session, 'task_kind', '')
     yield
     tools.set_policy(None)
@@ -37,26 +36,24 @@ class TestSpecs:
         for name in toolpolicy.ALWAYS_ON_TOOLS:
             spec = tools.tool_spec(name)
             assert spec and spec['parameters'], name
-        assert {'final_answer', 'plan'} <= toolpolicy.ALWAYS_ON_TOOLS
+        assert toolpolicy.ALWAYS_ON_TOOLS == {
+            'search_tools', 'use_skill', 'spawn', 'check', 'join',
+            'apply_work'}
 
-    def test_turn_contract_tools_validate_themselves(self) -> None:
-        args = {'outcome': 'delegate', 'tasks': [
-            {'goal': 'g', 'kind': 'review', 'complexity': 'hard'}]}
-        assert tools.validate_arguments('plan', args) == (args, '')
-        assert tools.validate_arguments('plan', {'outcome': 'later'}) == \
-            ({'outcome': 'later'}, '')                # plan.parse re-asks
-        misnamed = {'answer': 'Named wrong.'}
-        assert tools.validate_arguments('final_answer', misnamed) == \
-            (misnamed, '')                            # final_text copes
-        assert tools.tool_spec('plan')['parameters']
-        assert tools.tool_spec('final_answer')['parameters'] == {
-            'text': 'Your complete answer to the user'}
+    def test_always_on_tools_validate_like_the_rest(self) -> None:
+        assert tools.validate_arguments('apply_work', {'worker': 'a2'}) == \
+            ({'worker': 'a2'}, '')
+        _args, error = tools.validate_arguments('apply_work', {'task': 'a2'})
+        assert error.startswith(tools.INVALID_ARGS_PREFIX)
+        assert 'apply_work(worker: str)' in error
+        for gone in ('plan', 'final_answer'):
+            assert tools.tool_spec(gone) == {}
 
-    def test_turn_contract_tools_are_never_policy_gated(self) -> None:
+    def test_always_on_tools_are_never_policy_gated(self) -> None:
         toolpolicy.set_policy(toolpolicy.ToolsPolicy(enabled={'read_file'}))
         try:
-            assert toolpolicy.is_enabled('plan')
-            assert toolpolicy.is_enabled('final_answer')
+            assert toolpolicy.is_enabled('apply_work')
+            assert toolpolicy.is_enabled('spawn')
             assert not toolpolicy.is_enabled('edit_file')
         finally:
             toolpolicy.set_policy(None)

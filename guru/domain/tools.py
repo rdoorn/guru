@@ -6,7 +6,6 @@ model requests a tool; this module handles the domain allow-list gate,
 """
 import json
 import time
-from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -15,13 +14,6 @@ from ddgs import DDGS
 from guru import config, log, session, skills, ui
 from guru.domain import (code, decisions, files, gitread, ledger, patch,
                          policy, procs, quality, routing, toolpolicy)
-from guru.domain import plan as _plan
-
-# The tools a controller (``[routing] controller = true``) keeps: it
-# coordinates and never executes (design doc §2). Its one tool is the
-# forced ``plan`` call (guru.domain.plan); spawn/check/join stay for
-# hands-on delegation.
-CONTROLLER_TOOLS = frozenset(('plan',))
 # The project tool policy seam lives in guru.domain.toolpolicy (so the
 # audited verbs can read it without importing this module); re-exported
 # here so tools.set_policy / is_enabled / active_policy keep working.
@@ -51,8 +43,9 @@ DIRECT_WRITE_TOOLS = frozenset(('write_file', 'edit_file', 'apply_patch',
 # Pre-activated for a writing task kind (toolpolicy.WRITE_KINDS), still
 # subject to the policy, the kind and the sandbox rule above.
 _WRITE_KIND_TOOLS = ('write_file', 'edit_file', 'apply_patch')
+WORKER_HIDDEN = frozenset(('sandbox_submit',))
 SANDBOX_WRITE_REFUSAL = ('Refused: this project runs in a sandbox; edit '
-                         'inside it and use sandbox_submit')
+                         'your copy with sandbox_python or sandbox_run')
 
 
 # --- project tool policy (.guru/tools.toml) ----------------------------------
@@ -81,10 +74,15 @@ def _advertised(kind: object = None) -> list:
     list, so a disabled tool is never described to the model (and
     ``execute_tool`` refuses it anyway if called by name). The sandbox
     verbs are listed only while the project has a sandbox image, and then
-    the direct write tools are not (``DIRECT_WRITE_TOOLS``); the tools
+    the direct write tools are not (``DIRECT_WRITE_TOOLS``); a worker
+    never gets ``sandbox_submit`` (``WORKER_HIDDEN``); the tools
     ``toolpolicy.for_kind`` hides for the kind are left out too."""
     sandbox = _sandbox_available()
     hidden = DIRECT_WRITE_TOOLS if sandbox else frozenset(SANDBOX_TOOLS)
+    if session.task_id:
+        # A worker's changes go back to the lead as a diff with its report
+        # (apply_work); only the lead submits through the gate.
+        hidden = hidden | WORKER_HIDDEN
     hidden = hidden | toolpolicy.for_kind(
         _task_kind() if kind is None else kind)
     return [name for name in TOOL_REGISTRY if is_enabled(name)
@@ -147,9 +145,9 @@ _SPAWN_SPEC = {
         'task': 'A clear, self-contained instruction for the sub-agent',
         'kind': ('What kind of task this is, one of: '
                  + ', '.join(routing.KINDS) + ' (default other)'),
-        'complexity': ('How hard the task is, one of: '
-                       + ', '.join(routing.COMPLEXITY)
-                       + ' (default standard)'),
+        'complexity': ('How hard the task is (default standard): '
+                       + '; '.join(f'{tier} = {desc}' for tier, desc in
+                                   routing.COMPLEXITY_DESCRIPTIONS.items())),
         'role': 'Optional persona name from the catalog (or empty)',
         'skill': 'Optional method name from the catalog (or empty)',
     },
@@ -234,77 +232,40 @@ _JOIN_SPEC = {
 }
 
 
-# Pluggable controller plan handler — installed by the orchestrator.
-# Signature: (args: dict) -> str; it validates the plan
-# (guru.domain.plan.evaluate) and, for ``delegate``, spawns the tasks.
-_plan_handler = None
+# Pluggable apply-work handler — installed by the orchestrator. Signature:
+# (worker: str) -> str; merges a finished worker's sandbox diff into the
+# lead's own sandbox copy (guru.sandbox.verbs.apply_work).
+_apply_work_handler = None
 
 
-def set_plan_handler(fn) -> None:
-    """Install the controller plan handler (guru.orchestrator)."""
-    global _plan_handler
-    _plan_handler = fn
+def set_apply_work_handler(fn) -> None:
+    """Install the apply-work handler (guru.orchestrator)."""
+    global _apply_work_handler
+    _apply_work_handler = fn
 
 
-def plan_call(args: dict) -> str:
-    """Run the ``plan`` tool on its raw arguments (the loop and
-    ``execute_tool`` pass the dict through untouched)."""
-    if _plan_handler is None:
-        return ("Planning is not available in this mode; answer the user"
-                " directly.")
-    return _plan_handler(dict(args or {}))
-
-
-def plan(outcome: str, answer: str = '', tasks: Optional[list] = None) -> str:
+def apply_work(worker: str) -> str:
     """
-    Your one reply per turn: answer the user, or delegate tasks to routed
-    workers that run in parallel and report back to you.
-
-    Args:
-        outcome: "answer" (reply with answer, no worker runs) or "delegate"
-            (guru runs every task in tasks and resumes you with results).
-        answer: The reply to the user (outcome answer).
-        tasks: For outcome delegate, at least one object {goal, kind,
-            complexity, files?, role?, skill?}.
+    Merge a finished worker's changes (its sandbox diff, shown in its
+    report) into your own sandbox copy. Review the diff first; after
+    merging, run the tests in your copy and call sandbox_submit once for
+    the integrated change.
     """
-    return plan_call({'outcome': outcome, 'answer': answer,
-                      'tasks': tasks or []})
+    if _apply_work_handler is None:
+        return "Applying worker changes is not available in this mode."
+    return _apply_work_handler(worker)
 
 
-_PLAN_SPEC = {
-    'name': 'plan',
-    'description': config.PLAN_TOOL_DESCRIPTION,
-    'parameters': {
-        'outcome': '"answer" or "delegate"',
-        'answer': 'The reply to the user (outcome answer)',
-        'tasks': 'The tasks to run in parallel (outcome delegate)',
-    },
-    'optional': ['answer', 'tasks'],
-    'types': {'tasks': 'list'},
-    # The full JSON schema (nested tasks); adapters send it verbatim.
-    'schema': _plan.SCHEMA,
-}
-
-# The turn contract's own calls validate themselves: ``plan`` through
-# ``guru.domain.plan.parse`` (typed, nested, with the re-ask the loop
-# allows once) and ``final_answer`` through ``plan.final_text`` (a
-# misnamed field still answers). ``validate_arguments`` leaves them as-is
-# so the generic one-line error never pre-empts that contract.
-_SELF_VALIDATING = frozenset(('plan', 'final_answer'))
-
-
-def final_answer(text: str) -> str:
-    """
-    Deliver your complete final answer to the user and end the turn. Call
-    it once, when the task is done; until then call the tools you need.
-    """
-    return _plan.ANSWER_ACK
-
-
-_FINAL_ANSWER_SPEC = {
-    'name': 'final_answer',
-    'description': config.FINAL_ANSWER_DESCRIPTION,
-    'parameters': {'text': 'Your complete answer to the user'},
+_APPLY_WORK_SPEC = {
+    'name': 'apply_work',
+    'description': (
+        "Merge a finished worker's changes (the sandbox diff in its report)"
+        ' into your own sandbox copy, after you reviewed them. Then run the'
+        ' tests in your copy and call sandbox_submit once for the'
+        ' integrated change.'
+    ),
+    'parameters': {'worker': 'The worker name, e.g. "agent2"'},
+    'example': {'worker': 'agent2'},
 }
 
 
@@ -1044,7 +1005,7 @@ TOOL_REGISTRY: dict = {
 # The always-on tools' specs by name (they are not registry entries).
 _BUILTIN_SPECS: dict = {
     'search_tools': None, 'use_skill': None, 'spawn': None, 'check': None,
-    'join': None, 'plan': None, 'final_answer': None}
+    'join': None, 'apply_work': None}
 
 
 def _match_tools(query: str) -> list:
@@ -1247,7 +1208,7 @@ def validate_arguments(name: str, arguments: object) -> tuple:
     example. An unknown tool validates as-is (``execute_tool`` names it).
     """
     spec = tool_spec(name)
-    if not spec or name in _SELF_VALIDATING:
+    if not spec:
         return arguments, ''
     tail = f" Expected {signature_text(spec)}, e.g. {example_text(spec)}"
     if not isinstance(arguments, dict):
@@ -1296,28 +1257,26 @@ def active_specs() -> list:
     to their native tool schema. search_tools is always present; discovered
     registry tools are added as they are activated.
     """
-    return specs_for(session.active_tool_names, session.can_spawn,
-                     session.controller)
+    return specs_for(session.active_tool_names, session.can_spawn)
 
 
 def specs_for(active_tool_names, can_spawn: bool,
-              controller: bool = False, kind: object = None) -> list:
+              kind: object = None) -> list:
     """Provider-neutral specs for a given tool set (no session routing).
 
     Lets callers (e.g. the context breakdown) price a specific agent's tool
-    schemas without binding that agent's session context. A controller gets
-    only ``plan``, whatever ``active_tool_names`` holds; every other
-    agent has ``final_answer`` (the turn contract, guru.adapters.turn).
-    A tool the project policy disables is left out even if it is in
+    schemas without binding that agent's session context. A delegating
+    agent (the lead) has spawn/check/join, and apply_work in a sandbox
+    project. A tool the project policy disables is left out even if it is in
     ``active_tool_names`` (e.g. activated before the policy changed), as
     is one ``toolpolicy.for_kind`` hides for ``kind`` (default: the bound
     session's task kind).
     """
-    if controller:
-        return [_PLAN_SPEC]
-    specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC, _FINAL_ANSWER_SPEC]
+    specs = [_SEARCH_TOOLS_SPEC, _USE_SKILL_SPEC]
     if can_spawn:
         specs.extend([_SPAWN_SPEC, _CHECK_SPEC, _JOIN_SPEC])
+        if _sandbox_available():
+            specs.append(_APPLY_WORK_SPEC)
     for name in _advertised(kind):
         if name in active_tool_names:
             info = TOOL_REGISTRY[name]
@@ -1354,20 +1313,18 @@ def _core_tool_fns(kind: object = None) -> list:
             if name in advertised]
 
 
-def initial_tools(can_spawn: bool, controller: bool = False,
-                  kind: object = None) -> tuple:
+def initial_tools(can_spawn: bool, kind: object = None) -> tuple:
     """The active tool list + activated-name set an agent starts a turn with:
-    the always-on tools (search_tools, use_skill, final_answer, and
-    spawn/check/join when delegation-capable) plus the pre-activated core
-    toolset, minus what ``toolpolicy.for_kind(kind)`` hides (the
-    orchestrator passes the task's kind when it configures a child;
-    default: the bound session's). A controller gets exactly ``plan`` and
-    no core tools."""
-    if controller:
-        return [plan], set()
-    base = [search_tools, use_skill, final_answer]
+    the always-on tools (search_tools, use_skill, and spawn/check/join —
+    plus apply_work in a sandbox project — when delegation-capable) plus
+    the pre-activated core toolset, minus what ``toolpolicy.for_kind(kind)``
+    hides (the orchestrator passes the task's kind when it configures a
+    child; default: the bound session's)."""
+    base = [search_tools, use_skill]
     if can_spawn:
         base.extend([spawn, check, join])
+        if _sandbox_available():
+            base.append(apply_work)
     names = set()
     for name, fn in _core_tool_fns(kind):
         base.append(fn)
@@ -1383,7 +1340,7 @@ def reset_active_tools() -> None:
     callables, sees them); the pre-activated core toolset is added so common
     file tools can be called without a search_tools hop.
     """
-    base, names = initial_tools(session.can_spawn, session.controller)
+    base, names = initial_tools(session.can_spawn)
     session.active_tools[:] = base
     session.active_tool_names.clear()
     session.active_tool_names.update(names)
@@ -1485,22 +1442,12 @@ def execute_tool(name: str, arguments: dict) -> str:
         code = str(arguments.get('code', ''))
         ui.note_tool(name, f'{len(code)} chars, {len(code.splitlines())} '
                            'lines')
-    elif name == 'plan':
-        ui.note_tool(name, str(arguments.get('outcome', '')))
-    elif name == 'final_answer':
-        ui.note_tool(name, f'{len(_plan.final_text(arguments))} chars')
     elif name != 'delete_file':
         ui.note_tool(name, ' '.join(str(v) for v in arguments.values()))
     denied = ''
     started = time.monotonic()
     arguments, schema_error = validate_arguments(name, arguments)
-    if session.controller and name not in CONTROLLER_TOOLS:
-        # A controller coordinates only; its tool set is ``plan`` alone,
-        # so keep that true (the attempt is still measured by
-        # turn.controller_executed).
-        result = f"Unknown tool: {name}"
-        denied = 'controller'
-    elif name in TOOL_REGISTRY and not is_enabled(name):
+    if name in TOOL_REGISTRY and not is_enabled(name):
         result = f"Tool '{name}' is disabled by .guru/tools.toml"
         denied = 'policy'
     elif name in DIRECT_WRITE_TOOLS and _sandbox_available():
@@ -1523,10 +1470,8 @@ def execute_tool(name: str, arguments: dict) -> str:
         result = check(**arguments)
     elif name == "join":
         result = join(**arguments)
-    elif name == "plan":
-        result = plan_call(arguments)
-    elif name == "final_answer":
-        result = final_answer(_plan.final_text(arguments))
+    elif name == "apply_work" and session.can_spawn:
+        result = apply_work(**arguments)
     elif name in TOOL_REGISTRY:
         try:
             result = TOOL_REGISTRY[name]["fn"](**arguments)
@@ -1555,4 +1500,4 @@ def execute_tool(name: str, arguments: dict) -> str:
 _BUILTIN_SPECS.update({
     'search_tools': _SEARCH_TOOLS_SPEC, 'use_skill': _USE_SKILL_SPEC,
     'spawn': _SPAWN_SPEC, 'check': _CHECK_SPEC, 'join': _JOIN_SPEC,
-    'plan': _PLAN_SPEC, 'final_answer': _FINAL_ANSWER_SPEC})
+    'apply_work': _APPLY_WORK_SPEC})

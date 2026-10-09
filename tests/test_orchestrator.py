@@ -1,7 +1,10 @@
 """Tests for the shared spawn/check/join mailbox (guru.orchestrator)."""
 import os
+from types import SimpleNamespace
 
 import pytest
+
+import guru.orchestrator as orch_mod
 
 from guru import config, session
 from guru.domain import conversation, ledger
@@ -44,18 +47,18 @@ class TestOrchestrator:
         assert 'resuming' in msg.lower()
         assert any('A1' in p for p in main.queue)
 
-    def test_join_names_a_capped_child(self) -> None:
+    def test_join_names_a_stalled_child(self) -> None:
         from guru.orchestrator import Orchestrator
         o = Orchestrator()
         main = o.manager.active
         main.busy = True
         c1 = self._agent('agent1', parent=main, answer='A1')
-        c1.outcome = 'capped'
+        c1.outcome = 'stalled'
         o.manager.agents.append(c1)
         o.barriers[main] = {'remaining': {'agent1'}, 'results': {}}
         o.report(c1)
         [payload] = main.queue
-        assert '— agent1 · capped · task: task-agent1\nA1' in payload
+        assert '— agent1 · stalled · task: task-agent1\nA1' in payload
 
     def test_report_barrier_waits_then_delivers_joined(self) -> None:
         from guru.orchestrator import Orchestrator
@@ -415,21 +418,21 @@ class TestTaskRecords:
         o.on_done(child)
         assert self._tasks(fake_repo)[1]['status'] == 'cancelled'
 
-    def test_capped_child_is_recorded_and_delivered_as_capped(
+    def test_stalled_child_is_recorded_and_delivered_as_stalled(
             self, monkeypatch, fake_repo) -> None:
         from guru.orchestrator import Orchestrator
         o = Orchestrator()
         main = o.manager.active
         main.busy = True
         child = self._child(o, main)
-        child.state.capped = True
+        child.state.stalled = True
         child.state.messages.append({'role': 'assistant',
-                                     'content': '(capped: ...) handoff'})
+                                     'content': '(stalled: ...) handoff'})
         o.on_done(child)
-        assert self._tasks(fake_repo)[1]['status'] == 'capped'
-        assert child.outcome == 'capped'
+        assert self._tasks(fake_repo)[1]['status'] == 'stalled'
+        assert child.outcome == 'stalled'
         [payload] = main.queue
-        assert payload.startswith(f'[result from {child.title} · capped ·'
+        assert payload.startswith(f'[result from {child.title} · stalled ·'
                                   ' task: review auth]')
 
     def test_done_child_delivery_header_unchanged(
@@ -555,7 +558,7 @@ class TestTaskRecords:
             ['running', 'error']
 
 
-# --- routing (Task 4.4), controller (4.5) and the local retry (4.6) ---------
+# --- routing (Task 4.4) and the local retry (4.6) ---------------------------
 
 def _fake_adapter(name: str, remote: bool):
     """A minimal Adapter subclass with the given ``remote`` flag."""
@@ -991,58 +994,67 @@ class TestLoopThreadSafety:
         assert calls == []
 
 
-class TestControllerConfigure:
-    """configure(controller=True) installs the controller hint + tool set."""
+class TestLeadConfigure:
+    """configure() makes every delegation-capable agent the lead."""
 
-    def _orch(self):
+    def _orch(self, monkeypatch, sandbox: bool = False):
+        import guru.orchestrator as orch_mod
+        from guru.domain import tools
         from guru.orchestrator import Orchestrator
+        monkeypatch.setattr(orch_mod, '_sandbox_available', lambda: sandbox)
+        monkeypatch.setattr(tools, '_sandbox_available', lambda: sandbox)
         o = Orchestrator()
         base = session.SessionState()
         base.model = 'm'
         return o, base
 
-    def test_controller_gets_hint_flag_and_tools(self) -> None:
+    def test_lead_gets_hint_and_delegation_tools(self, monkeypatch) -> None:
         from guru.agents import Agent
         from guru.domain import tools
-        o, base = self._orch()
-        agent = Agent(id='main', title='main')
-        o.configure(agent, base, can_spawn=True, controller=True)
-        st = agent.state
-        assert st.controller is True and st.can_spawn is True
-        assert config.CONTROLLER_HINT in st.messages[0]['content']
-        assert config.DELEGATION_HINT not in st.messages[0]['content']
-        assert st.active_tools == [tools.plan]
-        assert st.active_tool_names == set()
-
-    def test_non_controller_unchanged(self) -> None:
-        from guru.agents import Agent
-        from guru.domain import tools
-        o, base = self._orch()
+        o, base = self._orch(monkeypatch)
         agent = Agent(id='main', title='main')
         o.configure(agent, base, can_spawn=True)
         st = agent.state
-        assert st.controller is False
-        assert config.DELEGATION_HINT in st.messages[0]['content']
-        assert tools.search_tools in st.active_tools
+        assert st.can_spawn is True
+        system = st.messages[0]['content']
+        assert config.LEAD_HINT in system
+        assert config.LEAD_SANDBOX_HINT not in system
+        for fn in (tools.search_tools, tools.spawn, tools.check, tools.join):
+            assert fn in st.active_tools
+        assert tools.apply_work not in st.active_tools
 
-    def test_controller_requires_can_spawn(self) -> None:
+    def test_lead_in_a_sandbox_project_gets_the_sandbox_hint(
+            self, monkeypatch) -> None:
         from guru.agents import Agent
-        o, base = self._orch()
-        agent = Agent(id='a', title='a')
-        o.configure(agent, base, can_spawn=False, controller=True)
-        assert agent.state.controller is False
-        assert config.CONTROLLER_HINT not in agent.state.messages[0]['content']
+        from guru.domain import tools
+        o, base = self._orch(monkeypatch, sandbox=True)
+        agent = Agent(id='main', title='main')
+        o.configure(agent, base, can_spawn=True)
+        assert (config.LEAD_HINT + config.LEAD_SANDBOX_HINT
+                in agent.state.messages[0]['content'])
+        assert tools.apply_work in agent.state.active_tools
 
-    def test_controller_prompt_names_cwd_and_repo_rule(
+    def test_worker_gets_no_lead_hint(self, monkeypatch) -> None:
+        from guru.agents import Agent
+        from guru.domain import tools
+        o, base = self._orch(monkeypatch, sandbox=True)
+        agent = Agent(id='a', title='a')
+        o.configure(agent, base, can_spawn=False)
+        system = agent.state.messages[0]['content']
+        assert config.LEAD_HINT not in system
+        assert config.LEAD_SANDBOX_HINT not in system
+        assert tools.spawn not in agent.state.active_tools
+
+    def test_lead_prompt_names_cwd_and_repo_rule(
             self, tmp_path, monkeypatch) -> None:
-        """The rendered controller system prompt carries the working
-        directory and the 'never ask which repository' rule."""
+        """The rendered lead system prompt carries the working directory
+        and the 'never ask which repository' rule."""
         from guru.agents import Agent
         monkeypatch.chdir(tmp_path)
-        o, base = self._orch()
+        o, base = self._orch(monkeypatch)
         base.git_branch = 'feat/routing'
         agent = Agent(id='main', title='main')
-        o.configure(agent, base, can_spawn=True, controller=True)
+        o.configure(agent, base, can_spawn=True)
         token = session.use(agent.state)
         try:
             conversation.refresh_system_context()
@@ -1051,7 +1063,7 @@ class TestControllerConfigure:
         body = agent.state.messages[0]['content']
         assert str(tmp_path.resolve()) in body
         assert 'feat/routing' in body
-        assert 'Never ask which repository' in body
+        assert 'never ask which repository' in body
 
 
 class TestLocalRetry:
@@ -1244,7 +1256,7 @@ def labels_isolated(monkeypatch):
 
 
 class TestLabelsShadow:
-    """_plan_child shadows the controller's kind/complexity labels at the
+    """_plan_child shadows the lead's kind/complexity labels at the
     ``labels`` point, one heuristic per question."""
 
     @pytest.fixture(autouse=True)
@@ -1382,7 +1394,7 @@ class TestLabelsTieBreaker:
         # one synchronous complexity ask, one background kind ask
         assert sorted(judge.calls) == [['complexity'], ['kind']]
 
-    def test_narrow_margin_keeps_the_controller_label(self, fake_repo):
+    def test_narrow_margin_keeps_the_lead_label(self, fake_repo):
         from guru.domain import decisions
         decisions.set_judge('labels', self._Dist(
             {'trivial': 0.15, 'standard': 0.40, 'hard': 0.45}))
@@ -1863,7 +1875,7 @@ class TestSpawnJoinRace:
 
 class TestPanelText:
     """The panel judge reads the parent's request and then the task, so a
-    controller that strips 'security' from the task it writes still
+    lead that strips 'security' from the task it writes still
     triggers the security worker."""
 
     def test_request_first_then_task(self) -> None:
@@ -2047,7 +2059,7 @@ class TestConfigureKind:
 
 
 class TestProjectBrief:
-    """The brief reaches the controller (the map) and every child (the
+    """The brief reaches the lead (the map) and every child (the
     slice) from one cached object per (root, HEAD)."""
 
     def _brief(self, head='h1'):
@@ -2059,7 +2071,7 @@ class TestProjectBrief:
                      symbols={'alpha': ['app/core.py:1']},
                      test_command='make test')
 
-    def test_controller_gets_the_map_workers_the_slice(self, monkeypatch):
+    def test_lead_gets_the_map_workers_the_slice(self, monkeypatch):
         import guru.orchestrator as orch_mod
         from guru.agents import Agent
         from guru.orchestrator import Orchestrator
@@ -2074,7 +2086,7 @@ class TestProjectBrief:
         o = Orchestrator()
         main = o.manager.active
         ctrl = Agent(id='c', title='c')
-        o.configure(ctrl, main.state, can_spawn=True, controller=True)
+        o.configure(ctrl, main.state, can_spawn=True)
         system = ctrl.state.messages[0]['content']
         assert '\n\n[project map]\n[project brief] p @ h1:' in system
         assert 'tests: make test' in system
@@ -2084,7 +2096,7 @@ class TestProjectBrief:
         worker = child.state.messages[0]['content']
         assert '[project brief]' in worker and 'L1-2 def alpha' in worker
         assert '[project map]' not in worker
-        # One build/load for the controller and the child alike.
+        # One build/load for the lead and the child alike.
         import os
         assert calls == [(os.path.realpath(os.getcwd()), 'h1')]
 
@@ -2123,7 +2135,7 @@ class TestProjectBrief:
         assert logged == ['project brief unavailable']
         main = o.manager.active
         ctrl = Agent(id='c', title='c')
-        o.configure(ctrl, main.state, can_spawn=True, controller=True)
+        o.configure(ctrl, main.state, can_spawn=True)
         assert '[project map]' not in ctrl.state.messages[0]['content']
         assert orch_mod._brief_block('t', None) == ''
         assert orch_mod._map_block(None) == ''
@@ -2141,128 +2153,173 @@ class TestProjectBrief:
         assert logged == ['brief slice failed']
 
 
-class TestDeliverablesCheck:
-    """A child that owns deliverables is ``incomplete`` when one was not
-    written during its task; the delivery says which."""
+class TestLeadSandbox:
+    """A worker's sandbox copy outlives its task: its diff rides along
+    with its report and the lead merges it with ``apply_work``."""
 
     @pytest.fixture(autouse=True)
-    def _constant_environment(self, monkeypatch) -> None:
-        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
-
-    def _run(self, monkeypatch, tmp_path, fake_repo, write: list,
-             deliverables: list, preexisting: tuple = ()):
-        import time as _time
-
+    def _isolate(self, monkeypatch) -> None:
+        """No git per spawn, no real sandbox, cleanups recorded."""
         from guru.orchestrator import Orchestrator
-        monkeypatch.chdir(tmp_path)
-        for name in preexisting:
-            (tmp_path / name).write_text('old')
-            old = _time.time() - 3600
-            os.utime(tmp_path / name, (old, old))
+        from guru.sandbox import verbs
+        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
+        self.diffs: dict = {}
+        self.applied: list = []
+        self.cleaned: list = []
+        monkeypatch.setattr(verbs, 'worker_diff',
+                            lambda task_id: self.diffs.get(task_id, ''))
+
+        def fake_apply(task_id):
+            self.applied.append(task_id)
+            return f'applied {task_id}'
+        monkeypatch.setattr(verbs, 'apply_work', fake_apply)
+        monkeypatch.setattr(Orchestrator, '_cleanup_sandbox',
+                            staticmethod(self.cleaned.append))
+
+    def _setup(self, busy: bool = False):
+        from guru.orchestrator import Orchestrator
         o = Orchestrator()
         main = o.manager.active
-        main.busy = True
+        main.busy = True             # deliveries only queue
         child = o._make_child(main, task='build it', kind='build')
         child.queue.clear()
-        child.deliverables = list(deliverables)
-        child.started_wall = _time.time() - 1
-        child.preexisting = {p for p in deliverables
-                             if (tmp_path / p).exists()}
-        for name in write:
-            (tmp_path / name).write_text('new')
+        child.busy = busy
         child.state.messages.append({'role': 'assistant', 'content': 'ok'})
+        o.manager.agents.append(child)
+        return o, main, child
+
+    def test_apply_work_refuses_an_unknown_name(self, fake_repo) -> None:
+        o, main, child = self._setup()
+        out = o.do_apply_work(main.state, 'nobody')
+        assert out == f"No sub-agent named 'nobody'. Yours: {child.title}."
+        assert self.applied == []
+
+    def test_apply_work_refuses_without_children(self, fake_repo) -> None:
+        from guru.orchestrator import Orchestrator
+        o = Orchestrator()
+        main = o.manager.active
+        assert o.do_apply_work(main.state, 'agent1') == (
+            "No sub-agent named 'agent1'. Yours: none.")
+        assert self.applied == []
+
+    def test_apply_work_refuses_a_busy_child(self, fake_repo) -> None:
+        o, main, child = self._setup(busy=True)
+        out = o.do_apply_work(main.state, child.title)
+        assert out == f'{child.title} is still running; join it first.'
+        assert self.applied == []
+
+    def test_apply_work_merges_the_childs_task(self, fake_repo) -> None:
+        o, main, child = self._setup()
+        task_id = child.state.task_id
+        assert task_id
+        out = o.do_apply_work(main.state, f'  {child.title} ')
+        assert out == f'applied {task_id}'
+        assert self.applied == [task_id]
+
+    def test_install_handlers_wires_apply_work(self, fake_repo) -> None:
+        from guru.domain import tools
+        o, main, child = self._setup()
+        o.install_handlers()
+        try:
+            token = session.use(main.state)
+            try:
+                assert tools.apply_work(child.title) == (
+                    f'applied {child.state.task_id}')
+            finally:
+                session.reset(token)
+        finally:
+            o.clear_handlers()
+        assert tools._apply_work_handler is None
+
+    def test_report_carries_the_workers_diff(self, fake_repo) -> None:
+        o, main, child = self._setup()
+        self.diffs[child.state.task_id] = '--- a/x\n+++ b/x\n+new\n'
+        child.report_diff = orch_mod._diff_block(child)   # worker thread
         o.on_done(child)
-        ledger.flush()
-        return child, main, fake_repo.stream('tasks')[-1]
-
-    def test_all_written_is_done(self, monkeypatch, tmp_path,
-                                 fake_repo) -> None:
-        child, main, row = self._run(monkeypatch, tmp_path, fake_repo,
-                                     write=['a.py'], deliverables=['a.py'])
-        assert row['status'] == 'done' and child.outcome == 'done'
-
-    def test_missing_is_incomplete(self, monkeypatch, tmp_path,
-                                   fake_repo) -> None:
-        child, main, row = self._run(
-            monkeypatch, tmp_path, fake_repo, write=['a.py'],
-            deliverables=['a.py', 'tests/test_a.py'])
-        assert row['status'] == 'incomplete'
         [payload] = main.queue
-        assert payload.startswith(f'[result from {child.title} ·'
-                                  ' incomplete · task: build it]')
-        assert payload.endswith('(guru: deliverables not written:'
-                                ' tests/test_a.py)')
+        assert payload.startswith(f'[result from {child.title} · task:'
+                                  ' build it]\nok')
+        assert (f'[sandbox diff of {child.title} — review it, then'
+                f' apply_work("{child.title}") to merge it into your copy]'
+                in payload)
+        assert payload.endswith('```diff\n--- a/x\n+++ b/x\n+new\n\n```')
 
-    def test_untouched_existing_file_is_not_written(
-            self, monkeypatch, tmp_path, fake_repo) -> None:
-        _child, _main, row = self._run(
-            monkeypatch, tmp_path, fake_repo, write=[],
-            deliverables=['a.py'], preexisting=('a.py',))
-        assert row['status'] == 'incomplete'
-
-    def test_an_untouched_existing_owned_file_is_fine(
-            self, monkeypatch, tmp_path, fake_repo) -> None:
-        # A fix that needed only one of its two (existing) files.
-        _child, _main, row = self._run(
-            monkeypatch, tmp_path, fake_repo, write=['a.py'],
-            deliverables=['a.py', 'b.py'], preexisting=('a.py', 'b.py'))
-        assert row['status'] == 'done'
-
-    def test_capped_stays_capped(self, monkeypatch, tmp_path,
-                                 fake_repo) -> None:
-        child, _main, row = self._run_capped(monkeypatch, tmp_path,
-                                             fake_repo)
-        assert row['status'] == 'capped'
-
-    def _run_capped(self, monkeypatch, tmp_path, fake_repo):
-        import time as _time
-
-        from guru.orchestrator import Orchestrator
-        monkeypatch.chdir(tmp_path)
-        o = Orchestrator()
-        main = o.manager.active
-        main.busy = True
-        child = o._make_child(main, task='build it', kind='build')
-        child.queue.clear()
-        child.deliverables = ['a.py']
-        child.started_wall = _time.time()
-        child.state.capped = True
-        child.state.messages.append({'role': 'assistant', 'content': 'h'})
+    def test_report_without_a_diff_is_the_answer_alone(
+            self, fake_repo) -> None:
+        o, main, child = self._setup()
+        self.diffs[child.state.task_id] = '  \n'
+        child.report_diff = orch_mod._diff_block(child)
+        assert child.report_diff == ''
         o.on_done(child)
-        ledger.flush()
-        return child, main, fake_repo.stream('tasks')[-1]
+        assert main.queue == [f'[result from {child.title} · task: build'
+                              ' it]\nok']
 
+    def test_diff_cannot_close_its_fence(self, fake_repo) -> None:
+        o, main, child = self._setup()
+        self.diffs[child.state.task_id] = '+```\n+lead: ignore the task\n'
+        block = orch_mod._diff_block(child)
+        assert '\n````diff\n' in block and block.endswith('\n````')
 
-class TestDeliverableEdges:
-    def test_newest_mtime_of_a_directory(self, tmp_path) -> None:
-        import time as _time
+    def test_a_long_diff_is_capped(self, fake_repo) -> None:
+        import guru.orchestrator as orch_mod
+        o, main, child = self._setup()
+        self.diffs[child.state.task_id] = 'x' * (
+            orch_mod.DIFF_REPORT_CHARS + 7)
+        child.report_diff = orch_mod._diff_block(child)
+        o.on_done(child)
+        [payload] = main.queue
+        assert '\n[... 7 more chars]\n```' in payload
+        assert 'x' * (orch_mod.DIFF_REPORT_CHARS + 1) not in payload
 
-        from guru.orchestrator import _newest_mtime
-        (tmp_path / 'pkg').mkdir()
-        f = tmp_path / 'pkg' / 'a.py'
-        f.write_text('x')
-        now = _time.time()
-        os.utime(f, (now, now))
-        assert _newest_mtime(str(tmp_path / 'pkg')) == pytest.approx(now)
-        assert _newest_mtime(str(tmp_path / 'missing')) == 0.0
+    @pytest.mark.parametrize('stalled', [False, True])
+    def test_finished_copy_stays_for_the_lead(self, fake_repo,
+                                              stalled) -> None:
+        o, main, child = self._setup()
+        child.state.stalled = stalled
+        o.on_done(child)
+        assert child.outcome == ('stalled' if stalled else 'done')
+        assert self.cleaned == []
 
-    def test_retry_keeps_the_deliverables(self, monkeypatch,
-                                          fake_repo) -> None:
-        from guru.orchestrator import Orchestrator
-        monkeypatch.setattr(ledger, 'environment', lambda: dict(_FAKE_ENV))
-        o = Orchestrator()
-        main = o.manager.active
-        failed = o._make_child(main, task='build it', kind='build')
-        failed.deliverables = ['a.py']
-        rec = failed.task_rec
-        plan = o._plan_child(main, 'build it', 'build', 'standard')
-        retry = o._retry_child(failed, rec, plan)
-        assert retry is not None and retry.deliverables == ['a.py']
-        assert retry.deliverables is not failed.deliverables
+    def test_errored_copy_is_cleaned_at_once(self, fake_repo) -> None:
+        o, main, child = self._setup()
+        child.status = 'error'
+        o.on_done(child)
+        assert child.outcome == 'error'
+        assert self.cleaned == [child.state.task_id]
+
+    def test_cancelled_copy_is_cleaned_at_once(self, fake_repo) -> None:
+        o, main, child = self._setup()
+        child.state.cancel_requested = True
+        o.on_done(child)
+        assert child.outcome == 'cancelled'
+        assert self.cleaned == [child.state.task_id]
+
+    def test_new_request_drops_finished_childrens_copies(
+            self, fake_repo) -> None:
+        o, main, done = self._setup()
+        running = o._make_child(main, task='still going', kind='build')
+        running.busy = True
+        o.manager.agents.append(running)
+        o.loop = SimpleNamespace(
+            run_in_executor=lambda ex, fn, *a: fn(*a))
+        o.launch = lambda agent: None                # type: ignore
+        main.busy, main.queue = False, []
+        o.submit(main, 'next thing')
+        assert self.cleaned == [done.state.task_id]
+        assert main.queue[-1] == 'next thing'
+
+    def test_new_request_keeps_copies_while_a_report_waits(
+            self, fake_repo) -> None:
+        o, main, done = self._setup()
+        o.launch = lambda agent: None                # type: ignore
+        main.busy = False
+        main.queue[:] = ['[result from agent2 · task: x]\nok']
+        o.submit(main, 'next thing')
+        assert self.cleaned == []
 
 
 class TestProjectRules:
-    """The project's rules file reaches the controller and every worker."""
+    """The project's rules file reaches the lead and every worker."""
 
     def _brief(self, root):
         from guru.domain.brief import Brief

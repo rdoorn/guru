@@ -25,7 +25,6 @@ class TestSearchToolsDigest:
     def _session(self, monkeypatch, fake_repo):
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         monkeypatch.setattr(session, 'active_tool_names', set())
         monkeypatch.setattr(session, 'active_tools', [])
 
@@ -68,7 +67,7 @@ class TestActiveSpecs:
         monkeypatch.setattr(session, 'active_tool_names', set())
         specs = tools.active_specs()
         assert [s['name'] for s in specs] == [
-            'search_tools', 'use_skill', 'final_answer']
+            'search_tools', 'use_skill']
 
     def test_activated_tool_included(self, monkeypatch) -> None:
         monkeypatch.setattr(session, 'active_tool_names', {'web_fetch'})
@@ -81,7 +80,7 @@ class TestSpecsFor:
 
     def test_search_tools_always(self) -> None:
         assert [s['name'] for s in tools.specs_for(set(), False)] == [
-            'search_tools', 'use_skill', 'final_answer']
+            'search_tools', 'use_skill']
 
     def test_can_spawn_and_activated(self) -> None:
         names = {s['name'] for s in tools.specs_for({'web_fetch'}, True)}
@@ -329,106 +328,80 @@ class TestDomainAutoGrant:
         assert saved == ['example.com']
 
 
-class TestControllerTools:
-    """Controller mode: the ``plan`` tool alone (guru.domain.plan); every
-    other agent has ``final_answer`` (the turn contract)."""
+class TestLeadTools:
+    """The always-on tools: search_tools and use_skill for every agent,
+    spawn/check/join for the lead (``can_spawn``), plus apply_work in a
+    sandbox project; a worker never gets sandbox_submit."""
 
-    def test_initial_tools_controller(self, monkeypatch) -> None:
+    @staticmethod
+    def _sandbox(monkeypatch, on: bool) -> None:
+        from guru.sandbox import verbs
+        monkeypatch.setattr(verbs, 'available', lambda project=None: on)
+
+    def test_initial_tools_without_spawn(self, monkeypatch) -> None:
+        self._sandbox(monkeypatch, False)
         monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
-        base, names = tools.initial_tools(can_spawn=True, controller=True)
-        assert base == [tools.plan]
-        assert names == set()
-        assert tools.CONTROLLER_TOOLS == {'plan'}
+        base, names = tools.initial_tools(can_spawn=False)
+        assert base[:2] == [tools.search_tools, tools.use_skill]
+        assert tools.spawn not in base and names == {'read_file'}
 
-    def test_workers_get_final_answer(self, monkeypatch) -> None:
-        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
-        base, _ = tools.initial_tools(can_spawn=False)
-        assert tools.final_answer in base and tools.plan not in base
-        names = [s['name'] for s in tools.specs_for(set(), False)]
-        assert 'final_answer' in names and 'plan' not in names
-
-    def test_plan_spec_carries_the_full_schema(self) -> None:
-        from guru.domain import plan
-        spec = tools._PLAN_SPEC
-        assert spec['schema'] is plan.SCHEMA
-        assert spec['description'] == config.PLAN_TOOL_DESCRIPTION
-        assert set(spec['parameters']) == {'outcome', 'answer', 'tasks'}
-        assert set(spec['optional']) == {'answer', 'tasks'}
-        assert tools._FINAL_ANSWER_SPEC['parameters'] == {
-            'text': 'Your complete answer to the user'}
-
-    def test_initial_tools_non_controller_unchanged(self, monkeypatch):
+    def test_initial_tools_with_spawn(self, monkeypatch) -> None:
+        self._sandbox(monkeypatch, False)
         monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
         base, names = tools.initial_tools(can_spawn=True)
-        assert tools.search_tools in base and names == {'read_file'}
+        assert base[:5] == [tools.search_tools, tools.use_skill,
+                            tools.spawn, tools.check, tools.join]
+        assert tools.apply_work not in base and names == {'read_file'}
 
-    def test_specs_for_controller(self) -> None:
-        names = [s['name'] for s in
-                 tools.specs_for({'read_file', 'web_fetch'}, True,
-                                 controller=True)]
-        assert names == ['plan']
-
-    def test_active_specs_honours_session_controller(self, monkeypatch):
-        monkeypatch.setattr(session, 'active_tool_names', {'read_file'})
-        monkeypatch.setattr(session, 'can_spawn', True)
-        monkeypatch.setattr(session, 'controller', True)
-        names = [s['name'] for s in tools.active_specs()]
-        assert names == ['plan']
-        monkeypatch.setattr(session, 'controller', False)
-        names = [s['name'] for s in tools.active_specs()]
-        assert 'search_tools' in names and 'read_file' in names
-
-    def test_reset_active_tools_honours_controller(self, monkeypatch):
-        monkeypatch.setattr(session, 'active_tools', [])
-        monkeypatch.setattr(session, 'active_tool_names', set())
-        monkeypatch.setattr(session, 'can_spawn', True)
-        monkeypatch.setattr(session, 'controller', True)
-        tools.reset_active_tools()
-        assert session.active_tools == [tools.plan]
-        assert session.active_tool_names == set()
-
-    def test_execute_tool_hides_other_tools_from_a_controller(
+    def test_apply_work_only_for_a_lead_in_a_sandbox(
             self, monkeypatch) -> None:
+        self._sandbox(monkeypatch, True)
+        base, _ = tools.initial_tools(can_spawn=True)
+        assert tools.apply_work in base
+        assert 'apply_work' in {s['name']
+                                for s in tools.specs_for(set(), True)}
+        base, _ = tools.initial_tools(can_spawn=False)
+        assert tools.apply_work not in base
+        assert 'apply_work' not in {s['name']
+                                    for s in tools.specs_for(set(), False)}
+        self._sandbox(monkeypatch, False)
+        base, _ = tools.initial_tools(can_spawn=True)
+        assert tools.apply_work not in base
+        assert 'apply_work' not in {s['name']
+                                    for s in tools.specs_for(set(), True)}
+
+    def test_worker_is_not_advertised_sandbox_submit(
+            self, monkeypatch) -> None:
+        self._sandbox(monkeypatch, True)
+        monkeypatch.setattr(config, 'PREACTIVATE_TOOLS', ['read_file'])
+        monkeypatch.setattr(session, 'task_id', '')
+        _base, names = tools.initial_tools(can_spawn=False)
+        assert 'sandbox_submit' in names
+        monkeypatch.setattr(session, 'task_id', 't1')
+        base, names = tools.initial_tools(can_spawn=False)
+        assert tools.WORKER_HIDDEN == {'sandbox_submit'}
+        assert 'sandbox_submit' not in names
+        assert tools.sandbox_submit not in base
+        assert 'sandbox_run' in names
+        specs = tools.specs_for(set(tools.SANDBOX_TOOLS), False)
+        assert 'sandbox_submit' not in {s['name'] for s in specs}
+        assert 'sandbox_submit' not in tools.search_tools('submit sandbox')
+
+    def test_apply_work_routes_to_the_handler(self, monkeypatch) -> None:
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', True)
-        monkeypatch.setattr(session, 'active_tool_names', set())
-        assert tools.execute_tool('read_file', {'path': 'x'}) == \
-            'Unknown tool: read_file'
-        assert tools.execute_tool('search_tools', {'query': 'web'}) == \
-            'Unknown tool: search_tools'
-        assert tools.execute_tool('spawn', {'task': 't'}) == \
-            'Unknown tool: spawn'
-        assert tools.execute_tool('use_skill', {'name': 's'}) == \
-            'Unknown tool: use_skill'
-        assert session.active_tool_names == set()       # nothing activated
+        monkeypatch.setattr(session, 'can_spawn', True)
         seen: list = []
-        tools.set_plan_handler(lambda args: seen.append(args) or 'ok')
+        tools.set_apply_work_handler(lambda w: seen.append(w) or 'merged')
         try:
-            assert tools.execute_tool(
-                'plan', {'outcome': 'answer', 'answer': 'hi'}) == 'ok'
+            assert tools.execute_tool('apply_work',
+                                      {'worker': 'agent2'}) == 'merged'
         finally:
-            tools.set_plan_handler(None)
-        assert seen == [{'outcome': 'answer', 'answer': 'hi'}]
-
-    def test_plan_without_a_handler_says_so(self, monkeypatch) -> None:
-        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
-        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        tools.set_plan_handler(None)
-        out = tools.execute_tool('plan', {'outcome': 'answer', 'answer': 'x'})
-        assert 'not available' in out
-        # The callable form (Ollama introspects it) routes the same way.
-        assert tools.plan('answer', answer='x') == out
-
-    def test_final_answer_tool_acknowledges(self, monkeypatch) -> None:
-        from guru.domain import plan
-        monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
-        monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
-        assert tools.execute_tool('final_answer', {'text': 'done'}) == \
-            plan.ANSWER_ACK
-        assert tools.execute_tool('final_answer', {'answer': 'done'}) == \
-            plan.ANSWER_ACK                     # a misnamed field still runs
+            tools.set_apply_work_handler(None)
+        assert seen == ['agent2']
+        assert 'not available' in tools.apply_work('agent2')
+        assert tools._APPLY_WORK_SPEC['parameters'] == {
+            'worker': 'The worker name, e.g. "agent2"'}
 
     def test_spawn_spec_has_optional_labels(self) -> None:
         spec = tools._SPAWN_SPEC
@@ -528,7 +501,6 @@ class TestToolEvents:
     def _quiet(self, monkeypatch, fake_repo):
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         monkeypatch.setattr(session, 'turn_id', 'turnX')
         self.repo = fake_repo
         yield
@@ -591,12 +563,6 @@ class TestToolEvents:
         row = self._event()
         assert row['denied'] == 'mode' and row['files_touched'] == ['/tmp/x']
 
-    def test_controller_refusal_is_denied(self, monkeypatch) -> None:
-        monkeypatch.setattr(session, 'controller', True)
-        tools.execute_tool('read_file', {'path': 'a.py'})
-        row = self._event()
-        assert row['denied'] == 'controller' and row['ok'] is False
-
     def test_shown_bytes_after_redaction(self, monkeypatch) -> None:
         from types import SimpleNamespace
         from guru.domain import policy
@@ -627,7 +593,6 @@ class TestCodeVerbRegistry:
     def _quiet(self, monkeypatch, fake_repo):
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         self.repo = fake_repo
         yield
         tools.set_policy(None)
@@ -746,11 +711,11 @@ class TestCodeVerbRegistry:
     def test_prompts_mention_the_verbs(self) -> None:
         """The verify rule stays prose (code cannot check it); the
         outline/find_symbol preference is gone (read_file is structural)."""
-        assert 'run_tests' in config.CONTROLLER_HINT
-        assert 'check_syntax' in config.CONTROLLER_HINT
-        for text in (config.SYSTEM_PROMPT, config.DELEGATION_HINT):
-            assert 'run_tests' in text and 'check_syntax' in text
+        text = config.SYSTEM_PROMPT
+        assert 'run_tests' in text and 'check_syntax' in text
+        for text in (config.SYSTEM_PROMPT, config.LEAD_HINT):
             assert 'outline' not in text and 'find_symbol' not in text
+        assert 'tests' in config.LEAD_HINT and 'lint' in config.LEAD_HINT
 
 
 class TestDisabledToolsNotAdvertised:
@@ -762,7 +727,6 @@ class TestDisabledToolsNotAdvertised:
     def _policy(self, monkeypatch, fake_repo):
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         monkeypatch.setattr(session, 'active_tool_names', set())
         monkeypatch.setattr(session, 'active_tools', [])
         tools.set_policy(tools.ToolsPolicy(disabled={'read_file'}))
@@ -818,8 +782,8 @@ class TestDisabledToolsNotAdvertised:
         assert tools._match_tools('read a file') == ['search_code']
         names = [s['name'] for s in tools.specs_for(
             set(tools.TOOL_REGISTRY), can_spawn=True)]
-        assert set(names) == {'search_tools', 'use_skill', 'final_answer',
-                              'spawn', 'check', 'join', 'search_code'}
+        assert set(names) == {'search_tools', 'use_skill', 'spawn', 'check',
+                              'join', 'search_code'}
 
 
 class TestRunnerDenialIsMode:
@@ -838,7 +802,6 @@ class TestRunnerDenialIsMode:
         from guru.domain import ledger, procs
         monkeypatch.setattr(ui, 'note_tool', lambda *a: None)
         monkeypatch.setattr(ui, 'note_tool_result', lambda n: None)
-        monkeypatch.setattr(session, 'controller', False)
         monkeypatch.setitem(tools.TOOL_REGISTRY, 'run_tests', {
             **tools.TOOL_REGISTRY['run_tests'],
             'fn': lambda **kw: (f"Refused: {procs.DENIED_PREFIX} cwd '/x'"

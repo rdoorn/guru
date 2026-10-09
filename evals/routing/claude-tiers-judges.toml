@@ -18,7 +18,6 @@
 
 [routing]
 mode = "local-and-remote"
-controller = true
 complexity_router = true
 type_router = false
 spend_confirm = "auto"

@@ -767,9 +767,9 @@ LABEL_STATE_CHARS = 4000
 
 def label_questions(task_text: str) -> list:
     """Two choices over a sub-agent task: its ``complexity`` (over
-    :data:`routing.COMPLEXITY`, described as the controller hint does)
-    and its ``kind`` (over :data:`routing.KINDS`). The heuristics are the
-    controller's own labels; ``shadow('labels', ..., heuristics=[...])``
+    :data:`routing.COMPLEXITY`, with the tier descriptions) and its
+    ``kind`` (over :data:`routing.KINDS`). The heuristics are the lead's
+    own labels; ``shadow('labels', ..., heuristics=[...])``
     logs one row per question, and with ``labels`` active the
     orchestrator passes the complexity question to :func:`decide_choice`
     (the kind stays shadow: it routes nothing while ``type_router`` is

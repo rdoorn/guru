@@ -208,8 +208,7 @@ def _gate_verdict(e: Expect, o: Observed) -> CheckResult:
 
 def _gate_verdict_any(e: Expect, o: Observed) -> CheckResult:
     """Passes when at least one ``sandbox_submit`` of the case ended in one
-    of the listed verdicts (a controller may split the work over several
-    workers, each submitting on its own)."""
+    of the listed verdicts (the lead may submit more than once)."""
     if not o.gate_verdicts:
         return CheckResult('gate_verdict_any', False, 'no sandbox_submit '
                                                       'verdict recorded')

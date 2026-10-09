@@ -418,9 +418,9 @@ def _quiet() -> None:
         pass
 
 
-# The turn contract's own calls: always-on but not benchmarked here — the
-# turn loop forces them and tests/test_turn_contract.py pins them.
-LOOP_TOOLS = frozenset(('plan', 'final_answer'))
+# Lead-only tools not benchmarked here: apply_work needs a sandbox and a
+# finished worker.
+LOOP_TOOLS = frozenset(('apply_work',))
 
 
 def _install_fake_handlers() -> None:

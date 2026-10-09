@@ -159,6 +159,10 @@ def _check_argv(argv: object) -> list[str]:
     return list(argv)
 
 
+# The terminal width a child process sees (``COLUMNS``).
+CHILD_COLUMNS = '200'
+
+
 def _environment(cwd: Path, home: str, env_extra: Optional[dict]
                  ) -> dict[str, str]:
     """The child's environment, built from scratch (design principle 3):
@@ -174,6 +178,10 @@ def _environment(cwd: Path, home: str, env_extra: Optional[dict]
         'LANG': os.environ.get('LANG') or _DEFAULT_LANG,
         'PYTHONDONTWRITEBYTECODE': '1',
         'PYTHONPATH': str(cwd),
+        # No terminal: tools that size output to one (rich) would wrap at
+        # 80 columns, and the scratch HOME/TMPDIR paths are long enough to
+        # break a line a test then asserts on (dashboard evals 2026-10-09).
+        'COLUMNS': CHILD_COLUMNS,
     }
     for key, value in (env_extra or {}).items():
         if str(key) in PROTECTED_ENV:

@@ -38,24 +38,32 @@ import json
 import math
 import os
 import time
+from typing import Optional
 
 import requests
 
 from guru import log, session, ui
 from guru.adapters import turn
-from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
-                                dump_request, is_tool_choice_error)
+from guru.adapters.base import JSON_ONLY, Adapter, ModelInfo, dump_request
 from guru.adapters.base import openai_tool_defs as _openai_tool_defs
 from guru.domain import ledger, pricing, tools
 
 _MAX_TOKENS = 16384   # proxies may enforce a thinking budget above 8k
+# A turn round's ceiling: thinking spends output tokens before the reply,
+# so a large write needs room on top of it. Not a spend: the model stops
+# at its own length.
+TURN_MAX_TOKENS = 32000
 _DEFAULT_CONTEXT = 128000
 CACHE_CONTROL = {'type': 'ephemeral'}
-# Tool forcing (the turn contract, guru.adapters.turn): ``tool_choice
-# required`` makes the model answer with a tool call; every round is
-# forced. A proxy that rejects it (a model with server-side thinking on)
-# gets one retry without it and forcing is turned off for this adapter.
-TOOL_CHOICE_REQUIRED = 'required'
+# Thinking (guru.adapters.turn.reasoning_effort): sent as the OpenAI-style
+# ``reasoning_effort``, which LiteLLM translates per provider (Anthropic
+# extended thinking among them; verified through the SBP proxy on Haiku
+# 4.5, Sonnet 5 and Opus 5.5, 2026-10-09). No ``tool_choice`` is ever
+# sent: forcing a tool call turns Anthropic's thinking off without an
+# error. A model that rejects the parameter as unsupported is retried once
+# without it and remembered; any other error is the turn's error.
+_UNSUPPORTED_WORDS = ('unsupported', 'not supported', 'does not support',
+                      'unknown parameter', 'unexpected keyword')
 # LiteLLM `mode` values that are not chat models — hidden from /models.
 _NON_CHAT_MODES = {
     'audio_transcription', 'audio_speech', 'embedding',
@@ -147,6 +155,8 @@ def native_round(messages: list, i: int):
     m, results, j = found
     assistant: dict = {'role': 'assistant',
                        'content': (m.get('content') or '') or None}
+    if m.get('thinking_blocks'):
+        assistant['thinking_blocks'] = m['thinking_blocks']
     assistant['tool_calls'] = [
         {'id': c['id'], 'type': 'function',
          'function': {'name': c['function']['name'],
@@ -266,12 +276,16 @@ def usage_from(usage) -> pricing.Usage:
         cache_read_tokens=read, cache_write_tokens=write)
 
 
-def neutral_assistant(text: str, tool_calls: list) -> dict:
+def neutral_assistant(text: str, tool_calls: list,
+                      thinking_blocks: Optional[list] = None) -> dict:
     """Build a neutral assistant message from text + tool calls, each
     ``(name, args)`` or ``(name, args, call_id, raw_arguments)``: the id and
     the model's raw arguments string, when given, let the next turn
-    rebuild the round natively (:func:`native_round`)."""
+    rebuild the round natively (:func:`native_round`), with the round's
+    ``thinking_blocks`` (sent back as the provider returned them)."""
     msg: dict = {'role': 'assistant', 'content': text}
+    if thinking_blocks:
+        msg['thinking_blocks'] = thinking_blocks
     if tool_calls:
         entries = []
         for call in tool_calls:
@@ -301,10 +315,10 @@ class LiteLLMAdapter(Adapter):
         self.static_models = models or []
         self.cache = bool(cache)
         self._context_by_model: dict = {}
-        self._force_ok = True         # cleared after a tool_choice error
-
-    def forces(self, tool: str) -> bool:
-        return self._force_ok
+        self._no_reasoning: set = set()   # models that rejected it
+        # Models whose output limit is below TURN_MAX_TOKENS (a 400 that
+        # names max_tokens): they get _MAX_TOKENS from then on.
+        self._small_output: set = set()
 
     def _key(self) -> str:
         """Resolve the key: env var → inline api_key → OPENAI_API_KEY."""
@@ -397,37 +411,52 @@ class LiteLLMAdapter(Adapter):
         oa_tools = cached_tools(openai_tool_defs(tools.active_specs()),
                                 self.cache)
 
-        def request(force: bool) -> dict:
+        def request(effort: str) -> dict:
             kwargs: dict = {
                 'model': session.model,
                 'messages': cached_messages(native, self.cache),
                 'tools': oa_tools or None,
-                'max_tokens': _MAX_TOKENS,
+                'max_tokens': (_MAX_TOKENS if session.model
+                               in self._small_output else TURN_MAX_TOKENS),
             }
-            if force and oa_tools:
-                kwargs['tool_choice'] = TOOL_CHOICE_REQUIRED
+            if effort:
+                kwargs['reasoning_effort'] = effort
             return kwargs
 
         def step():
             """One chat-completions round; returns (text, [(name, args, id)])
             or None on error (printed) — the shared loop handles cancel.
-            A forced round (``TOOL_CHOICE_REQUIRED``) the proxy rejects for
-            its ``tool_choice`` is retried once unforced."""
-            forced = turn.forced_tool()
-            force = forced is not None and self.forces(forced)
+            A model that rejects reasoning as unsupported, or a
+            ``max_tokens`` above its output limit, is retried once
+            without it (resp. with ``_MAX_TOKENS``) and remembered."""
+            effort = ('' if session.model in self._no_reasoning
+                      else turn.reasoning_effort())
             t0 = time.perf_counter()
             try:
-                try:
-                    resp, cost = _complete(client, dump_as=self.name,
-                                           **request(force))
-                except Exception as e:
-                    if not (force and is_tool_choice_error(e)):
-                        raise
-                    log.warning('%s rejected tool_choice (%s); forcing off',
-                                self.name, str(e)[:120])
-                    self._force_ok = False
-                    resp, cost = _complete(client, dump_as=self.name,
-                                           **request(False))
+                resp, cost = None, None
+                for _attempt in range(3):
+                    try:
+                        resp, cost = _complete(client, dump_as=self.name,
+                                               **request(effort))
+                        break
+                    except Exception as e:
+                        if effort and is_reasoning_error(e):
+                            log.warning('%s: %s rejected reasoning (%s);'
+                                        ' thinking off for it', self.name,
+                                        session.model, str(e)[:160])
+                            self._no_reasoning.add(session.model)
+                            effort = ''
+                        elif (is_max_tokens_error(e) and session.model
+                              not in self._small_output):
+                            log.warning('%s: %s rejected max_tokens (%s);'
+                                        ' using %d', self.name,
+                                        session.model, str(e)[:160],
+                                        _MAX_TOKENS)
+                            self._small_output.add(session.model)
+                        else:
+                            raise
+                if resp is None:
+                    raise RuntimeError('no response after retries')
             except Exception as e:
                 _note_error(e)
                 ui.console.print(f"[red]LiteLLM error: {e}[/red]")
@@ -446,13 +475,19 @@ class LiteLLMAdapter(Adapter):
             msg = resp.choices[0].message
             text = msg.content or ''
             tool_calls = list(getattr(msg, 'tool_calls', None) or [])
+            # Cut at the output limit: the calls' arguments are unreliable.
+            session.output_cut = resp.choices[0].finish_reason == 'length'
 
             ui.debug(
                 f"finish={resp.choices[0].finish_reason} text={text!r}"
                 f" tools={[t.function.name for t in tool_calls]}")
 
-            # Append the assistant turn to native history for id-linking.
+            # Append the assistant turn to native history for id-linking,
+            # with its thinking (Anthropic wants it back on a tool round).
+            thinking = _thinking_blocks(msg)
             assistant: dict = {'role': 'assistant', 'content': text or None}
+            if thinking:
+                assistant['thinking_blocks'] = thinking
             if tool_calls:
                 assistant['tool_calls'] = [
                     {
@@ -476,7 +511,8 @@ class LiteLLMAdapter(Adapter):
                 calls.append((tc.function.name, args, tc.id))
             session.messages.append(neutral_assistant(text, [
                 (name, args, call_id, tc.function.arguments)
-                for (name, args, call_id), tc in zip(calls, tool_calls)]))
+                for (name, args, call_id), tc in zip(calls, tool_calls)],
+                thinking))
             return (text, calls)
 
         def run_tools(pending):
@@ -544,6 +580,41 @@ class LiteLLMAdapter(Adapter):
 
 
 _COST_HEADER = 'x-litellm-response-cost'
+
+
+def is_reasoning_error(exc: Exception) -> bool:
+    """Whether a provider error says the model does not support the
+    ``reasoning_effort`` we sent (the round is then retried without it).
+    A thinking error about the history's shape is not one: it is the
+    turn's error, and thinking stays on."""
+    text = str(exc).lower()
+    return (('reasoning_effort' in text or 'unsupportedparams' in text)
+            and ('unsupportedparams' in text
+                 or any(w in text for w in _UNSUPPORTED_WORDS)))
+
+
+def is_max_tokens_error(exc: Exception) -> bool:
+    """Whether a provider error rejects the ``max_tokens`` we sent as above
+    the model's output limit."""
+    text = str(exc).lower()
+    return 'max_tokens' in text and any(
+        w in text for w in ('too large', 'maximum', 'exceed', 'at most',
+                            'less than or equal', 'max_completion'))
+
+
+def _thinking_blocks(msg) -> list:
+    """The thinking blocks a LiteLLM proxy returned on ``msg`` (its
+    ``thinking_blocks`` extra), as plain dicts; empty when none."""
+    blocks = getattr(msg, 'thinking_blocks', None)
+    if blocks is None and hasattr(msg, 'model_dump'):
+        blocks = msg.model_dump().get('thinking_blocks')
+    out = []
+    for b in blocks or []:
+        if hasattr(b, 'model_dump'):
+            b = b.model_dump()
+        if isinstance(b, dict):
+            out.append(dict(b))
+    return out
 
 
 def _complete(client, *, dump_as: str = '', **kwargs) -> tuple:

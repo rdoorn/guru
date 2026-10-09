@@ -424,10 +424,12 @@ def test_provision_and_uv_add_through_the_proxy(runtime_ok, project,
 
 def test_sandbox_verbs_end_to_end(built, project, monkeypatch, ledger_repo
                                   ) -> None:
-    """S3: the verbs against the real runtime — run, edit through
-    ``sandbox_python`` in the task's copy, diff, and a ``sandbox_submit``
-    that a fake reviewer finds intended in auto mode patches the real
-    fixture tree through ``apply_patch`` and removes the copy."""
+    """S3 with the lead: a worker runs, edits through ``sandbox_python``
+    in its task's copy and diffs, but may not submit; the lead merges the
+    worker's diff into its own copy (``apply_work``, ``git apply
+    --3way``) and its ``sandbox_submit``, found intended by a fake
+    reviewer in auto mode, patches the real fixture tree through
+    ``apply_patch`` and removes the copies."""
     from guru import session
     from guru.domain import decisions, ledger
     from guru.sandbox import verbs
@@ -465,6 +467,19 @@ def test_sandbox_verbs_end_to_end(built, project, monkeypatch, ledger_repo
         assert not list(copy.glob(f'{verbs.SCRIPT_PREFIX}*.py'))
         assert (project / 'hello.py').read_text() == 'print("ok")\n'
         assert 'hello.py | +1 -0' in verbs.sandbox_diff()
+        assert verbs.sandbox_submit('x') == verbs.WORKER_SUBMIT
+        assert '+print("more")' in verbs.worker_diff('INTEG')
+        # The lead merges the worker's diff into its own copy, then submits.
+        monkeypatch.setattr(session, 'task_id', '')
+        monkeypatch.setattr(session, 'agent_id', 'main')
+        out = verbs.apply_work('INTEG')
+        assert out.startswith('Applied patch'), out
+        assert 'hello.py | +1 -0' in out
+        assert not copy.exists()
+        (_key, copy), = verbs.copies().items()
+        assert _key[1] == 'main'
+        assert (copy / 'hello.py').read_text().endswith('print("more")\n')
+        assert (project / 'hello.py').read_text() == 'print("ok")\n'
         out = verbs.sandbox_submit('append a second print to hello.py')
         assert out.startswith('Gate verdict: intended'), out
         assert 'Applied patch:' in out
@@ -488,10 +503,9 @@ def test_sandbox_verbs_end_to_end(built, project, monkeypatch, ledger_repo
         assert f'deleted {project / "obsolete.py"} (2 lines)' in out
         assert not (project / 'obsolete.py').exists()
         assert (project / 'hello.py').exists()
-        assert 'Task given to the agent:\nmake hello.py print more' in q.state
         ledger.flush()
         kinds = [r['kind'] for r in ledger_repo.stream('sandbox_events')]
-        assert 'run' in kinds and 'submit' in kinds and 'apply' in kinds
+        assert {'run', 'apply_work', 'submit', 'apply'} <= set(kinds)
     finally:
         decisions.clear_judges()
         verbs.cleanup_all()

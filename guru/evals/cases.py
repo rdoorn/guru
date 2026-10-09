@@ -63,7 +63,7 @@ class Expect:
     # Spend cap in USD: the bench cancels the run when the case's calls
     # pass it, and the check fails over it (or when the cost is unknown).
     max_cost_usd: Optional[float] = None
-    # Sub-task statuses that fail the case (e.g. capped, incomplete).
+    # Sub-task statuses that fail the case (e.g. stalled, error).
     task_status_none: list[str] = field(default_factory=list)
     # The fixture's tests leave their private HOME empty (needs
     # fixture_tests_pass) apart from ``fixture_home_allow`` globs (what the

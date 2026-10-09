@@ -694,6 +694,39 @@ class TestDecide:
         assert gate.Verdict(gate.INTENDED).describe() == 'intended'
 
 
+class TestDecideUnreviewed:
+    """``[decisions] gate_review = false``: the deterministic rules alone
+    decide the verdict."""
+
+    def test_no_flags_is_intended(self) -> None:
+        v = gate.decide_unreviewed([])
+        assert v.state == gate.INTENDED
+        assert v.reasons == ['reviewer off; rules passed'] and v.flags == []
+        assert gate.decide_unreviewed(None).state == gate.INTENDED
+
+    def test_harmless_flag_is_intended_with_its_reason(self) -> None:
+        flag = gate.Flag(gate.DELETE_KIND, '', 'deletes old.py (3 lines)')
+        v = gate.decide_unreviewed([flag])
+        assert v.state == gate.INTENDED
+        assert v.reasons == ['delete: deletes old.py (3 lines)',
+                             'reviewer off; rules passed']
+        assert v.flags == [flag]
+
+    @pytest.mark.parametrize('kind', sorted(gate.SUSPICIOUS_KINDS))
+    def test_suspicious_flag_is_suspicious(self, kind) -> None:
+        flags = [gate.Flag(kind, 'p', 'd'),
+                 gate.Flag(gate.HEALTH_KIND, 'm.py', 'h')]
+        v = gate.decide_unreviewed(flags)
+        assert v.state == gate.SUSPICIOUS
+        assert v.reasons == [f'{kind}: p: d', 'health: m.py: h']
+
+    @pytest.mark.parametrize('kind', sorted(gate.BLOCKING_KINDS))
+    def test_blocking_flag_is_unclear(self, kind) -> None:
+        v = gate.decide_unreviewed([gate.Flag(kind, 'p', 'd')])
+        assert v.state == gate.UNCLEAR
+        assert v.reasons == [f'{kind}: p: d']
+
+
 # --- parse_review / packet / question ----------------------------------------
 
 class TestParseReview:
@@ -1050,7 +1083,7 @@ class TestLLMSpec:
 
     def _routing(self, mode='local-and-remote') -> RoutingSettings:
         return RoutingSettings(
-            mode=mode, spend_confirm='never', controller=False,
+            mode=mode, spend_confirm='never',
             ladders={'default': [
                 RungSpec('Ollama', 'qwen', 'trivial'),
                 RungSpec('Anthropic', 'sonnet', 'standard'),
@@ -1090,7 +1123,7 @@ class TestLLMSpec:
         assert llm.default_reviewer('diff', self.ollama, '') is None
 
     def test_without_ladders_uses_the_session(self) -> None:
-        llm.set_registry(self.registry, RoutingSettings(controller=False))
+        llm.set_registry(self.registry, RoutingSettings())
         r = llm.default_reviewer('diff', self.anthropic, 'main')
         assert r is not None and r.model == 'main'
 

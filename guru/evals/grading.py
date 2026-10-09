@@ -40,6 +40,7 @@ from guru.adapters.base import Adapter
 from guru.domain import ledger
 from guru.evals import cases, labels, rubric, runner, runs
 from guru.evals.labels import HandLabel
+from guru.repositories.fanout import FanOutLedger
 from guru.evals.runs import CaseResult, Run
 from guru.repositories.adapters import registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
@@ -109,7 +110,8 @@ def resolve_judges(specs: list[str], adapters: Optional[list[Adapter]] = None
 def _ledger_at(repo: JsonlLedger) -> Iterator[None]:
     """Point the ledger at ``repo`` (enabled) and restore afterwards."""
     prev_repo, prev_enabled = ledger.repository(), config.LEDGER_ENABLED
-    ledger.set_repository(repo)
+    # The grader's calls also reach the usage store (source = eval).
+    ledger.set_repository(FanOutLedger(repo, runner._eval_usage()))
     config.LEDGER_ENABLED = True
     try:
         yield

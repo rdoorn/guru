@@ -135,12 +135,11 @@ class BenchRun(Orchestrator):
 
     ``registry`` (AdapterRegistry) and ``routing`` (RoutingSettings) make
     sub-agent routing active exactly as in the TUI; without them it is
-    inert. ``routing.controller`` runs the main agent as a controller."""
+    inert."""
 
     def __init__(self, base, registry=None, routing=None) -> None:
         super().__init__(registry=registry, routing=routing)
         self.base = base
-        self.controller = bool(routing is not None and routing.controller)
         # (agent title, 'ExcType: text') per turn that raised; the eval
         # runner reports them as the case error.
         self.worker_errors: list = []
@@ -184,8 +183,7 @@ class BenchRun(Orchestrator):
             else None
         try:
             main = self.manager.active
-            self.configure(main, self.base, can_spawn=True,
-                           controller=self.controller)
+            self.configure(main, self.base, can_spawn=True)
             main.queue.append(prompt)
             self.launch(main)
             while any(a.busy or a.queue for a in self.manager.agents):

@@ -27,12 +27,14 @@ if TYPE_CHECKING:                     # avoid an import cycle at runtime
 STRUGGLE_KEYS: tuple[str, ...] = (
     'stall_nudges', 'delegation_nudges', 'over_read', 'compactions',
     'tool_errors', 'sha_mismatches', 'provider_errors', 'refusals',
-    'redactions', 'protocol_violation', 'budget_nudges')
-# ``stall_nudges`` is kept so old rows keep their column; the turn loop no
-# longer nudges (the turn contract in guru.adapters.turn) and it reads 0.
-# ``protocol_violation`` counts a text-only reply where a tool call was
-# forced, and a controller plan that was malformed twice.
-# ``budget_nudges`` counts the round-budget checkpoint and last-call notes.
+    'redactions', 'protocol_violation', 'budget_nudges', 'stall_warnings',
+    'stalls', 'verify_sendbacks')
+# ``stall_nudges``, ``delegation_nudges`` and ``budget_nudges`` are kept so
+# old rows keep their columns; nothing bumps them any more.
+# ``protocol_violation`` counts an empty reply. ``stall_warnings`` and
+# ``stalls`` count the stall monitor's warnings and the turns it ended
+# (guru.adapters.turn); ``verify_sendbacks`` the answers sent back to test
+# or lint changed files first.
 
 
 class SessionState:
@@ -70,16 +72,17 @@ class SessionState:
         # Whether this agent may delegate via the spawn tool (main + user-made
         # agents may; tool-spawned sub-agents may not, to avoid recursion).
         self.can_spawn: bool = False
-        # Controller mode (guru.domain.routing / [routing] controller): the
-        # agent answers every turn with one forced ``plan`` tool call
-        # (guru.domain.plan) and has no other tool.
-        self.controller: bool = False
         # Ledger join keys (guru.domain.ledger): which agent this state
         # belongs to, the sub-agent task it is executing (empty for the main
         # agent) and the current user turn.
         self.agent_id: str = 'main'
         self.task_id: str = ''
         self.turn_id: str = ''
+        # The user request this agent's work belongs to (the turn id of
+        # that request's first turn): kept through the lead's synthesis
+        # rounds and inherited by every worker it delegates to, so the
+        # usage store groups all of it under one topic (guru.domain.usage).
+        self.topic_id: str = ''
         # The sub-agent task text (empty for the main agent): the sandbox
         # quality gate hands it to the reviewer next to the user's request.
         self.task_text: str = ''
@@ -105,21 +108,14 @@ class SessionState:
         # consecutive all-running `check` calls. Both reset at turn start.
         self.turn_waiting: bool = False
         self.check_polls: int = 0
-        # Round budget (guru.adapters.turn): ``capped`` is set when the
-        # last turn hit the round cap; ``round_note`` is the budget footer
+        # Stall monitor (guru.adapters.turn): ``stalled`` is set when the
+        # last turn ended without progress; ``round_note`` is the warning
         # the next tool result carries (consumed by turn.tool_result).
-        self.capped: bool = False
+        self.stalled: bool = False
         self.round_note: str = ''
-        # True while a worker's spent-budget round runs: every call but
-        # final_answer is refused unrun (turn.tool_result).
-        self.budget_spent: bool = False
-        # True while a writing worker past READ_STOP_AT with nothing
-        # changed runs a round: its read tools are refused unrun.
-        self.reads_closed: bool = False
-        # While a worker round runs: the checks (``tests``, ``lint``) its
-        # final_answer is sent back for, once, because files changed and
-        # they were not run since.
-        self.verify_missing: frozenset = frozenset()
+        # The current reply hit the provider's output limit (set by the
+        # adapter): its tool calls are not run (turn.tool_result).
+        self.output_cut: bool = False
 
 
 _default = SessionState()

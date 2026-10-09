@@ -386,6 +386,7 @@ class CallRecord:
     agent: str = ''
     task_id: str = ''
     turn_id: str = ''
+    topic_id: str = ''
 
     def to_row(self) -> dict:
         """Flatten to a ledger row, pricing the call as it goes."""
@@ -398,7 +399,8 @@ class CallRecord:
             cost = pricing.cost_usd(self.model, self.usage)
             source = 'table' if cost is not None else 'unknown'
         return {**base_row(), 'agent': self.agent, 'task_id': self.task_id,
-                'turn_id': self.turn_id, 'adapter': self.adapter,
+                'turn_id': self.turn_id, 'topic_id': self.topic_id,
+                'adapter': self.adapter,
                 'model': self.model, 'tokens_in': self.usage.input_tokens,
                 'tokens_out': self.usage.output_tokens,
                 'cache_read': self.usage.cache_read_tokens,
@@ -422,7 +424,7 @@ def record_call(*, adapter: str, model: str, usage: pricing.Usage,
                          cost_header=cost_header, load_s=load_s,
                          prefill_s=prefill_s, generate_s=generate_s,
                          agent=session.agent_id, task_id=session.task_id,
-                         turn_id=session.turn_id)
+                         turn_id=session.turn_id, topic_id=session.topic_id)
         row = rec.to_row()
         _accumulate(row)                 # caller thread: session is bound
         submit('calls', row)
@@ -443,6 +445,7 @@ class TaskRecord:
     kind: str = 'other'
     complexity: str = 'standard'
     turn_id: str = ''
+    topic_id: str = ''
     status: str = 'running'
     seconds: Optional[float] = None
     answer_len: Optional[int] = None
@@ -468,7 +471,7 @@ class TaskRecord:
     findings: int = 0
     confirmation: str = ''
     retry_of: str = ''
-    # Who asked for this task: '' for the controller/user (spawn,
+    # Who asked for this task: '' for the lead/user (spawn,
     # spawn_panel), 'panel' for the worker the panel judge added.
     origin: str = ''
 
@@ -493,7 +496,8 @@ def new_task(*, task: str, parent: str, role: str = '', skill: str = '',
              tools_active: Optional[list] = None,
              route: Optional[dict] = None, reason: Optional[list] = None,
              findings: int = 0, confirmation: str = '',
-             retry_of: str = '', origin: str = '') -> TaskRecord:
+             retry_of: str = '', origin: str = '',
+             topic_id: Optional[str] = None) -> TaskRecord:
     """Create a running TaskRecord with a fresh id.
 
     ``turn_id`` defaults to the bound session's value when empty;
@@ -503,12 +507,15 @@ def new_task(*, task: str, parent: str, role: str = '', skill: str = '',
     environment snapshot, system
     prompt hash and active tool names of the child, and the routing outcome
     (``route``, ``reason``, ``findings``, ``confirmation``, ``retry_of``)
-    and ``origin`` (``'panel'`` for a judge-added worker).
+    and ``origin`` (``'panel'`` for a judge-added worker); ``topic_id``
+    defaults to the bound session's (the parent passes its own).
     """
     return TaskRecord(task_id=uuid.uuid4().hex[:12], parent=parent, task=task,
                       role=role or '', skill=skill or '', kind=kind,
                       complexity=complexity,
                       turn_id=turn_id or session.turn_id,
+                      topic_id=(session.topic_id if topic_id is None
+                                else topic_id),
                       adapter=(getattr(session.adapter, 'name', '')
                                if adapter is None else adapter),
                       model=session.model if model is None else model,
@@ -645,9 +652,10 @@ def record_tool_event(tool: str, args: dict, *, seconds: float, ok: bool,
     ``produced_bytes`` is the raw result's size, ``shown_bytes`` what the
     model saw after redaction/digest; ``files_touched`` the paths the call
     named; ``denied`` names the gate that refused it (``policy``, ``mode``,
-    ``controller``) or is empty. Argument values are stringified and cut at
-    ``ARGS_HEAD``, ``BULK_ARG_KEYS`` become ``<N chars>`` and the rest are
-    redacted when the secret scan is on. Session join keys as for calls.
+    ``kind``; ``controller`` in rows from before 2026-10-09) or is empty.
+    Argument values are stringified and cut at ``ARGS_HEAD``,
+    ``BULK_ARG_KEYS`` become ``<N chars>`` and the rest are redacted when
+    the secret scan is on. Session join keys as for calls.
     Never raises.
     """
     try:
