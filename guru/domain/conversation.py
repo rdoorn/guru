@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from guru import config, log, session, skills, ui
-from guru.domain import claims, ledger, plan, tools
+from guru.domain import claims, ledger, tools
 
 
 def message_to_dict(msg: object) -> dict:
@@ -127,9 +127,10 @@ def msg_content(msg: object) -> str:
 # --- the turn's request ------------------------------------------------------
 
 # User messages the turn loop itself injects; they are never the user's
-# request. NUDGE_TEXT is historical (the act nudge was replaced by the
-# turn contract, guru.adapters.turn / guru.domain.plan) and is kept so
-# saved histories that carry it are still read correctly.
+# request. NUDGE_TEXT and DELEGATION_TEXT are historical (the loop no
+# longer nudges) and are kept so saved histories that carry them are still
+# read correctly, as are the retired turn contract's re-prompt and plan
+# re-ask prefixes (_RETIRED_PREFIXES).
 NUDGE_TEXT = (
     "Do not describe what you will do — do it now. Call the tool you need in"
     " this reply (use search_tools first if it is not active). If you are"
@@ -146,6 +147,11 @@ DELEGATION_TEXT = (
     " one consolidated report. Add architect/SRE sub-agents if design or"
     " reliability matter."
 )
+# The verify send-back (guru.adapters.turn): an answer from an agent that
+# changed files and ran no tests or lint since goes back once.
+VERIFY_REFUSAL = 'Not delivered: you changed files and ran no '
+_RETIRED_PREFIXES = ('Plan not accepted: ', 'Reply with a tool call:',
+                     'Reply with one plan tool call:')
 # First characters of a mailbox delivery (the orchestrator's joined or
 # single sub-agent result): a turn it starts is a synthesis turn, and its
 # text is the sub-agents' output, not a request from the user.
@@ -156,15 +162,14 @@ REQUEST_CHARS = 1000
 
 
 def is_nudge(text: str) -> bool:
-    """True for a user message the turn loop itself injected: the
-    delegation nudge (old histories also carry the retired over-read
-    nudge, which ends with the delegation text), a turn-contract re-prompt
-    or a plan re-ask (:mod:`guru.domain.plan`), the answer check's
-    problems (:mod:`guru.domain.claims`; a user message on the text path),
-    or the historical act nudge."""
+    """True for a user message the turn loop itself injected: the verify
+    send-back, the answer check's problems (:mod:`guru.domain.claims`),
+    or — in old histories — a delegation or act nudge, a turn-contract
+    re-prompt or a plan re-ask."""
     return (text in (NUDGE_TEXT, DELEGATION_TEXT)
-            or text.endswith(DELEGATION_TEXT) or plan.is_reprompt(text)
-            or text.startswith(claims.PREFIX))
+            or text.endswith(DELEGATION_TEXT)
+            or text.startswith((VERIFY_REFUSAL, claims.PREFIX)
+                               + _RETIRED_PREFIXES))
 
 
 def is_mailbox(text: str) -> bool:
@@ -213,7 +218,7 @@ def request_in(messages: list, cap: Optional[int] = REQUEST_CHARS) -> str:
     """The user's request in ``messages``: the most recent user message
     that is neither a loop nudge nor a mailbox delivery, capped at
     ``cap`` characters (``REQUEST_CHARS``; ``None`` for the full text —
-    the plan handler's concern coverage reads the whole request); when
+    the answer check reads the whole request); when
     only deliveries are there (a history that starts with one), the most
     recent of those, capped the same way; ``''`` when there is no user
     message at all. Pure: for any agent's history (the orchestrator reads
@@ -371,14 +376,14 @@ _DYN_SEP = "\n\n--- active context ---\n"
 def project_block() -> str:
     """The '[project]' block: the working directory's name, absolute path
     and git branch, plus the rule that requests refer to it; in a
-    sandbox-enabled project also ``config.SANDBOX_RULE`` (the direct write
+    sandbox-enabled project also ``config.SANDBOX_RULE`` (a worker's:
+    ``SANDBOX_WORKER_RULE``, it does not submit; the direct write
     tools are disabled there, edits go through the sandbox verbs and the
     quality gate).
 
     Rendered for every agent so none of them has to guess which codebase a
-    request means; the controller, which has no file tools, relies on it
-    (triage 2026-09-23-claude-tiers: it asked "which repository?" instead of
-    delegating).
+    request means (triage 2026-09-23-claude-tiers: an agent asked "which
+    repository?" instead of looking).
     """
     cwd = Path.cwd().resolve()
     lines = ["[project]", f"- name: {cwd.name}", f"- path: {cwd}"]
@@ -389,7 +394,8 @@ def project_block() -> str:
         "This working directory is the current project; user requests refer"
         " to it unless they say otherwise.")
     if tools._sandbox_available():
-        lines.append(config.SANDBOX_RULE)
+        lines.append(config.SANDBOX_WORKER_RULE if session.task_id
+                     else config.SANDBOX_RULE)
     return "\n".join(lines)
 
 

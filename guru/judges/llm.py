@@ -114,7 +114,19 @@ def reviewer_from_spec(arg: str) -> Optional[LLMReviewer]:
 
 def default_reviewer(diff_text: str, adapter: object, model: str
                      ) -> Optional[LLMReviewer]:
-    """The reviewer when no ``gate`` judge is configured.
+    """The gate's reviewer: :func:`routed_reviewer` for a ``standard``
+    ``review`` task, falling back to the session model."""
+    return routed_reviewer(diff_text, adapter, model, 'review', 'standard')
+
+
+def routed_reviewer(diff_text: str, adapter: object, model: str,
+                    kind: str, complexity: str, fallback: bool = True
+                    ) -> Optional[LLMReviewer]:
+    """A model picked by the routing rules for a ``kind``/``complexity``
+    task (the gate: standard review; the topic labeler: trivial explain).
+    Without ``fallback`` there is no session-model fallback: None instead.
+
+    For the gate, when no ``gate`` judge is configured:
 
     With a registry and ladders: the rung ``routing.resolve`` picks for a
     ``standard`` ``review`` task under the routing mode, with the secret
@@ -124,22 +136,25 @@ def default_reviewer(diff_text: str, adapter: object, model: str
     fallback. Without a registry, ladders or a usable pick: the session's
     adapter/model; None when the session has no adapter or model.
     """
-    fallback = (LLMReviewer(adapter, model)
-                if adapter is not None and model else None)
+    fallback_reviewer = (LLMReviewer(adapter, model)
+                         if fallback and adapter is not None and model
+                         else None)
     if _registry is None:
-        return fallback
+        return fallback_reviewer
     cfg = _routing_settings()
     try:
         ladders = routing_settings.ladders_from_settings(
             cfg, _registry)    # type: ignore[arg-type]
     except Exception:                                # noqa: BLE001
         log.exc('gate reviewer: ladders unavailable')
-        return fallback
+        return fallback_reviewer
     if not ladders:
-        return fallback
+        return fallback_reviewer
     name = getattr(adapter, 'name', '')
     local_main = None
-    if name and model:
+    # Without ``fallback`` the session model is no candidate at all: not as
+    # the fallback, not as the main-model last resort routing would take.
+    if fallback and name and model:
         try:
             remote = _registry.is_remote(name)  # type: ignore[attr-defined]
             local_main = routing.Rung(name, model, 'hard', remote=remote,
@@ -155,7 +170,7 @@ def default_reviewer(diff_text: str, adapter: object, model: str
     # scanner missed; a stronger local judge is the way to close this.
     findings = len(policy.scan(diff_text)) if cfg.secret_scan else 0
     route = routing.resolve(
-        'review', 'standard', ladders, mode=cfg.mode,
+        kind, complexity, ladders, mode=cfg.mode,
         scan_findings=findings,
         confirmation=spend.status(cfg.spend_confirm),
         complexity_router=True, type_router=cfg.type_router,
@@ -163,8 +178,8 @@ def default_reviewer(diff_text: str, adapter: object, model: str
     if route.refused or route.needs_confirmation:
         log.info('gate reviewer: route %s; using the session model',
                  '; '.join(route.reason))
-        return fallback
+        return fallback_reviewer
     picked = _registry.get(route.adapter)   # type: ignore[attr-defined]
     if picked is None:
-        return fallback
+        return fallback_reviewer
     return LLMReviewer(picked, route.model)

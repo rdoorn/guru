@@ -1,0 +1,32 @@
+# Config 1 without the LLM judges: the claude-tiers routing with the
+# answer check and the sandbox gate's LLM reviewer switched off (the gate's
+# deterministic rules still decide), and no decision judges. The A/B
+# partner of claude-tiers.toml for measuring what the judges add (2026-10-09).
+
+[routing]
+mode = "local-and-remote"
+complexity_router = true
+type_router = false
+spend_confirm = "auto"
+secret_scan = true
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-4-5-haiku"
+max_complexity = "trivial"
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-sonnet"
+max_complexity = "standard"
+default = true
+
+[[routing.ladder]]
+adapter = "SBP Litellm"
+model = "aws/claude-5-5-opus"
+max_complexity = "hard"
+
+[decisions]
+mode = "off"
+answer_check = false
+gate_review = false

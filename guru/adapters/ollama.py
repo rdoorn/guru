@@ -16,13 +16,9 @@ from guru.adapters.base import (JSON_ONLY, Adapter, ModelInfo,
                                 openai_tool_defs)
 from guru.domain import ledger, pricing, tools
 
-# Tool forcing: the Ollama chat API has no ``tool_choice``, so this
-# adapter never forces (``Adapter.forces`` stays False). The turn loop
-# then takes a text reply as the answer, and a controller's text is parsed
-# for the plan object (guru.domain.plan.from_text). Tools are sent as the
-# same schemas the other adapters send (from the specs, not by
-# introspecting the callables), so the nested ``plan`` schema arrives
-# intact.
+# A text reply is the answer (guru.adapters.turn), as on every adapter.
+# Tools are sent as the same schemas the other adapters send (from the
+# specs, not by introspecting the callables).
 
 
 # Smallest context to fall back to before giving up on fitting into memory.
@@ -561,7 +557,8 @@ class OllamaAdapter(Adapter):
         stream = ollama.chat(
             model=session.model,
             messages=session.messages,
-            think=self._supports_thinking(session.model),
+            think=(self._supports_thinking(session.model)
+                   and bool(turn.reasoning_effort())),
             tools=openai_tool_defs(tools.active_specs()),
             options=options,
             stream=True,

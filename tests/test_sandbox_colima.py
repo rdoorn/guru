@@ -326,3 +326,74 @@ class TestRemoveMarkerless:
         (marked / colima.COPY_MARKER).write_text('copy\n')
         colima.remove_copy(marked)
         assert not marked.exists()
+
+
+class TestApplyDiffRealGit:
+    """``apply_diff`` against real git (no container): a worker's diff
+    merges into a lead copy that already has its own unstaged edits, and a
+    conflicting diff leaves the lead copy exactly as it was."""
+
+    @staticmethod
+    def _repo(path: Path, files_: dict) -> Path:
+        import subprocess
+        path.mkdir()
+        for name, text in files_.items():
+            (path / name).write_text(text, encoding='utf-8')
+        for args in (['init', '-q'], ['add', '-A'],
+                     ['-c', 'user.name=t', '-c', 'user.email=t@t',
+                      'commit', '-qm', 'base']):
+            subprocess.run(['git', '-C', str(path), *args], check=True)
+        return path
+
+    @staticmethod
+    def _diff(path: Path) -> str:
+        import subprocess
+        subprocess.run(['git', '-C', str(path), 'add', '-A', '-N'],
+                       check=True)
+        return subprocess.run(['git', '-C', str(path), *colima.DIFF_ARGS],
+                              check=True, capture_output=True,
+                              text=True).stdout
+
+    @pytest.fixture
+    def copies(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, 'ALLOWED_READ_DIRS', {str(tmp_path)})
+        base = {'f.txt': ''.join(f'line {i}\n' for i in range(20)),
+                'g.txt': 'g\n'}
+        return (self._repo(tmp_path / 'lead', base),
+                self._repo(tmp_path / 'worker', base), tmp_path)
+
+    def test_merges_next_to_the_leads_own_edits(self, copies) -> None:
+        lead, worker, root = copies
+        text = (lead / 'f.txt').read_text()
+        (lead / 'f.txt').write_text(text.replace('line 1\n', 'LEAD\n'))
+        wtext = (worker / 'f.txt').read_text()
+        (worker / 'f.txt').write_text(wtext.replace('line 18\n', 'W\n'))
+        (worker / 'new.py').write_text('x = 1\n')
+        assert colima.apply_diff(lead, root, self._diff(worker)) == ''
+        merged = (lead / 'f.txt').read_text()
+        assert 'LEAD\n' in merged and 'W\n' in merged
+        assert (lead / 'new.py').read_text() == 'x = 1\n'
+        assert 'LEAD' in self._diff(lead) and 'new.py' in self._diff(lead)
+
+    def test_conflict_rolls_back_and_names_the_file(self, copies) -> None:
+        lead, worker, root = copies
+        text = (lead / 'f.txt').read_text()
+        (lead / 'f.txt').write_text(text.replace('line 5\n', 'LEAD\n'))
+        before = (lead / 'f.txt').read_text()
+        wtext = (worker / 'f.txt').read_text()
+        (worker / 'f.txt').write_text(wtext.replace('line 5\n', 'W\n'))
+        (worker / 'g.txt').write_text('g2\n')
+        (worker / 'new.py').write_text('x = 1\n')
+        out = colima.apply_diff(lead, root, self._diff(worker))
+        assert out.startswith('conflicts in f.txt'), out
+        assert 'nothing applied' in out
+        assert (lead / 'f.txt').read_text() == before
+        assert (lead / 'g.txt').read_text() == 'g\n'
+        assert not (lead / 'new.py').exists()
+        assert '<<<<<<<' not in self._diff(lead)
+
+    def test_garbage_is_refused_unchanged(self, copies) -> None:
+        lead, _worker, root = copies
+        out = colima.apply_diff(lead, root, 'not a patch\n')
+        assert 'nothing applied' in out
+        assert self._diff(lead) == ''

@@ -6,37 +6,26 @@ called and how tool results are threaded back into its native history. This
 module owns the shared skeleton so all adapters get the same behaviour:
 
 * cancel checks (between rounds, and mid-stream where the adapter supports it),
-* the **turn contract**: a round ends with a tool call. A worker's answer
-  is a ``final_answer(text)`` call; a controller's every reply is one
-  ``plan`` call (:mod:`guru.domain.plan`). Adapters that can force a tool
-  call do (:func:`forced_tool` tells them what this round needs, their
-  ``forces`` says whether they will); on such an adapter a text-only reply
-  is a protocol violation: one deterministic re-prompt, then the text is
-  the answer and the ``protocol_violation`` struggle counter is bumped. On
-  an adapter that cannot force (Ollama) the text is the answer, and a
-  controller's text is parsed for the plan object first.
-* the controller plan: a rejected plan (the handler's re-ask) gets one more
-  round, a second rejection ends the turn on a plain-text fallback with
-  ``protocol_violation``; an ``answer`` plan is the reply (its text, else
-  the round's own text; never rejected); a ``delegate`` plan ends the
-  turn like a ``join`` (the mailbox resumes the agent); a second ``plan``
-  in one round is refused unrun,
-* the round cap (``_MAX_ROUNDS`` plan rounds for a controller,
-  ``_MAX_TOOL_ROUNDS`` for everyone else): the turn ends with
-  ``protocol_violation`` instead of paying for rounds without end — a
-  controller on its last plan, a worker on a handoff built in code (files
-  read, files changed, its last text) and ``session.capped`` set,
-* the round budget a worker sees: every round's first tool result carries
-  ``[guru] round N/40 · files changed: K``; a writing kind with nothing
-  changed at half the budget gets one checkpoint, and every worker gets
-  one last-call note ``HANDOFF_ROUNDS`` before the cap (``budget_nudges``),
-* the delegation nudge (end of turn after a broad read-heavy answer) for a
-  hands-on delegation-capable agent,
+* a reply without a tool call ends the turn: its text is the answer (the
+  lead's reply to the user, a worker's report to the lead). Nothing is
+  forced, so a thinking model keeps its reasoning on every round,
+* the stall monitor instead of a round cap: a round makes progress when a
+  file changed or a tool returned something not seen before in the turn
+  (timings, clock times and addresses ignored). ``STALL_ROUNDS`` rounds
+  without progress earn one warning on the next tool result;
+  ``STALL_GRACE`` more end the turn — a worker's on a handoff built in
+  code (files read and changed, its last text) with ``session.stalled``
+  set, so the lead decides what happens next,
 * duplicate-call suppression (same name and arguments as an earlier call
-  in the turn; never for ``plan``/``final_answer``), and
+  in the turn; a call that failed may be retried),
+* a reply cut at the output limit: its tool calls are not run (their
+  arguments may be truncated),
+* verify before reporting: an answer from an agent that changed files and
+  ran no tests (or, when enabled, no lint) since is sent back once,
+* the answer check (:mod:`guru.domain.claims`) on the lead's answer to a
+  request it worked on, and
 * final-answer rendering: the answer lands in ``session.messages`` as the
-  assistant's text (a lone ``final_answer``/``plan`` round is collapsed
-  into it, so the next turn's history carries the text once).
+  assistant's text.
 
 Each adapter supplies three closures over its per-turn state:
 
@@ -56,93 +45,43 @@ Each adapter supplies three closures over its per-turn state:
     ``session.messages`` and the provider-native history.
 
 ``add_user(text)``
-    Append a user turn (a nudge or re-prompt) to both histories.
+    Append a user turn (a send-back) to both histories.
 """
+import hashlib
 import json
-import os
 import re
 import time
-from typing import Optional
 
 from rich.markdown import Markdown
 
 from guru import config, session, ui
-from guru.adapters.base import FORCE_ANY, FORCE_PLAN
-from guru.domain import conversation, decisions, ledger, plan, tools
-from guru.domain.toolpolicy import WRITE_KINDS
+from guru.domain import (claims, conversation, decisions, ledger, tools,
+                         usage)
 
-# A controller answer longer than this with no delegation in the turn counts
-# as the controller doing the work itself (design doc §5: measured, not
-# punished).
-_CONTROLLER_ANSWER_CHARS = 600
+# The stall monitor (no round cap): STALL_ROUNDS rounds without progress
+# earn one warning; STALL_GRACE more end the turn.
+STALL_ROUNDS = 20
+STALL_GRACE = 5
+STALL_TEXT = (
+    '[guru] {n} rounds without progress: nothing changed and every result'
+    ' repeated what you already saw. Change approach: make the change and'
+    ' run the tests, or answer now with what you found and what blocks'
+    ' you. The turn ends in {grace} rounds without progress.')
+_STALLED_TEXT = '(guru stopped the turn after {n} rounds without progress.)'
+# The handoff of a stalled worker, built in code so the lead gets what it
+# learned without another paid call.
+_HANDOFF_PATHS = 12
 
-# One deterministic re-prompt per turn for a text-only reply where a tool
-# call was forced (or an empty reply anywhere); one re-ask per turn for a
-# rejected plan. Then the text is the answer.
-_REPROMPT_CAP = 1
-_REASK_CAP = 1
-
-# Per-turn round caps: every provider round is a paid call and the loop
-# below has no other exit while the model keeps calling tools. A
-# controller's round is one ``plan`` call, so a controller that has not
-# produced an accepted plan in _MAX_ROUNDS rounds is stuck (a refusal or
-# an unavailable handler answered every time); a worker legitimately
-# chains many tool rounds (read, edit, test, ...) so its cap is wider.
-# At the cap the turn ends with ``protocol_violation`` on the last text the
-# model wrote — for a controller ``plan.fallback_text`` over its last plan,
-# so the user sees what was attempted.
-_MAX_ROUNDS = 12
-_MAX_TOOL_ROUNDS = 40
-_CAPPED_TEXT = '(guru ended the turn after {n} rounds without a final answer.)'
-
-# The worker's round budget, made visible (dogfood 2026-10-07: three build
-# workers read for all 40 rounds and wrote nothing; they never knew how
-# many rounds they had). The checkpoint fires once for a writing kind
-# (toolpolicy.WRITE_KINDS) with no file changed at CHECKPOINT_AT of the
-# cap; the last call fires once HANDOFF_ROUNDS before the cap.
-CHECKPOINT_AT = 0.3
-HANDOFF_ROUNDS = 2
-# Past READ_STOP_AT of the cap a writing task that still changed nothing
-# has its read tools refused until it writes (eval a6953350f1c1: a build
-# worker got the checkpoint at round 20 and read ledger.py 18 more times,
-# writing nothing). Moved from 0.75 after eval 5db195fa2af9: an Opus build
-# worker given the facts still read 41 times, wrote only once reading
-# closed and reported in the spent rounds, so its work went untested.
-READ_STOP_AT = 0.5
-FOOTER_TEXT = '[guru] round {n}/{cap} · files changed: {changed}'
-CHECKPOINT_TEXT = (
-    '[guru] Your round budget is running down and no file is changed.'
-    ' Stop exploring: write the files now with what you know, or call'
-    ' final_answer saying what blocks you. Reading closes at half the'
-    ' budget.')
-LAST_CALL_TEXT = (
-    '[guru] {left} round(s) left. Your next call must be final_answer with'
-    ' a handoff: what you changed, what you found (file:line), what'
-    ' remains to do. Any other tool call from now on is refused.')
-# The answer to any call but final_answer once the budget is spent (the
-# last HANDOFF_ROUNDS - 1 rounds): not run; the tool list is left as it is
-# so the prompt cache holds. Dogfood eval bcfc2314e34f: a worker ignored
-# the last-call note and edited until the cap.
-BUDGET_REFUSAL = ('Refused: your round budget is spent; this call did not'
-                  ' run. Call final_answer now with your handoff.')
-READS_CLOSED_TEXT = (
-    '[guru] Reading is closed: {n}/{cap} rounds spent and no file changed.'
-    ' Write the files now with what you know, or call final_answer saying'
-    ' what blocks you.')
-# A worker's first final_answer after changing files with no test run
-# since is sent back once (eval 06075f330988: a build worker wrote the
-# store and its tests, ran only check_syntax, and a whole verify task had
-# to follow). VERIFY_TOOLS count as testing; the project's ``lint`` tool
-# (when enabled) is required too — evals 3f228ce4ebad, c707b5d8e91e,
-# dc6ad49a1715 all shipped flake8 errors after their tests passed.
+# Verify before reporting: VERIFY_TOOLS count as testing; the project's
+# ``lint`` tool (when enabled) is required too.
 VERIFY_TOOLS = frozenset(('run_tests', 'sandbox_run', 'sandbox_python'))
 LINT_TOOL = 'lint'
-VERIFY_REFUSAL = 'Not delivered: you changed files and ran no '
+VERIFY_REFUSAL = conversation.VERIFY_REFUSAL
 
 
 def verify_refusal(missing: frozenset) -> str:
-    """The result of a final_answer sent back for ``missing`` checks
-    (``tests``, ``lint``); always starts with ``VERIFY_REFUSAL``."""
+    """The send-back for ``missing`` checks (``tests``, ``lint``); always
+    starts with ``VERIFY_REFUSAL``."""
     what = ' or '.join(n for n in ('tests', 'lint') if n in missing)
     steps = []
     if 'tests' in missing:
@@ -151,54 +90,35 @@ def verify_refusal(missing: frozenset) -> str:
     if 'lint' in missing:
         steps.append('lint on the files you changed')
     return (f"{VERIFY_REFUSAL}{what} since. Run {' and '.join(steps)},"
-            ' fix what they report, then call final_answer again.')
+            ' fix what they report, then answer again.')
 
 
-READ_REFUSAL = ('Refused: reading is closed for this task until you change'
-                ' a file; this call did not run. Write now, or call'
-                ' final_answer with what blocks you.')
-# The handoff of a worker that still hit the cap, built in code so the
-# parent gets what the worker learned without another paid call.
-_HANDOFF_PATHS = 12
-# In a sandbox project the edits happen in the copy (sandbox_submit lands
-# them): a worker running these is writing, not exploring.
-_SANDBOX_EDIT_TOOLS = frozenset(('sandbox_run', 'sandbox_python'))
+# A round whose reply hit the provider's output limit: its tool calls'
+# arguments may be cut off, so they are not run.
+OUTPUT_CUT_REFUSAL = (
+    'Not run: your reply hit the output limit and this call\'s arguments'
+    ' were cut off. Write large content in parts: write_file a first part,'
+    ' then add the rest with edit_file or apply_patch, one call per round.')
+# Results that mean the call did not do its job: an identical retry is
+# allowed (not answered as a duplicate), and they are never progress.
+_FAILED_PREFIXES = ('Invalid arguments', 'Tool error:', 'Refused',
+                    'Not run:', 'Unknown tool:', 'Already called')
 
 # The tool result an adapter returns for a call the loop marked duplicate
 # (``run_tools`` gets ``duplicate=True``); the call itself does not run.
 DUPLICATE_RESULT = ('Already called {name} with these arguments. Use the'
                     ' previous result.')
 
-# Calls that are never suppressed as duplicates: ``plan`` is the turn's
-# protocol (the same plan again after a coverage re-ask is the accepted
-# second try, and a re-issued plan must reach the handler to be judged)
-# and ``final_answer`` ends the turn. Every other call with the same name
-# and arguments as an earlier one in the turn is answered from the
-# earlier result without running. A second ``plan`` in one round is
-# refused the same way (unrun) so the round has one plan verdict.
-_NEVER_DUPLICATE = frozenset(('plan', 'final_answer'))
-
 
 def tool_result(name: str, args: dict, duplicate: bool,
                 execute=None) -> str:
-    """One tool call's result, as every adapter threads it: the
-    duplicate notice (the call does not run) or the tool's output, plus
-    the round's budget footer on the first result of the round
-    (``session.round_note``, consumed here). ``execute`` defaults to
+    """One tool call's result, as every adapter threads it: the refusal of
+    a call cut at the output limit, the duplicate notice (neither runs) or
+    the tool's output, plus the round's note on the first result of the
+    round (``session.round_note``, consumed here). ``execute`` defaults to
     ``tools.execute_tool`` (tests pass a stub)."""
-    missing = session.verify_missing
-    if name in VERIFY_TOOLS:            # checked earlier in this round
-        missing = missing - {'tests'}
-    elif name == LINT_TOOL:
-        missing = missing - {'lint'}
-    session.verify_missing = missing
-    if session.budget_spent and name != 'final_answer':
-        content = BUDGET_REFUSAL
-    elif missing and name == 'final_answer':
-        session.verify_missing = frozenset()   # sent back once per turn
-        content = verify_refusal(missing)
-    elif session.reads_closed and name in config.DELEGATION_READ_TOOLS:
-        content = READ_REFUSAL
+    if session.output_cut:
+        content = OUTPUT_CUT_REFUSAL
     elif duplicate:
         ui.console.print(
             f"[yellow]\\[SKIP][/yellow] duplicate: {name}({args})")
@@ -212,75 +132,10 @@ def tool_result(name: str, args: dict, duplicate: bool,
     return content
 
 
-_DELEGATION_TEXT = conversation.DELEGATION_TEXT
-# Historical: the act nudge's text. The loop no longer sends it (the turn
-# contract replaced the preamble heuristic); the name stays for the eval
-# runner's counter and for reading old histories.
+# Historical: the act and delegation nudges' texts. The loop no longer
+# sends them; the names stay for the eval runner's counter and for reading
+# old histories.
 _NUDGE_TEXT = conversation.NUDGE_TEXT
-
-
-# A request shaped like a single edit: an edit verb and at most one
-# file-like token. Such a task is never a review panel (triage
-# 1f4f8262a80a: a one-file fix was nudged into a two-agent panel).
-_EDIT_VERB_RE = re.compile(
-    r"\b(fix|edit|rename|change|update|patch)\b", re.IGNORECASE)
-_FILE_TOKEN_RE = re.compile(
-    r"\S+\.(?:py|md|toml|txt|js|ts|json|yaml|yml)\b", re.IGNORECASE)
-
-
-def _single_target_request(request: str) -> bool:
-    """True for an edit-shaped request naming at most one file."""
-    if not _EDIT_VERB_RE.search(request):
-        return False
-    return len(set(_FILE_TOKEN_RE.findall(request))) <= 1
-
-
-# True for a user message the loop itself injected (the delegation nudge,
-# a re-prompt or a plan re-ask).
-_is_nudge = conversation.is_nudge
-
-
-def _turn_start() -> int:
-    """Index in ``session.messages`` of this turn's request (the last user
-    message that is not a nudge); 0 when there is none."""
-    return conversation.turn_start(session.messages)
-
-
-def _distinct_reads(start: int = 0) -> int:
-    """Distinct paths read with the read tools (by the ``path`` argument
-    recorded on tool messages) from ``session.messages[start:]`` on (the
-    whole conversation by default); -1 once a spawn ran in that span."""
-    paths: set = set()
-    for m in session.messages[start:]:
-        if not isinstance(m, dict) or m.get('role') != 'tool':
-            continue
-        name = m.get('tool_name', '')
-        if name == 'spawn':
-            return -1                    # already delegated — leave it alone
-        if name not in config.DELEGATION_READ_TOOLS:
-            continue
-        args = m.get('tool_args')
-        path = args.get('path') if isinstance(args, dict) else None
-        if path:
-            paths.add(os.path.normpath(str(path)))
-    return len(paths)
-
-
-def _should_delegate() -> bool:
-    """True when a delegation-capable main agent has read enough distinct
-    files to make a domain panel worthwhile, the request is not a
-    single-target edit, and it has not spawned a single sub-agent — the cue
-    for the one-time delegation nudge. Never for a controller (it has no
-    read tools and delegates through its plan) and disabled when
-    DELEGATION_NUDGE_MIN_READS is 0."""
-    if (session.controller or not session.can_spawn
-            or config.DELEGATION_NUDGE_MIN_READS <= 0):
-        return False
-    reads = _distinct_reads()
-    if reads < config.DELEGATION_NUDGE_MIN_READS:
-        return False
-    return not _single_target_request(_turn_request())
-
 
 # The user's request in a history: the most recent user message that is
 # neither a nudge nor a mailbox delivery, capped
@@ -288,89 +143,49 @@ def _should_delegate() -> bool:
 request_in = conversation.request_in
 
 
-def _turn_request() -> str:
+def turn_request() -> str:
     """The user's request for this turn (:func:`request_in` over the bound
     session's messages): on a mailbox turn the human request the
-    delivery answers, not the delivery."""
+    delivery answers, not the delivery. The sandbox gate hands it to the
+    reviewer."""
     return request_in(session.messages)
 
 
-# Public name: the sandbox gate hands the turn's request to the reviewer.
-turn_request = _turn_request
-
-_MAILBOX_PREFIXES = conversation.MAILBOX_PREFIXES
-
-
-def _mailbox_turn() -> bool:
-    """True when this turn was started by a mailbox delivery (a joined or
-    single sub-agent result): the message that opened the turn (the last
-    user message that is not a nudge) is the sub-agents' output, not a
-    task from the user."""
-    return conversation.mailbox_turn(session.messages)
+def _is_worker() -> bool:
+    """A sub-agent executing a delegated task (its stall ends on a
+    handoff; the lead's turn is the user's conversation)."""
+    return bool(session.task_id)
 
 
-# --- the turn contract -------------------------------------------------------
-
-def forced_tool() -> str:
-    """What this round must answer with: ``FORCE_PLAN`` (the ``plan``
-    tool) for a controller, ``FORCE_ANY`` (any tool, ``final_answer`` to
-    finish) for every other agent. Adapters read it per round and force
-    when they can (``Adapter.forces``)."""
-    return FORCE_PLAN if session.controller else FORCE_ANY
-
-
-def _forcing(forced: str) -> bool:
-    """Whether the bound session's adapter forces ``forced`` this round."""
-    fn = getattr(session.adapter, 'forces', None)
-    return callable(fn) and bool(fn(forced))
-
-
-def controller_executed(tools_used: list, answer: str,
-                        delegated: int = 0) -> bool:
-    """Did a controller do the work itself this turn?
-
-    True only in controller mode, when a tool outside ``plan`` was
-    attempted or the final answer exceeds ``_CONTROLLER_ANSWER_CHARS``
-    with nothing delegated in the turn (``delegated`` plan tasks, plus
-    any ``spawn`` call). Turns driven by a mailbox delivery (a joined or
-    single sub-agent result) are synthesis turns and never count.
-    """
-    if not session.controller:
-        return False
-    if _mailbox_turn():
-        return False
-    if any(name not in tools.CONTROLLER_TOOLS for name in tools_used):
-        return True
-    return (len(answer) > _CONTROLLER_ANSWER_CHARS
-            and tools_used.count('spawn') + delegated == 0)
+def reasoning_effort() -> str:
+    """The thinking effort for the bound session's rounds: the lead's
+    (``config.THINKING_LEAD``) or a worker's (``config.THINKING_WORKER``);
+    ``''`` turns thinking off. Adapters translate it to their provider."""
+    return config.THINKING_WORKER if _is_worker() else config.THINKING_LEAD
 
 
 def _close_turn(start: float, in0: int, out0: int, cost0: float,
-                unpriced0: int, struggle0: dict, tools_used: list,
-                answer: str = '', delegated: int = 0) -> None:
+                unpriced0: int, struggle0: dict, tools_used: list) -> None:
     """Write the TurnRecord for any agent not executing a task.
 
     A sub-agent running a spawned task is accounted for by its task row.
     Tokens, cost and struggle counters are this turn's deltas over the
     session values snapshotted at turn start; cost is None only when a call
-    made during *this* turn could not be priced. ``answer`` is the final
-    answer text (empty on cancel/error), for ``controller_executed``;
-    ``delegated`` the plan tasks guru spawned this turn.
+    made during *this* turn could not be priced.
     """
     if session.task_id:
         return
     exact = session.unpriced_calls == unpriced0
     cost = session.cost_usd - cost0 if exact else None
     ledger.record_turn(ledger.TurnRecord(
-        turn_id=session.turn_id, request=_turn_request(),
+        turn_id=session.turn_id, request=turn_request(),
         model=session.model, seconds=time.monotonic() - start,
-        tasks_spawned=tools_used.count('spawn') + delegated,
+        tasks_spawned=tools_used.count('spawn'),
         tools_used=tools_used,
         tokens_in=session.session_in - in0,
         tokens_out=session.session_out - out0,
         cost_usd=cost,
-        controller_executed=controller_executed(tools_used, answer,
-                                                delegated),
+        controller_executed=False,
         agent=session.agent_id,
         adapter=getattr(session.adapter, 'name', ''),
         struggle=ledger.struggle_delta(struggle0, session.struggle)))
@@ -388,210 +203,156 @@ def run_loop(*, step, run_tools, add_user, nudge: bool = True) -> None:
     Owns the shared control flow; the adapter owns the provider calls and
     history threading. See the module docstring for the closure contracts.
     Exactly one TurnRecord is written per call, on every exit path.
-    ``nudge`` gates the delegation nudges only; the turn contract's
-    re-prompts are not nudges.
+    ``nudge`` is accepted for the adapters' signature and unused (the
+    delegation nudge is gone: the lead decides when to delegate).
     """
     session.cancel_requested = False
     session.last_error = ''          # this turn's provider failure, if any
-    session.turn_waiting = False     # set by join/check/plan (orchestrator)
+    session.turn_waiting = False     # set by join/check (orchestrator)
     session.check_polls = 0
-    session.capped = False
+    session.stalled = False
     session.round_note = ''
-    session.budget_spent = False
-    session.reads_closed = False
-    session.verify_missing = frozenset()
     if not session.task_id:
         # A sub-agent executing a task keeps the turn_id it inherited.
         session.turn_id = ledger.new_turn_id()
+        if not conversation.mailbox_turn(session.messages):
+            # A new user request: its topic (a mailbox delivery continues
+            # the request it answers, and keeps that topic).
+            usage.begin_topic(turn_request())
     start = time.monotonic()
     in0, out0 = session.session_in, session.session_out
     cost0, unpriced0 = session.cost_usd, session.unpriced_calls
     struggle0 = dict(session.struggle)
     tools_used: list = []
-    answer = ''
-    delegated = 0
     try:
-        answer, delegated = _drive(step, run_tools, add_user, nudge,
-                                   tools_used)
+        _drive(step, run_tools, add_user, tools_used)
     finally:
         _close_turn(start, in0, out0, cost0, unpriced0, struggle0,
-                    tools_used, answer, delegated)
+                    tools_used)
 
 
-class _Round:
-    """What one provider round produced and what the loop decided."""
-
-    def __init__(self, text: str, tool_calls: list) -> None:
-        self.text = (text or '').strip()
-        self.calls = tool_calls
-        self.answer: Optional[str] = None     # set when the turn ends here
-        self.collapse = False                 # lone final_answer/plan round
-        self.delegated = 0                    # plan tasks guru spawned
-        # A contract re-prompt is due: ``reason`` says why, ``fallback``
-        # is the answer once the re-prompt cap is spent.
-        self.reprompt = False
-        self.reason = ''
-        self.fallback = ''
-
-    def call(self, name: str) -> Optional[dict]:
-        """Arguments of the first call named ``name`` in this round."""
-        return next((args for n, args, _ in self.calls if n == name), None)
-
-    def ask_again(self, reason: str, fallback: str) -> None:
-        self.reprompt, self.reason, self.fallback = True, reason, fallback
-
-
-def _drive(step, run_tools, add_user, nudge: bool, tools_used: list
-           ) -> tuple[str, int]:
-    """The round loop proper; every requested tool lands in ``tools_used``.
-    Returns ``(answer, delegated)``: the final answer text (``''`` on
-    cancel, error or a delegating turn) and the plan tasks spawned."""
+def _drive(step, run_tools, add_user, tools_used: list) -> str:
+    """The round loop proper; every requested tool lands in
+    ``tools_used``. Returns the final answer text (``''`` on cancel,
+    error or a turn that waits for sub-agents)."""
     called: set = set()
-    reprompts = 0
-    rounds = 0
     last_text = ''
-    last_plan: Optional[dict] = None
-    delegation_nudged = False
+    monitor = Monitor()
     panel_asked = False
-    delegated = 0
-    turn0 = _turn_start()
-    budget = _Budget()
     while True:
         if session.cancel_requested:
             ui.console.print("[yellow]* cancelled[/yellow]")
-            return '', delegated
-        cap = _MAX_ROUNDS if session.controller else _MAX_TOOL_ROUNDS
-        if rounds >= cap:
-            # The cap is the only exit while the model keeps calling
-            # tools (or a controller keeps planning without an accepted
-            # plan): end on what it last wrote.
-            ledger.bump('protocol_violation')
-            ui.console.print(
-                f"[dim yellow]\\[CONTRACT][/dim yellow] {rounds} rounds"
-                " without a final answer — ending the turn")
-            if _is_worker():
-                session.capped = True
-            content = _capped_text(last_text, last_plan, rounds, budget)
-            _settle(content, False)
-            _render_answer(content)
-            return content, delegated
-        rounds += 1
+            return ''
         ui.note_thinking()
+        session.output_cut = False      # the adapter sets it for this reply
         result = step()
         if result is None:
             # None = stop: a cancel (flagged) or an error (step printed it).
             if session.cancel_requested:
                 ui.console.print("[yellow]* cancelled[/yellow]")
-            return '', delegated
+                return ''
+            if _is_worker() and (monitor.changed or monitor.read):
+                # A provider error (the context full, an outage) after
+                # real work: hand back what was done, as a stall does,
+                # so the lead can carry on from it.
+                session.stalled = True
+                content = monitor.handoff(last_text, stalled=False)
+                _settle(content)
+                return content
+            return ''
         ui.status_draw()
-        rnd = _Round(*result)
-        forced = forced_tool()
-        if rnd.text:
-            last_text = rnd.text
+        text, calls = (result[0] or '').strip(), result[1]
+        if text:
+            last_text = text
 
-        if not rnd.calls:
-            # A text-only reply. A controller's text may carry the plan as
-            # JSON (an adapter that cannot force); otherwise the contract
-            # decides whether the text is the answer.
-            if forced == FORCE_PLAN and _plan_from_text(
-                    rnd, add_user, tools_used, turn0):
-                last_plan = plan.from_text(rnd.text) or last_plan
-            elif not rnd.text or _forcing(forced):
-                rnd.ask_again('empty reply' if not rnd.text
-                              else 'text where a tool call was forced',
-                              rnd.text)
-            else:
-                rnd.answer = rnd.text
-        else:
+        if calls:
             pending = []
-            seen_plan = False
-            for name, args, ref in rnd.calls:
+            for name, args, ref in calls:
                 tools_used.append(name)
-                if name == 'plan':
-                    duplicate = seen_plan       # one plan verdict per round
-                    seen_plan = True
-                    if not duplicate:
-                        last_plan = args
-                elif name in _NEVER_DUPLICATE:
-                    duplicate = False
-                else:
-                    key = (name, _args_key(args))
-                    duplicate = key in called
-                    if not duplicate:
-                        called.add(key)
+                key = (name, _args_key(args))
+                duplicate = key in called
+                called.add(key)
                 pending.append((name, args, ref, duplicate))
-            if _is_worker():
-                session.round_note = budget.note(rounds, cap)
-                session.budget_spent = rounds > cap - HANDOFF_ROUNDS
-                session.reads_closed = budget.reads_closed(rounds, cap)
-                session.verify_missing = budget.verify_missing(rounds, cap)
+            session.round_note = monitor.note()
             before = len(session.messages)
             run_tools(pending)
             session.round_note = ''
-            session.budget_spent = False
-            session.reads_closed = False
-            session.verify_missing = frozenset()
-            budget.saw(session.messages[before:])
-            _after_tools(rnd, turn0, before)
-
-        if rnd.reprompt:
-            if reprompts < _REPROMPT_CAP:
-                reprompts += 1
-                ui.console.print(
-                    f"[dim yellow]\\[CONTRACT][/dim yellow] {rnd.reason}"
-                    " — asking for a tool call")
-                add_user(plan.PLAN_REPROMPT_TEXT
-                         if forced == FORCE_PLAN else plan.REPROMPT_TEXT)
+            _allow_retries(called, session.messages[before:])
+            if monitor.saw(session.messages[before:]):
+                # Files changed: earlier results (a test run, a read) may
+                # be stale, so the same call runs again.
+                called.clear()
+            if session.turn_waiting:
+                # A join opened a barrier (or check kept polling running
+                # sub-agents): the mailbox resumes this agent with the
+                # results.
+                ui.console.print("[dim]\\[waiting for sub-agents][/dim]")
+                return ''
+            if not monitor.stalled():
                 continue
-            ledger.bump('protocol_violation')
-            rnd.answer = rnd.fallback
-
-        delegated += rnd.delegated
-        if session.turn_waiting:
-            # A plan delegated, a join opened a barrier (or check kept
-            # polling running sub-agents): stop here instead of another
-            # model round. No answer is rendered; the mailbox resumes this
-            # agent with the results.
-            ui.console.print("[dim]\\[waiting for sub-agents][/dim]")
-            return '', delegated
-        if rnd.answer is None:
-            continue
-
-        # The turn ends on rnd.answer.
-        content = rnd.answer
-        if (content and session.can_spawn and not panel_asked
-                and not _mailbox_turn()):
-            # One boolean cannot stand in for three specialist questions,
-            # so the panel batch carries no heuristic. A mailbox delivery
-            # is the sub-agents' results, not a task to staff, so it is
-            # never judged (f1929d55c41a).
-            panel_asked = True
-            decisions.shadow(
-                'panel', decisions.panel_questions(_turn_request()))
-        if (nudge and not delegation_nudged and content
-                and _should_delegate()):
-            delegation_nudged = True
-            ledger.bump('delegation_nudges')
+            ledger.bump('stalls')
             ui.console.print(
-                "[dim yellow]\\[DELEGATE][/dim yellow] broad task, no"
-                " sub-agents — asking it to spawn a domain panel")
-            add_user(_DELEGATION_TEXT)
-            continue
-        _settle(content, rnd.collapse)
+                f"[dim yellow]\\[STALL][/dim yellow] {monitor.quiet} rounds"
+                " without progress — ending the turn")
+            session.stalled = True
+            if _is_worker():
+                content = monitor.handoff(last_text)
+            else:
+                content = '\n\n'.join(filter(None, (
+                    last_text, _STALLED_TEXT.format(n=monitor.quiet))))
+            _settle(content)
+            _render_answer(content)
+            return content
+
+        if not text:
+            # An empty reply: nothing to deliver and nothing to run.
+            ledger.bump('protocol_violation')
+            content = last_text or '(no answer produced)'
+        else:
+            sent_back = _send_back(monitor, text)
+            if sent_back:
+                add_user(sent_back)
+                continue
+            content = text
+        if (session.can_spawn and not panel_asked
+                and not conversation.mailbox_turn(session.messages)):
+            # Shadowed for the judges' labels; changes nothing. A mailbox
+            # delivery is the sub-agents' results, not a task to staff.
+            panel_asked = True
+            decisions.shadow('panel', decisions.panel_questions(
+                turn_request()))
+        _settle(content)
         _render_answer(content)
-        return content, delegated
+        return content
 
 
-def _is_worker() -> bool:
-    """A sub-agent executing a delegated task (the round budget, its
-    notes and the capped handoff apply to it; the main agent's turn is
-    the user's conversation and keeps the plain cap)."""
-    return bool(session.task_id)
+def _send_back(monitor: 'Monitor', answer: str) -> str:
+    """The text that sends ``answer`` back for one more try, or ``''`` to
+    deliver it: the verify check (once per turn) for an agent that changed
+    files and did not test or lint them since, then the answer check for
+    the lead (once per request)."""
+    missing = monitor.verify_missing()
+    if missing:
+        monitor.verify_asked = True
+        ledger.bump('verify_sendbacks')
+        ui.console.print("[dim yellow]\\[VERIFY][/dim yellow] changed files"
+                         " untested — sent back")
+        return verify_refusal(missing)
+    if _is_worker():
+        return ''
+    sent_back = claims.check_answer(session.messages, answer)
+    if sent_back is None:
+        return ''
+    ui.console.print("[dim yellow]\\[CHECK][/dim yellow] answer vs work:"
+                     " sent back")
+    return sent_back
 
 
 # The paths an ``apply_patch`` / ``sandbox_submit`` result reports as
-# written ("<path>: N hunk(s) applied"), one per line.
+# written ("<path>: N hunk(s) applied"), and the ``gate.stat_text`` rows
+# ("<path> | +3 -1") an ``apply_work`` result lists, one per line.
 _APPLIED_RE = re.compile(r'^(.+?): \d+ hunk', re.MULTILINE)
+_STAT_RE = re.compile(r'^(\S.*?) \| \+\d+', re.MULTILINE)
 
 
 def changed_paths(name: str, args: object, content: str) -> list[str]:
@@ -606,30 +367,108 @@ def changed_paths(name: str, args: object, content: str) -> list[str]:
     if name in ('apply_patch', 'sandbox_submit'):
         if content.startswith('Applied patch'):
             return _APPLIED_RE.findall(content) or [name]
+    if name == 'apply_work' and content.startswith('Applied patch'):
+        return [p.strip() for p in _STAT_RE.findall(content)] or [name]
     return []
 
 
-class _Budget:
-    """What a worker did with its rounds: the paths it read and changed,
-    whether it is editing a sandbox copy, and which budget notes it
-    already got (each fires once)."""
+# Sandbox scripts are how an agent edits its copy: a new script is new
+# work even when its output (often just "exit 0") repeats.
+_SCRIPT_TOOLS = frozenset(('sandbox_python',))
+# What changes on every call without being news: a timing or other
+# decimal ("in 3.21s"), a clock time, a hex address.
+_NOISE_RE = re.compile(r'\d+\.\d+|\d{1,2}:\d{2}(?::\d{2})?|0x[0-9a-fA-F]+')
+
+
+def _fingerprint(name: str, content: str) -> str:
+    """A tool result's identity for the stall monitor: its tool name and
+    content with the noise (``_NOISE_RE``) blanked."""
+    text = _NOISE_RE.sub('#', content)
+    return hashlib.sha1(f'{name}\0{text}'.encode()).hexdigest()
+
+
+class Monitor:
+    """What an agent's rounds produced: the results it has seen (by
+    fingerprint), the rounds since the last progress, the paths it read
+    and changed, and whether its changes are tested and linted."""
 
     def __init__(self) -> None:
+        self.seen: set = set()
+        self.quiet = 0                  # rounds since the last progress
+        self.warned = False
+        self.last_note = ''             # stripped before fingerprinting
         self.read: list[str] = []
         self.changed: list[str] = []
-        self.sandboxing = False         # editing the sandbox copy
-        self.checkpointed = False
-        self.last_called = False
-        self.read_stop_noted = False
         self.untested = False           # changed files since the last test
         self.unlinted = False           # ... since the last lint
         self.verify_asked = False
 
-    def verify_missing(self, rounds: int, cap: int) -> frozenset:
-        """The checks a final_answer this round is sent back for: tests
-        and (when the ``lint`` tool is enabled) lint not run since files
-        changed — once per turn, while rounds remain to run them."""
-        if self.verify_asked or rounds >= cap - HANDOFF_ROUNDS:
+    def saw(self, results: list) -> bool:
+        """Take in a round's tool messages (after they ran); True when
+        they changed files (or ran a sandbox script, which may have)."""
+        progress = False
+        changed = False
+        for m in results:
+            if not isinstance(m, dict) or m.get('role') != 'tool':
+                continue
+            name = str(m.get('tool_name', ''))
+            args = m.get('tool_args')
+            content = str(m.get('content', ''))
+            failed = content.startswith(_FAILED_PREFIXES)
+            for p in changed_paths(name, args, content):
+                progress = changed = True
+                self.untested = self.unlinted = True
+                if p not in self.changed:
+                    self.changed.append(p)
+            if name in _SCRIPT_TOOLS and not failed:
+                changed = True
+            if name in VERIFY_TOOLS and not failed:
+                self.untested = False
+            if name == LINT_TOOL and not failed:
+                self.unlinted = False
+            path = args.get('path') if isinstance(args, dict) else None
+            if (name in config.DELEGATION_READ_TOOLS and path
+                    and str(path) not in self.read):
+                self.read.append(str(path))
+            if failed:
+                continue
+            if self.last_note:
+                content = content.replace(f'\n\n{self.last_note}', '')
+            if name in _SCRIPT_TOOLS:
+                content = f'{_args_key(args)}\0{content}'
+            key = _fingerprint(name, content)
+            if key not in self.seen:
+                self.seen.add(key)
+                progress = True
+        if progress:
+            self.quiet = 0
+            self.warned = False
+        else:
+            self.quiet += 1
+        return changed
+
+    def note(self) -> str:
+        """The warning for the round about to run, once per quiet streak
+        (bumps ``stall_warnings``); ``''`` otherwise."""
+        if self.warned or self.quiet < STALL_ROUNDS:
+            return ''
+        self.warned = True
+        ledger.bump('stall_warnings')
+        ui.console.print("[dim yellow]\\[STALL][/dim yellow] no progress —"
+                         " warning sent")
+        self.last_note = STALL_TEXT.format(n=self.quiet, grace=STALL_GRACE)
+        return self.last_note
+
+    def stalled(self) -> bool:
+        """Whether the turn ends: warned, and the grace rounds went by
+        without progress too."""
+        return self.warned and self.quiet >= STALL_ROUNDS + STALL_GRACE
+
+    def verify_missing(self) -> frozenset:
+        """The checks an answer is sent back for: tests and (when the
+        ``lint`` tool is enabled) lint not run since files changed — once
+        per turn."""
+        if self.verify_asked:
             return frozenset()
         missing = set()
         if self.untested:
@@ -638,80 +477,18 @@ class _Budget:
             missing.add('lint')
         return frozenset(missing)
 
-    def _idle_writer(self) -> bool:
-        """A writing task that has changed nothing (and is not editing a
-        sandbox copy)."""
-        return (not self.changed and not self.sandboxing
-                and session.task_kind in WRITE_KINDS)
-
-    def reads_closed(self, rounds: int, cap: int) -> bool:
-        """Whether this round's read tools are refused: past READ_STOP_AT
-        of the cap with nothing changed; reopened by the first write."""
-        return self._idle_writer() and rounds >= cap * READ_STOP_AT
-
-    def saw(self, results: list) -> None:
-        """Take in a round's tool messages (after they ran)."""
-        for m in results:
-            if not isinstance(m, dict) or m.get('role') != 'tool':
-                continue
-            name = str(m.get('tool_name', ''))
-            args = m.get('tool_args')
-            content = str(m.get('content', ''))
-            for p in changed_paths(name, args, content):
-                self.untested = self.unlinted = True
-                if p not in self.changed:
-                    self.changed.append(p)
-            if name in VERIFY_TOOLS:
-                self.untested = False
-            if name == LINT_TOOL:
-                self.unlinted = False
-            if (name == 'final_answer'
-                    and content.startswith(VERIFY_REFUSAL)):
-                self.verify_asked = True
-            if name in _SANDBOX_EDIT_TOOLS:
-                self.sandboxing = True
-            path = args.get('path') if isinstance(args, dict) else None
-            if (name in config.DELEGATION_READ_TOOLS and path
-                    and str(path) not in self.read):
-                self.read.append(str(path))
-
-    def note(self, rounds: int, cap: int) -> str:
-        """The footer for round ``rounds`` of ``cap``, plus the checkpoint
-        or the last call when one is due (each bumps ``budget_nudges``)."""
-        parts = [FOOTER_TEXT.format(n=rounds, cap=cap,
-                                    changed=len(self.changed))]
-        left = cap - rounds
-        if not self.last_called and left <= HANDOFF_ROUNDS:
-            self.last_called = True
-            ledger.bump('budget_nudges')
-            ui.console.print("[dim yellow]\\[BUDGET][/dim yellow] last"
-                             " call: asking for a handoff")
-            parts.append(LAST_CALL_TEXT.format(left=left))
-        elif (not self.read_stop_noted and self.reads_closed(rounds, cap)):
-            self.read_stop_noted = True
-            ledger.bump('budget_nudges')
-            ui.console.print("[dim yellow]\\[BUDGET][/dim yellow] reading"
-                             " closed, nothing written")
-            parts.append(READS_CLOSED_TEXT.format(n=rounds, cap=cap))
-        elif (not self.checkpointed and self._idle_writer()
-              and rounds >= cap * CHECKPOINT_AT):
-            self.checkpointed = True
-            ledger.bump('budget_nudges')
-            ui.console.print("[dim yellow]\\[BUDGET][/dim yellow] half the"
-                             " rounds spent, nothing written")
-            parts.append(CHECKPOINT_TEXT)
-        return '\n'.join(parts)
-
-    def handoff(self, last_text: str, rounds: int) -> str:
-        """The capped worker's answer: what it read and changed, then
-        its last text — the parent re-delegates from here."""
+    def handoff(self, last_text: str, stalled: bool = True) -> str:
+        """A stopped worker's report: what it read and changed, then its
+        last text — the lead decides from here. ``stalled`` False: the
+        provider failed mid-task (the context full, an outage)."""
         def paths(items: list[str]) -> str:
             shown = ', '.join(items[:_HANDOFF_PATHS])
             more = len(items) - _HANDOFF_PATHS
             return shown + (f' (+{more} more)' if more > 0 else '')
-        lines = [f'(capped: guru ended this task after {rounds} rounds'
-                 ' without a final answer; the handoff below is what it'
-                 ' got to.)',
+        why = (f'stalled: guru ended this task after {self.quiet} rounds'
+               ' without progress' if stalled else
+               f'stopped: the provider failed ({session.last_error or "?"})')
+        lines = [f'({why}; the handoff below is what it got to.)',
                  f'Files changed: {paths(self.changed) or "none"}',
                  f'Files read: {paths(self.read) or "none"}']
         if last_text:
@@ -719,163 +496,32 @@ class _Budget:
         return '\n'.join(lines)
 
 
-def _capped_text(last_text: str, last_plan: Optional[dict], rounds: int,
-                 budget: Optional[_Budget] = None) -> str:
-    """The answer when the round cap ends a turn: a controller's last
-    plan rendered through ``plan.fallback_text`` (its own text first);
-    a worker's handoff (files read and changed, its last text)."""
-    if session.controller and last_plan is not None:
-        return plan.fallback_text(
-            last_text, last_plan,
-            [f'{rounds} plan rounds without an accepted plan'])
-    if _is_worker():
-        return (budget or _Budget()).handoff(last_text, rounds)
-    return last_text or _CAPPED_TEXT.format(n=rounds)
+def _allow_retries(called: set, results: list) -> None:
+    """Forget the duplicate key of every call in ``results`` that failed
+    (``_FAILED_PREFIXES``), so an identical retry runs instead of being
+    answered "already called"."""
+    for m in results:
+        if (isinstance(m, dict) and m.get('role') == 'tool'
+                and str(m.get('content', '')).startswith(_FAILED_PREFIXES)
+                and not str(m.get('content', '')).startswith(
+                    'Already called')):
+            called.discard((m.get('tool_name'), _args_key(m.get('tool_args'))))
 
 
 def _args_key(args: object) -> str:
-    """A hashable identity for a call's arguments (nested lists — the
-    plan's tasks — included)."""
+    """A hashable identity for a call's arguments."""
     try:
         return json.dumps(args, sort_keys=True, default=str)
     except (TypeError, ValueError):
         return repr(args)
 
 
-def _answer_text(args: dict, text: str) -> str:
-    """The reply of an accepted ``answer`` plan: its ``answer`` field, else
-    ``text`` (the round's own assistant text). ``answer`` is never
-    rejected for lacking text; only when both are empty does the loop
-    fall to the empty-reply re-prompt."""
-    parsed, _ = plan.parse(args)
-    answer = parsed.answer if parsed is not None else ''
-    return answer or text.strip()
-
-
-def _plan_from_text(rnd: _Round, add_user, tools_used: list,
-                    turn0: int) -> bool:
-    """A controller's text reply parsed as a plan (the text path of an
-    adapter that cannot force a tool call). False when the text holds no
-    plan object. Otherwise the plan runs through the ``plan`` tool: an
-    accepted ``answer`` sets ``rnd.answer`` (its text, else the prose
-    around the plan object, else the empty-reply re-prompt), a
-    ``delegate`` ends the turn (``session.turn_waiting``), a re-ask or
-    refusal goes back to the model as a user message — a second re-ask
-    ends the turn on the fallback text with ``protocol_violation``."""
-    args = plan.from_text(rnd.text)
-    if args is None:
-        return False
-    tools_used.append('plan')
-    result = tools.execute_tool('plan', args)
-    kind = _plan_kind(result)
-    if kind == 'answer':
-        answer = _answer_text(args, plan.prose_around(rnd.text))
-        if answer:
-            rnd.answer = answer
-        else:
-            rnd.ask_again('answer plan without text',
-                          plan.fallback_text('', args,
-                                             ['outcome answer without text']))
-    elif kind == 'delegated':
-        rnd.delegated = _task_count(args)
-    elif kind == 'reask' and _reasks_exceeded(turn0, result):
-        ledger.bump('protocol_violation')
-        rnd.answer = plan.fallback_text(
-            '', args, [plan.reask_problems(result)])
-    else:
-        add_user(result)
-    return True
-
-
-def _after_tools(rnd: _Round, turn0: int, start: int) -> None:
-    """Read a round's ``plan`` / ``final_answer`` outcome after its tools
-    ran (the adapter threaded each result into ``session.messages`` from
-    index ``start`` on; the first ``plan`` result there is the round's
-    verdict — a second plan in the round was refused unrun)."""
-    args = rnd.call('plan')
-    if args is not None:
-        result = _round_tool_result('plan', start)
-        kind = _plan_kind(result)
-        if kind == 'answer':
-            answer = _answer_text(args, rnd.text)
-            if answer:
-                rnd.answer = answer
-                rnd.collapse = len(rnd.calls) == 1
-            else:
-                rnd.ask_again('answer plan without text',
-                              plan.fallback_text(
-                                  '', args, ['outcome answer without text']))
-        elif kind == 'delegated':
-            rnd.delegated = _task_count(args)
-        elif kind == 'reask' and _reasks_exceeded(turn0):
-            ledger.bump('protocol_violation')
-            rnd.answer = plan.fallback_text(
-                rnd.text, args, [plan.reask_problems(result)])
-        return
-    args = rnd.call('final_answer')
-    if args is not None:
-        if _round_tool_result('final_answer', start).startswith(
-                VERIFY_REFUSAL):
-            ledger.bump('budget_nudges')
-            return                      # sent back to verify first
-        rnd.answer = plan.final_text(args)
-        rnd.collapse = len(rnd.calls) == 1
-
-
-def _plan_kind(result: str) -> str:
-    """The handler's decision as its result text encodes it: ``answer``,
-    ``delegated``, ``reask`` or ``other`` (refused, unavailable)."""
-    if result == plan.ANSWER_ACK:
-        return 'answer'
-    if result.startswith(plan.DELEGATED_PREFIX):
-        return 'delegated'
-    if plan.is_reask(result):
-        return 'reask'
-    return 'other'
-
-
-def _reasks_exceeded(turn0: int, pending: str = '') -> bool:
-    """Whether this turn has had more than ``_REASK_CAP`` plan re-asks,
-    counting the ones in ``session.messages`` since ``turn0`` plus a
-    ``pending`` re-ask not yet appended (the text path)."""
-    n = plan.reasks_in(session.messages[turn0:]) + (1 if pending else 0)
-    return n > _REASK_CAP
-
-
-def _task_count(args: dict) -> int:
-    parsed, _ = plan.parse(args)
-    return len(parsed.tasks) if parsed is not None else 0
-
-
-def _round_tool_result(name: str, start: int) -> str:
-    """Content of the first tool message named ``name`` appended at or
-    after index ``start`` of ``session.messages`` (this round's results);
-    ``''`` when there is none."""
-    for m in session.messages[start:]:
-        if isinstance(m, dict) and m.get('role') == 'tool' \
-                and m.get('tool_name') == name:
-            return m.get('content') or ''
-    return ''
-
-
-def _settle(answer: str, collapse: bool) -> None:
-    """Land ``answer`` in ``session.messages`` as the assistant's text.
-
-    A lone ``final_answer``/``plan`` round (``collapse``) — the assistant's
-    tool-call message and its tool result — is replaced by one assistant
-    text message, so the next turn's history (and ``final_answer`` readers:
-    the orchestrator, the bench) carry the text once. Otherwise the last
-    message's text becomes the answer when it is the assistant's (the text
-    path: the model's own text or its JSON plan), or the answer is
-    appended after the round's tool results.
-    """
+def _settle(answer: str) -> None:
+    """Land ``answer`` in ``session.messages`` as the assistant's text:
+    the last message's text becomes the answer when it is the assistant's
+    own text reply, else the answer is appended after the round's tool
+    results."""
     msgs = session.messages
-    if (collapse and len(msgs) >= 2
-            and conversation.msg_role(msgs[-1]) == 'tool'
-            and conversation.msg_role(msgs[-2]) == 'assistant'):
-        del msgs[-2:]
-        msgs.append({'role': 'assistant', 'content': answer})
-        return
     if msgs and conversation.msg_role(msgs[-1]) == 'assistant' \
             and not conversation._tool_calls_of(msgs[-1]):
         last = msgs[-1]

@@ -13,9 +13,11 @@ project the quality gate is the only write path, and ``apply_patch`` is
 reached as a module function from :func:`sandbox_submit` (and from
 provisioning) only. A run happens in the task's *copy* of the
 project — one per ``(project, task)``, made on the first verb call with
-:func:`guru.sandbox.colima.copy_excludes_for`, removed when the task ends
-(``Orchestrator._finish_task`` → :func:`cleanup_task`) or when a submit
-lands — inside a container with no network (``colima.run``). The model
+:func:`guru.sandbox.colima.copy_excludes_for`, removed when a failed task
+ends (``Orchestrator._finish_task`` → :func:`cleanup_task`), when the
+lead merges a finished worker's copy (:func:`apply_work`) or the user's
+next request comes in (``Orchestrator.submit``), or when a submit lands
+— inside a container with no network (``colima.run``). The model
 sees a digest (exit code, first lines of output) with ``detail`` for the
 last 4 KB; the full output goes to guru's log.
 
@@ -78,6 +80,9 @@ BASELINE_CHANGED = ('Refused: sandbox copy baseline changed; the copy was '
 MARKER_CHANGED = ('Refused: the sandbox copy\'s marker file was removed or '
                   'changed; the copy was discarded — run a sandbox verb to '
                   'make a fresh one')
+# A worker does not submit: the lead merges its diff (``apply_work``).
+WORKER_SUBMIT = ('Refused: a worker does not submit. Your changes go to the'
+                 ' lead as a diff with your report; answer when done.')
 DIGEST_LINES = 30           # lines of stdout/stderr in a run digest
 DETAIL_BYTES = 4096         # tail returned by detail
 HEALTH_DIGEST_CHARS = 600   # cap on a code_health digest
@@ -563,6 +568,8 @@ def _verdict(diff: str, intent: str, project: Path,
     if baseline and not gate.has_suspicious(flags):
         deltas = gate.health_deltas(diff, baseline)
         flags += gate.health_flags_from(deltas)
+    if not config.GATE_REVIEW:
+        return gate.decide_unreviewed(flags)
     review = None
     if not gate.has_suspicious(flags):
         packet = gate.packet_text(_user_request(), session.task_text, intent,
@@ -577,6 +584,8 @@ def sandbox_submit(intent: str, project: Optional[Path] = None) -> str:
     """Run the quality gate over the task's copy and, per verdict and
     access mode, apply the diff to the real tree (``apply_patch``), ask
     the user first, or refuse. See the module docstring."""
+    if session.task_id:
+        return WORKER_SUBMIT
     spec, refusal = _ready(project)
     if spec is None:
         return refusal
@@ -658,6 +667,65 @@ def _settle(spec: sb.SandboxSpec, key: tuple[str, str], what: str,
     _discard(key)
     return (f'{header}\n{applied}\nThe sandbox copy was removed; verify '
             'with run_tests on the real tree.')
+
+
+def worker_diff(task_id: str, project: Optional[Path] = None) -> str:
+    """The diff of worker task ``task_id``'s copy against the project, for
+    its report to the lead; ``''`` without a sandbox, a copy or a change.
+    The copy is kept until the lead applies it or the lead's turn ends."""
+    spec, refusal = _ready(project)
+    if spec is None:
+        return ''
+    key = (str(spec.project), task_id)
+    with _lock:
+        copy = _copies.get(key)
+    if copy is None or not copy.path.is_dir():
+        return ''
+    with _key_lock(key):
+        try:
+            return colima.diff(copy.path, spec.project, expected=copy.sha)
+        except (colima.BaselineChanged, RuntimeError) as e:
+            log.warning('sandbox: worker diff of %s unreadable: %s',
+                        task_id, e)
+            return ''
+
+
+def apply_work(task_id: str, project: Optional[Path] = None) -> str:
+    """Merge worker task ``task_id``'s copy diff into the calling agent's
+    (the lead's) own copy with ``git apply --3way``; the worker's copy is
+    removed once merged. Nothing reaches the real tree: the lead submits
+    its copy through the gate (:func:`sandbox_submit`)."""
+    spec, refusal = _ready(project)
+    if spec is None:
+        return refusal
+    with _lock:
+        known = (str(spec.project), task_id) in _copies
+    if not known:
+        return (f'Nothing to apply: task {task_id} has no sandbox copy'
+                ' (already applied, discarded, or it never used the'
+                ' sandbox).')
+    diff = worker_diff(task_id, spec.project)
+    if not diff.strip():
+        return (f'Nothing to apply: task {task_id} left no sandbox'
+                ' changes.')
+    if diff.rstrip().endswith('[diff truncated]'):
+        return (f'Refused: the diff of task {task_id} is too large to'
+                ' read whole, so it cannot be applied. Have the worker'
+                ' split its work, or redo the part yourself.')
+    key = _task_key(spec)
+    with _key_lock(key):
+        copy = _copy(spec)
+        res = colima.apply_diff(copy.path, spec.project, diff)
+    if res:
+        return (f'Refused: the worker diff does not apply to your copy:'
+                f' {res}.\nThe worker\'s copy is kept. Redo the part in your'
+                ' copy, or spawn a worker to redo it on top of your'
+                ' current work.')
+    _discard((str(spec.project), task_id))
+    images.record_sandbox_event('apply_work', ['apply_work', task_id], 0.0,
+                                True, gate.stat_text(diff)[:200])
+    return (f'Applied patch to your sandbox copy:\n{gate.stat_text(diff)}'
+            '\nRun the tests in your copy, then sandbox_submit.')
 
 
 def question_verdict(question: str) -> str:

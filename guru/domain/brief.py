@@ -9,7 +9,7 @@ conventions declared in ``pyproject.toml`` ``[tool.*]`` sections.
 ``slice(brief, task_text)`` cuts one down to what a task mentions -- the map,
 the test command and the modules whose names or symbols appear in the task
 text -- under a token budget, so a worker's system context carries it and
-the controller's sees the map (``render_map``). ``current(root, store)``
+the lead's sees the map (``render_map``). ``current(root, store)``
 builds or loads the brief for the checked-out HEAD through the store the
 caller passes (a :class:`BriefStore`; ``guru.repositories.briefs`` is the
 one the endpoints use -- this module imports no repository). The ``/brief``
@@ -335,7 +335,7 @@ def _short_sha(sha: str) -> str:
 
 def render_map(brief: Brief) -> str:
     """The map block: name, HEAD, counts, directories, modules, test
-    command and convention names -- what the controller sees to plan."""
+    command and convention names -- the lead's overview."""
     name = Path(brief.root).name
     dirs = sorted(brief.dirs.items(), key=lambda kv: (-kv[1], kv[0]))
     dir_text = ', '.join(f'{d}/ {n}' if d != '.' else f'./ {n}'

@@ -21,26 +21,27 @@ Front-ends subclass it and override a few hooks to supply their own surface:
 The mailbox/barrier logic lives here once and is exercised by the benchmark's
 orchestrator tests.
 
+The main agent is the LEAD (``config.LEAD_HINT``): it keeps the overview,
+works itself where that is quicker, spawns workers for parts of the work
+and reviews and integrates what they return. In a sandbox project a
+worker's copy is kept when it finishes and its diff rides along with its
+report; the lead merges it into its own copy (``apply_work``) and submits
+the integrated change once through the gate.
+
 Routing (design doc §2, §4, §5): ``spawn`` carries ``kind``/``complexity``
 labels; ``_make_child`` scans the task text, resolves a ``Route`` over the
 configured ladders, asks the once-per-run spend question when a remote pick
 needs it, and configures the child with the route's adapter/model from the
-registry. A controller never calls ``spawn``: its every reply is one
-``plan`` tool call (``guru.domain.plan``) and ``do_plan`` — installed as the
-plan handler — validates it and, for ``delegate``, spawns the plan's tasks
-itself through ``spawn_panel`` (kind/complexity per task, so a ``review``
-task takes the review ladder), opens the join barrier and ends the turn;
-the joined results resume the controller, which answers with ``plan``
-again. Without a registry routing is inert (the child keeps the parent's
+registry. Without a registry routing is inert (the child keeps the parent's
 adapter and model). A remote child that fails without an answer is respawned
 once on the best local rung (``retry_of``); the original row is
 ``fell_back``.
 
 Panel judge (item 6 of ``docs/plans/2026-09-25-top10-remaining.md``): when
-the ``panel`` decision point is *active* and a controller spawns a
+the ``panel`` decision point is *active* and the lead spawns a
 ``review``-kind task without a security reviewer, the judge's
 ``needs_security`` verdict over the user's request and the task text (the
-request first, so a controller that drops "security" from the task it
+request first, so a lead that drops "security" from the task it
 writes still triggers it) adds one ``security-engineer``
 worker on the same task (once per parent turn; the row says
 ``origin = "panel"`` and its ``reason`` starts with ``origin:panel``).
@@ -49,7 +50,7 @@ questions).
 """
 import asyncio
 import io
-import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -61,8 +62,8 @@ from rich.console import Console
 from guru import config, log, session, ui
 from guru.agents import Agent, AgentManager
 from guru.domain import brief as _brief
-from guru.domain import (claims, conversation, decisions, ledger, plan,
-                         policy, routing, spend, tools)
+from guru.domain import (conversation, decisions, ledger, policy, routing,
+                         spend, tools)
 from guru.domain.brief import Brief
 from guru.repositories import briefs
 from guru.repositories import settings as routing_settings
@@ -71,7 +72,7 @@ from guru.repositories.settings import RoutingSettings
 _NO_ANSWER = '(no answer produced)'
 _INERT_REASON = 'routing:disabled (no registry)'
 
-# Check-poll rule (design decision 10, cost bug: a controller polled
+# Check-poll rule (design decision 10, cost bug: a lead polled
 # `check` ~20 times after spawning). The Nth consecutive `check` that finds
 # every checked sub-agent still running ends the turn like a `join`; the
 # one before it tells the model to join.
@@ -86,7 +87,7 @@ _DEFERRED_REASON = 'confirmation:deferred (loop thread)'
 _RETRY_REASON = 'retry:local after remote failure'
 # The panel judge's extra worker: role/skill/focus from the /review panel's
 # security member, the task row's origin marker, and the reply suffix that
-# tells the controller to join it.
+# tells the lead to join it.
 PANEL_ORIGIN = 'origin:panel (needs_security)'
 SECURITY_ROLE = 'security-engineer'
 _SECURITY_MEMBER = next(m for m in config.REVIEW_PANEL
@@ -147,7 +148,7 @@ def _brief_block(task: str, project: Optional[Brief]) -> str:
 
 def _rules_block(project: Optional[Brief]) -> str:
     """The project's rules file (``brief.rules``) as a system-context
-    block for the controller and every worker; empty without one."""
+    block for the lead and every worker; empty without one."""
     if project is None:
         return ''
     try:
@@ -160,8 +161,8 @@ def _rules_block(project: Optional[Brief]) -> str:
 
 
 def _map_block(project: Optional[Brief]) -> str:
-    """The controller's block: the map alone (``brief.render_map``) — what
-    it needs to plan, not the outlines. Empty without a brief."""
+    """The lead's block: the map alone (``brief.render_map``) — the
+    overview, not the outlines. Empty without a brief."""
     if project is None:
         return ''
     try:
@@ -173,24 +174,47 @@ def _map_block(project: Optional[Brief]) -> str:
     return block + _rules_block(project)
 
 
-def _newest_mtime(path: str, limit: int = 2000) -> float:
-    """The modification time of ``path``, or of the newest file under it
-    when it is a directory (at most ``limit`` files looked at); 0.0 when it
-    does not exist."""
+# A worker's sandbox diff in its report to the lead, capped.
+DIFF_REPORT_CHARS = 30000
+_TICKS_RE = re.compile(r'`{3,}')
+
+
+def _sandbox_available() -> bool:
+    """Whether the current project has a usable sandbox (lazy import;
+    any failure means no)."""
     try:
-        if not os.path.isdir(path):
-            return os.path.getmtime(path)
-        newest, seen = 0.0, 0
-        for root, _dirs, names in os.walk(path):
-            for name in names:
-                newest = max(newest,
-                             os.path.getmtime(os.path.join(root, name)))
-                seen += 1
-                if seen >= limit:
-                    return newest
-        return newest
-    except OSError:
-        return 0.0
+        from guru.sandbox import verbs
+        return bool(verbs.available())
+    except Exception:                                    # noqa: BLE001
+        log.exc('sandbox availability check failed')
+        return False
+
+
+def _diff_block(child) -> str:
+    """The ``[sandbox diff]`` block for ``child``'s report: its copy's diff
+    (capped at ``DIFF_REPORT_CHARS``) and how to merge it; empty without a
+    sandbox change. Never raises."""
+    task_id = getattr(child.state, 'task_id', '')
+    if not task_id:
+        return ''
+    try:
+        from guru.sandbox import verbs
+        diff = verbs.worker_diff(task_id)
+    except Exception:                                    # noqa: BLE001
+        log.exc(f'worker diff of {task_id} unavailable')
+        return ''
+    if not diff.strip():
+        return ''
+    if len(diff) > DIFF_REPORT_CHARS:
+        diff = (diff[:DIFF_REPORT_CHARS]
+                + f'\n[... {len(diff) - DIFF_REPORT_CHARS} more chars]')
+    # A fence longer than any backtick run in the diff, so file content
+    # cannot close it and speak to the lead outside it.
+    fence = '`' * max(3, 1 + max((len(m) for m in _TICKS_RE.findall(diff)),
+                                 default=0))
+    return (f'\n\n[sandbox diff of {child.title} — review it, then'
+            f' apply_work("{child.title}") to merge it into your copy]\n'
+            f'{fence}diff\n{diff}\n{fence}')
 
 
 class Orchestrator:
@@ -207,7 +231,7 @@ class Orchestrator:
         self._routing_settings = routing
         self._ladders: Optional[dict] = None
         # (parent title, turn_id) pairs that already have a security worker
-        # (spawned by the controller or added by the panel judge).
+        # (spawned by the lead or added by the panel judge).
         self._security_turns: set = set()
         self.barriers: dict = {}
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -222,7 +246,7 @@ class Orchestrator:
         self._pending_lock = threading.Lock()
         # The project brief by (root, HEAD): one build or load per HEAD,
         # not one per child (a five-worker plan reads the ~400 KB JSON once;
-        # the controller's map comes from the same object).
+        # the lead's map comes from the same object).
         self._briefs: dict = {}
 
     def project_brief(self) -> Optional[Brief]:
@@ -420,26 +444,26 @@ class Orchestrator:
         return _NO_ANSWER
 
     def configure(self, agent, base, can_spawn: bool,
-                  role=None, skill=None, controller: bool = False,
-                  kind: str = '') -> None:
+                  role=None, skill=None, kind: str = '') -> None:
         """Set up ``agent``'s fresh conversation + tools, inheriting the model
-        and context from ``base``. Delegation-capable agents get the panel
-        hint; a controller (``[routing] controller``; implies ``can_spawn``)
-        gets the controller hint and the ``plan`` tool alone; sub-agents
-        get a role/skill overlay."""
+        and context from ``base``. A delegation-capable agent is a lead: it
+        gets the lead hint (plus the sandbox part in a sandbox project) and
+        the project map; a sub-agent gets the worker hint and a role/skill
+        overlay."""
         st = agent.state
-        controller = bool(controller and can_spawn)
         st.messages = [
             {'role': 'system', 'content': config.build_system_prompt()}]
-        if controller:
-            st.messages[0]['content'] += "\n\n" + config.CONTROLLER_HINT
+        if can_spawn:
+            hint = config.LEAD_HINT
+            if _sandbox_available():
+                hint += config.LEAD_SANDBOX_HINT
+            st.messages[0]['content'] += "\n\n" + hint
             st.messages[0]['content'] += _map_block(self.project_brief())
-        elif can_spawn:
-            st.messages[0]['content'] += "\n\n" + config.DELEGATION_HINT
+        else:
+            st.messages[0]['content'] += "\n\n" + config.WORKER_HINT
         st.active_tools, st.active_tool_names = tools.initial_tools(
-            can_spawn, controller, kind=kind or None)
+            can_spawn, kind=kind or None)
         st.task_kind = kind or ''      # toolpolicy.for_kind at execute time
-        st.controller = controller
         st.active_role = role or None
         st.active_skill = skill or None
         st.model = base.model
@@ -472,6 +496,9 @@ class Orchestrator:
             agent.status = 'error'       # on_done reads it for the task row
             self.on_worker_error(agent, e)
         finally:
+            # The worker's sandbox diff for its report, read here on the
+            # worker thread (git) rather than on the event loop.
+            agent.report_diff = _diff_block(agent) if agent.parent else ''
             try:
                 agent.console.file.flush()
             except Exception:                            # noqa: BLE001
@@ -485,11 +512,6 @@ class Orchestrator:
         agent.busy = True
         agent.status = 'thinking'
         agent.started = time.monotonic()
-        if not agent.started_wall:
-            agent.started_wall = time.time()
-            agent.preexisting = {
-                p for p in agent.deliverables
-                if os.path.exists(os.path.expanduser(p))}
         assert self.loop is not None
         self.loop.run_in_executor(None, self.work, agent)
 
@@ -507,8 +529,19 @@ class Orchestrator:
                 self.on_worker_error(c, exc)
 
     def submit(self, agent, text: str) -> None:
-        """Queue a user message for ``agent`` and start it if idle."""
+        """Queue a user message for ``agent`` and start it if idle. A new
+        request from the user drops the sandbox copies its finished workers
+        left unapplied."""
         self.notice(agent, f"> {text}")
+        if not agent.busy and not agent.queue:
+            # Only when the agent has nothing left to read: a queued
+            # report may still name a copy to apply.
+            done = [c.state.task_id for c in self.children_of(agent)
+                    if not c.busy and c.state.task_id]
+            if done and self.loop is not None:
+                self.loop.run_in_executor(None, self._cleanup_many, done)
+            else:
+                self._cleanup_many(done)
         agent.queue.append(text)
         if not agent.busy:
             self.launch(agent)
@@ -516,28 +549,8 @@ class Orchestrator:
     # --- mailbox / barriers --------------------------------------------------
 
     @staticmethod
-    def unwritten(agent) -> list:
-        """The deliverables ``agent`` left undone: a file that did not
-        exist when its task launched and still does not; or, when it wrote
-        none of them, all of them. An owned file that existed and stayed
-        untouched is fine on its own (a fix may need only one of its
-        files; eval bcfc2314e34f). Relative paths are under the working
-        directory, the project root."""
-        owned = list(getattr(agent, 'deliverables', None) or ())
-        if not owned:
-            return []
-        since = agent.started_wall - 1
-        written = [p for p in owned
-                   if _newest_mtime(os.path.expanduser(p)) >= since]
-        if not written:
-            return owned
-        pre: set = getattr(agent, 'preexisting', set())
-        return [p for p in owned if p not in pre
-                and not os.path.exists(os.path.expanduser(p))]
-
-    @staticmethod
     def _outcome_tag(child) -> str:
-        """' · capped' (or incomplete, error, ...) for a child whose task
+        """' · stalled' (or error, ...) for a child whose task
         did not simply finish; '' for done — the header stays as it was."""
         outcome = getattr(child, 'outcome', '')
         return f' · {outcome}' if outcome and outcome != 'done' else ''
@@ -562,10 +575,8 @@ class Orchestrator:
         parent = child.parent
         if parent is None:
             return
-        answer = self.final_answer(child)
-        if getattr(child, 'outcome', '') == 'incomplete':
-            answer += ('\n\n(guru: deliverables not written: '
-                       + ', '.join(self.unwritten(child)) + ')')
+        answer = self.final_answer(child) + getattr(child, 'report_diff',
+                                                    '')
         bar = self.barriers.get(parent)
         if bar is not None and child.title in bar['remaining']:
             bar['remaining'].discard(child.title)
@@ -587,10 +598,8 @@ class Orchestrator:
     def on_done(self, agent) -> None:
         if agent.status == 'error':
             status = 'error'
-        elif agent.state.capped:
-            status = 'capped'        # the round cap ended it (a handoff)
-        elif self.unwritten(agent):
-            status = 'incomplete'    # it ended, a deliverable is missing
+        elif agent.state.stalled:
+            status = 'stalled'       # the stall monitor ended it (a handoff)
         else:
             status = 'done'
         agent.busy = False
@@ -649,9 +658,8 @@ class Orchestrator:
         and yields None."""
         child = self._make_child(
             agent.parent, agent.task, role=rec.role, skill=rec.skill,
-            env=rec.env, retry_of=rec.task_id, plan=plan)
-        if child is not None:            # the retry owns the same files
-            child.deliverables = list(agent.deliverables)
+            env=rec.env, retry_of=rec.task_id, plan=plan,
+            request=(rec.turn_id, rec.topic_id))
         if child is None:
             log.warning('routing: no local rung for the retry of task %s',
                         rec.task_id)
@@ -707,9 +715,24 @@ class Orchestrator:
             transcript_path=transcript, tools_used=[
                 m.get('tool_name') for m in st.messages
                 if isinstance(m, dict) and m.get('role') == 'tool'])
-        task_id = agent.task_rec.task_id
         agent.task_rec = None
-        self._cleanup_sandbox(task_id)
+        # The sandbox copy stays until the lead applies it (apply_work) or
+        # the user's next request (submit); a failed task's goes now.
+        if status not in ('done', 'stalled'):
+            self._cleanup_sandbox(st.task_id)
+
+    def _cleanup_many(self, task_ids: list) -> None:
+        for task_id in task_ids:
+            self._cleanup_sandbox(task_id)
+
+    @staticmethod
+    def cleanup_copies() -> None:
+        """Remove every sandbox working copy (exit). Never raises."""
+        try:
+            from guru.sandbox import verbs
+            verbs.cleanup_all()
+        except Exception:                            # noqa: BLE001
+            log.exc('sandbox copy cleanup at exit failed')
 
     @staticmethod
     def _cleanup_sandbox(task_id: str) -> None:
@@ -735,7 +758,7 @@ class Orchestrator:
         same task, same labels).
 
         Judge: in shadow (or with ``labels`` not active) both label
-        questions are shadowed and the controller's labels route. With
+        questions are shadowed and the lead's labels route. With
         ``labels`` active the complexity question is a synchronous,
         margin-gated tie-breaker (:func:`decisions.decide_choice`): the
         judge's tier routes when it beats the runner-up by
@@ -765,7 +788,7 @@ class Orchestrator:
     def _judged_complexity(task: str, kind: str, complexity: str,
                            reason: list) -> str:
         """The complexity to route on after the ``labels`` judge: the
-        controller's unless the point is active and the judge overrides
+        lead's unless the point is active and the judge overrides
         it by margin (then noted in ``reason``). See :meth:`_plan_child`.
         """
         complexity_q, kind_q = decisions.label_questions(task)
@@ -788,7 +811,8 @@ class Orchestrator:
                     retry_of: str = '', local_only: bool = False,
                     plan: Optional[_Plan] = None,
                     refusal: Optional[list] = None,
-                    origin: str = '') -> Optional[Agent]:
+                    origin: str = '',
+                    request: Optional[tuple] = None) -> Optional[Agent]:
         """Create a configured, routed child agent for ``parent`` with a
         running TaskRecord.
 
@@ -804,6 +828,11 @@ class Orchestrator:
         if plan is None:
             plan = self._plan_child(parent, task, kind, complexity,
                                     local_only)
+        # The request the task belongs to: the parent's current one, or
+        # the original task's (``request``) for a retry, which may run after
+        # the parent moved on to a new request.
+        turn_id, topic_id = request or (parent.state.turn_id,
+                                        parent.state.topic_id)
         route, reason = plan.route, plan.reason
         env = ledger.environment() if env is None else env
         if plan.refused:
@@ -811,7 +840,7 @@ class Orchestrator:
             rec = ledger.new_task(
                 task=task, parent=parent.title, role=role, skill=skill,
                 kind=plan.kind, complexity=plan.complexity,
-                turn_id=parent.state.turn_id, model='', adapter='',
+                turn_id=turn_id, topic_id=topic_id, model='', adapter='',
                 env=env, route=route.as_dict(), reason=reason,
                 findings=plan.findings, confirmation=plan.confirmation,
                 retry_of=retry_of, origin=origin)
@@ -840,7 +869,7 @@ class Orchestrator:
         rec = ledger.new_task(
             task=task, parent=parent.title, role=role, skill=skill,
             kind=plan.kind, complexity=plan.complexity,
-            turn_id=parent.state.turn_id, model=child.state.model,
+            turn_id=turn_id, topic_id=topic_id, model=child.state.model,
             adapter=getattr(child.state.adapter, 'name', ''),
             env=env,
             prompt_sha=ledger.prompt_hash(child.state.messages[0]['content']),
@@ -851,7 +880,8 @@ class Orchestrator:
         child.task_rec = rec
         child.state.task_id = rec.task_id
         child.state.task_text = task
-        child.state.turn_id = parent.state.turn_id
+        child.state.turn_id = turn_id
+        child.state.topic_id = topic_id                # same request
         ledger.record_task(rec)
         where = (f" · {rec.adapter}|{rec.model}" if route is not None
                  else '')
@@ -949,7 +979,7 @@ class Orchestrator:
 
     def _security_seen(self, parent) -> bool:
         """True when a security reviewer already ran for ``parent`` in the
-        current turn (covers children the controller spawned before the
+        current turn (covers children the lead spawned before the
         panel point became active)."""
         turn = parent.state.turn_id
         for a in self.manager.all_agents():
@@ -960,35 +990,35 @@ class Orchestrator:
                 return True
         return False
 
+    def begin_request(self, agent, request: str) -> None:
+        """Open a new request on ``agent`` outside its turn loop (the
+        ``/review`` panel): a fresh turn id and the request's topic, so the
+        panel and its synthesis are not filed under the previous request.
+        """
+        from guru.domain import usage
+        agent.state.turn_id = ledger.new_turn_id()
+        token = session.use(agent.state)
+        try:
+            usage.begin_topic(request)
+        finally:
+            session.reset(token)
+
     def spawn_panel(self, parent, tasks, synthesis: str = '',
                     refusal: Optional[list] = None) -> list:
         """Deterministically spawn a group of sub-agents parented to
         ``parent`` and open a join barrier, so guru itself runs the
-        multi-agent path: the ``/review`` panel, and every ``delegate``
-        plan of a controller. ``tasks`` items are ``(task, role, skill)``
-        triples (kind ``review``, default complexity) or
-        :class:`guru.domain.plan.Task` objects (their own kind/complexity,
-        the text from :func:`plan.task_text`). When all finish, their
+        multi-agent path of the ``/review`` panel. ``tasks`` items are
+        ``(task, role, skill)`` triples (kind ``review``, default
+        complexity). When all finish, their
         combined findings (with an optional ``synthesis`` lead-in) are
         delivered back to ``parent``. A task routing refuses is skipped,
         its reasons appended to ``refusal`` when given. Returns the child
         titles."""
         env = ledger.environment()      # one snapshot for the whole panel
         children: list = []
-        for item in tasks:
-            if isinstance(item, plan.Task):
-                child = self._make_child(
-                    parent, plan.task_text(item), role=item.role,
-                    skill=item.skill, env=env,
-                    kind=item.kind, complexity=item.complexity,
-                    refusal=refusal)
-                if child is not None:
-                    child.deliverables = list(item.deliverables)
-            else:
-                task, role, skill = item
-                child = self._make_child(parent, task, role=role, skill=skill,
-                                         env=env,
-                                         kind='review', refusal=refusal)
+        for task, role, skill in tasks:
+            child = self._make_child(parent, task, role=role, skill=skill,
+                                     env=env, kind='review', refusal=refusal)
             if child is not None:
                 children.append(child)
         titles = [c.title for c in children]
@@ -1097,81 +1127,36 @@ class Orchestrator:
                      self._format_join(results))
         return "Those sub-agents already finished; resuming with results now."
 
-    def do_plan(self, caller_state, args: dict) -> str:
-        """The controller's ``plan`` tool (``guru.domain.plan``).
+    def do_apply_work(self, caller_state, worker: str) -> str:
+        """The lead's ``apply_work``: merge finished sub-agent ``worker``'s
+        sandbox diff into the caller's own copy
+        (``guru.sandbox.verbs.apply_work``)."""
+        child = self._finished_child(caller_state, worker)
+        if isinstance(child, str):
+            return child
+        from guru.sandbox import verbs
+        return verbs.apply_work(child.state.task_id)
 
-        Validates ``args`` against the turn's request (``evaluate``; on a
-        mailbox turn the request was planned already, so concern coverage
-        is not re-checked). A malformed plan, or one that leaves a named
-        concern uncovered on its first try, gets the re-ask text back (the
-        turn loop allows one; coverage gaps are accepted on the second
-        plan, malformed plans are not). ``answer`` acknowledges: the loop
-        takes the text. ``delegate`` spawns every task through
-        :meth:`spawn_panel` (its kind/complexity route it), opens the
-        join barrier and ends the caller's turn (``turn_waiting``, join
-        semantics); when routing refuses them all the refusal is returned
-        and the turn goes on. A ``delegate`` after
-        ``plan.MAX_DELEGATE_ROUNDS`` delegations for the same request
-        (counted in the history, ``plan.delegations_in``) is refused with
-        a text that says to answer from the results. A second ``plan`` in
-        one round is ignored.
-        """
-        if caller_state.turn_waiting:
-            return 'Already delegated this turn; the extra plan is ignored.'
-        messages = caller_state.messages
-        followup = conversation.mailbox_turn(messages)
-        # The full request (no REQUEST_CHARS cap): a concern named late in
-        # a long request counts for coverage too.
-        request = conversation.request_in(messages, cap=None)
-        verdict = plan.evaluate(request, args, followup=followup)
-        reasks = plan.reasks_in(
-            messages[conversation.turn_start(messages):])
-        if verdict.errors or verdict.plan is None \
-                or (verdict.soft and reasks == 0):
-            return plan.reask_text(verdict.messages)
-        if verdict.soft:
-            log.info('plan: running with coverage/ownership problem(s) %s'
-                     ' after one re-ask', '; '.join(
-                         verdict.missing + verdict.undersplit
-                         + verdict.ownership))
-        span = messages[conversation.request_start(messages):]
-        if verdict.plan.outcome == 'answer':
-            return self._checked_answer(request, verdict.plan.answer,
-                                        followup, span)
-        rounds = plan.delegations_in(span)
-        # A failed answer check earns one more round to finish the work.
-        extra = 1 if claims.already_checked(span) else 0
-        if rounds >= plan.MAX_DELEGATE_ROUNDS + extra:
-            log.info('plan: delegate refused after %d rounds for one'
-                     ' request', rounds)
-            return plan.delegate_cap_text(rounds)
+    def _finished_child(self, caller_state, worker: str):
+        """The caller's finished sub-agent named ``worker``, or the text
+        that says why there is none (read on the loop thread)."""
         caller = self.agent_for_state(caller_state)
-        refusal: list = []
-        titles = self.spawn_panel(caller, verdict.plan.tasks, refusal=refusal)
-        if not titles:
-            return plan.refused_text(refusal)
-        caller_state.turn_waiting = True
-        return plan.delegated_text(titles, verdict.plan.tasks)
+        children = {a.title: a for a in self.children_of(caller)}
+        child = children.get(str(worker or '').strip())
+        if child is None:
+            have = ', '.join(children) or 'none'
+            return f"No sub-agent named '{worker}'. Yours: {have}."
+        if child.busy:
+            return f"{child.title} is still running; join it first."
+        return child
 
-    def _checked_answer(self, request: str, answer: str, followup: bool,
-                        span: list) -> str:
-        """The verdict on a controller's answer: delivered, or — once per
-        request, when it answers after delegating — sent back with the
-        problems the answer check found (``guru.domain.claims``)."""
-        if (not followup or not answer or not plan.delegations_in(span)
-                or claims.already_checked(span)):
-            return plan.ANSWER_ACK
-        problems = claims.run(request, answer)
-        if not problems:
-            return plan.ANSWER_ACK
-        log.info('answer check: %d problem(s): %s', len(problems),
-                 '; '.join(problems))
-        ui.console.print(f"[dim yellow]\\[CHECK][/dim yellow] answer vs"
-                         f" work: {len(problems)} problem(s); sent back")
-        return claims.problems_text(problems)
-
-    def plan(self, args: dict) -> str:
-        return self.do_plan(session.current(), args)
+    def apply_work(self, worker: str) -> str:
+        st = session.current()
+        child = self.run_on_loop(lambda: self._finished_child(st, worker))
+        if isinstance(child, str):
+            return child
+        from guru.sandbox import verbs
+        return verbs.apply_work(child.state.task_id)
 
     def check(self, target: str) -> str:
         st = session.current()
@@ -1183,15 +1168,15 @@ class Orchestrator:
         return self.run_on_loop(lambda: self.do_join(st, titles))
 
     def install_handlers(self) -> None:
-        """Wire spawn/check/join/plan so the tool layer routes to this
-        instance."""
+        """Wire spawn/check/join/apply_work so the tool layer routes to
+        this instance."""
         tools.set_spawn_handler(self.spawn)
         tools.set_check_handler(self.check)
         tools.set_join_handler(self.join)
-        tools.set_plan_handler(self.plan)
+        tools.set_apply_work_handler(self.apply_work)
 
     def clear_handlers(self) -> None:
         tools.set_spawn_handler(None)
         tools.set_check_handler(None)
         tools.set_join_handler(None)
-        tools.set_plan_handler(None)
+        tools.set_apply_work_handler(None)

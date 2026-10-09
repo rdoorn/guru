@@ -702,6 +702,20 @@ def _valid_review(review: object) -> Optional[dict]:
         return None
 
 
+def decide_unreviewed(flags: list) -> Verdict:
+    """The verdict with the LLM reviewer switched off (``[decisions]
+    gate_review = false``): ``suspicious`` on any ``SUSPICIOUS_KINDS``
+    flag, ``unclear`` on any ``BLOCKING_KINDS`` flag, else ``intended`` —
+    the deterministic rules alone decide."""
+    flags = list(flags or [])
+    reasons = [f.describe() for f in flags]
+    if has_suspicious(flags):
+        return Verdict(SUSPICIOUS, reasons, flags)
+    if any(f.kind in BLOCKING_KINDS for f in flags):
+        return Verdict(UNCLEAR, reasons, flags)
+    return Verdict(INTENDED, reasons + ['reviewer off; rules passed'], flags)
+
+
 def decide(flags: list, review: Optional[dict]) -> Verdict:
     """Fold the deterministic ``flags`` and the reviewer's ``review`` (the
     dict :func:`parse_review` returns, or None when the reviewer timed

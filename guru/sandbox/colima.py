@@ -546,6 +546,50 @@ def diff(copy: Path, project: Optional[Path] = None,
     return res.stdout + ('\n[diff truncated]\n' if res.truncated else '')
 
 
+def apply_diff(copy: Path, project: Optional[Path], diff_text: str) -> str:
+    """Apply ``diff_text`` (a :func:`diff` of another copy of the same
+    project) to the working tree of ``copy`` with ``git apply --3way``,
+    all or nothing: the copy's own edits are staged first (``--3way``
+    works on the index, so an unstaged edit to a file the diff touches
+    would refuse the whole patch), and a patch that fails or conflicts is
+    rolled back to that staged state, so the copy is never left with
+    conflict markers or half a patch. ``''`` on success, else the reason
+    (the conflicting files named). The git CLI runs from ``project``
+    (default the current directory)."""
+    repo = Path(copy)
+    cwd = Path(project) if project is not None else Path.cwd()
+    staged = _git(['add', '-A'], repo, cwd)
+    saved = _git(['write-tree'], repo, cwd)
+    if staged.returncode != 0 or saved.returncode != 0:
+        return (f'cannot stage the copy: {staged.stderr.strip()}'
+                f' {saved.stderr.strip()}').strip()
+    tree = saved.stdout.strip()
+    patch_file = repo.parent / f'.{repo.name}.apply-{os.getpid()}.diff'
+    try:
+        patch_file.write_text(diff_text, encoding='utf-8')
+        res = _git(['apply', '--3way', '--whitespace=nowarn',
+                    str(patch_file)], repo, cwd)
+    finally:
+        try:
+            patch_file.unlink()
+        except OSError:
+            pass
+    if res.returncode == 0:
+        return ''
+    reason = (res.denied or res.stderr.strip() or res.stdout.strip()
+              or f'git apply exited {res.returncode}')
+    conflicts = _git(['diff', '--name-only', '--diff-filter=U'], repo, cwd)
+    names = conflicts.stdout.split()
+    back = _git(['read-tree', '--reset', '-u', tree], repo, cwd)
+    if back.returncode != 0:
+        raise RuntimeError(f'cannot roll back {repo} after a failed apply:'
+                           f' {back.stderr.strip()}')
+    if names:
+        return ('conflicts in ' + ', '.join(names)
+                + ' (nothing applied; your copy is unchanged)')
+    return f'{reason} (nothing applied; your copy is unchanged)'
+
+
 def show_baseline(copy: Path, path: str,
                   project: Optional[Path] = None,
                   expected: str = '') -> Optional[str]:

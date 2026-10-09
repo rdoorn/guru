@@ -382,7 +382,7 @@ class TestGitFixture:
         assert {c.name for c in real} == {
             'guru-explain-gpu-fit', 'guru-review-adapters',
             'guru-add-version-flag', 'guru-sandbox-ledger-origin',
-            'guru-usage-store'}
+            'guru-usage-store', 'guru-usage-dashboard'}
         for c in real:
             assert c.fixture_git is not None, c.name
             assert c.fixture_git.path == cases.REPO_ROOT
@@ -479,7 +479,7 @@ class TestSandboxKeys:
         by_name = {c.name: c for c in cases.load_cases(cases.CASES_DIR,
                                                        tags=['dogfood'])}
         assert set(by_name) == {'guru-sandbox-ledger-origin',
-                                'guru-usage-store'}
+                                'guru-usage-store', 'guru-usage-dashboard'}
         c = by_name['guru-sandbox-ledger-origin']
         assert c.sandbox and c.mode == 'auto'
         assert set(c.tags) == {'real', 'sandbox', 'dogfood'}

@@ -140,7 +140,7 @@ BENCH_MODEL_TIMEOUT = 600
 #   breaker_cooldown_s = 60      #   per-point breaker, and for how long
 #   labels_margin = 0.15         # active labels: the judge's top tier must
 #                                #   beat its runner-up by this much to
-#                                #   override the controller's complexity
+#                                #   override the lead's complexity
 #   [decisions.points]           # decision point -> judge spec
 #   stall = "ollama"             # ollama | ollama:<model> | encoder |
 #   panel = "encoder"            # encoder:<hf-model> | injection |
@@ -183,6 +183,23 @@ SECRET_SCAN = False
 LEDGER_DIR = GURU_HOME / 'ledger'
 LEDGER_ENABLED = True
 LEDGER_TURN_LINE = True
+
+# The usage store (guru.repositories.usage_sqlite): every model call, the
+# topic of each user request and each sub-agent task, in one SQLite file
+# shared by every guru process. settings.toml ``[ledger] usage_db = false``
+# turns it off; ``GURU_USAGE_DB`` moves the file (tests, a second profile).
+USAGE_DB = True
+USAGE_DB_PATH = Path(os.environ.get('GURU_USAGE_DB')
+                     or GURU_HOME / 'usage.db').expanduser()
+
+# The usage dashboard (guru.dashboard): served on 127.0.0.1:DASHBOARD_PORT
+# by whichever guru binds the port first; the others point at it and retry.
+# Each user request gets a 3-6 word topic label from the cheapest routed
+# model (TOPIC_LABELS). settings.toml ``[dashboard] enabled / port /
+# topic_labels``.
+DASHBOARD_ENABLED = True
+DASHBOARD_PORT = 7340
+TOPIC_LABELS = True
 PRICING_OVERRIDES: dict = {}
 
 # Eval suite (guru/evals): the default ``Adapter|model`` spec ('' = guru's
@@ -200,10 +217,14 @@ EVALS_MODEL = ''
 EVALS_NUM_CTX = 8192
 EVALS_HOME = ''
 
-# The answer check (guru.domain.claims): the controller's answer to work
-# it delegated is compared with the changes before the user sees it.
+# The answer check (guru.domain.claims): the lead's answer to a request
+# it worked on is compared with the changes before the user sees it.
 # settings.toml ``[decisions] answer_check = false`` turns it off.
 ANSWER_CHECK = True
+# The sandbox gate's LLM reviewer (guru.sandbox.verbs): reads every
+# submitted diff after the deterministic rules. settings.toml
+# ``[decisions] gate_review = false`` turns it off (the rules still run).
+GATE_REVIEW = True
 
 # GPU auto-fit: when a model is first selected (and the user gave no explicit
 # --num-ctx), guru picks the largest context that stays entirely on the GPU.
@@ -323,98 +344,59 @@ SANDBOX_RULE = (
     " (e.g. [\"python\", \"-m\", \"pytest\", \"-q\"]), check sandbox_diff,"
     " then call sandbox_submit with a one-line intent; a reviewer gates what"
     " reaches the real tree. Missing packages: request_dependency.")
+# The same rule for a worker: its copy's diff goes to the lead.
+SANDBOX_WORKER_RULE = (
+    "This project runs in a SANDBOX: write_file, edit_file, apply_patch and"
+    " delete_file are disabled here. Edit your task's copy inside the"
+    " container with sandbox_python or sandbox_run, verify with sandbox_run"
+    " (e.g. [\"python\", \"-m\", \"pytest\", \"-q\"]) and check"
+    " sandbox_diff. You do not submit: when you answer, your copy's diff goes"
+    " to the lead with your report. Missing packages: request_dependency.")
 
-# Appended to the system prompt of delegation-capable agents (TUI only), to
-# steer heavy tool output out of the main context and into sub-agents.
-DELEGATION_HINT = (
-    "When a request spans multiple files or several concerns (correctness,"
-    " security, design, reliability, tests), DECOMPOSE it instead of"
-    " inspecting everything yourself: spawn one sub-agent per concern, in"
-    " parallel, each with the role+skill that fits, then join and synthesise"
-    " their findings. Each sub-agent reads the bulk in its own context and"
-    " returns only its conclusion, keeping yours small.\n"
-    "Example — to review this codebase, spawn in parallel:\n"
-    "  spawn(task='review the code for correctness, readability, tests',"
-    " role='developer', skill='code-review')\n"
-    "  spawn(task='review the code for injection, authz, secrets, path"
-    " traversal, vulnerable deps', role='security-engineer',"
-    " skill='code-review')\n"
-    "then join both and write one consolidated report. Add an architect"
-    " (design) or SRE (reliability) sub-agent when those concerns apply."
-    " Prefer delegating a domain panel over reading many files yourself."
-    " Verify edits with check_syntax/run_tests before reporting them."
-)
+# Appended to the system prompt of delegation-capable agents: the main
+# agent is the LEAD — it keeps the overview, works itself where that is
+# quicker, dispatches parts to workers and reviews and integrates what they
+# return. There is no round budget; the stall monitor (guru.adapters.turn)
+# ends a turn that stops making progress.
+LEAD_HINT = (
+    "You are the LEAD. You keep the overview of the user's request and own"
+    " the result. The project in the [project] block is the one the user"
+    " means; never ask which repository or path, look. Do small work"
+    " yourself. For larger work, split it into"
+    " parts that can run in parallel and spawn one worker per part (spawn"
+    " with kind and complexity), each with a self-contained task: the goal,"
+    " the files and interfaces involved and what you already know, so it"
+    " does not re-explore. Workers report back when done; join them to be"
+    " resumed with their reports. Review what each worker changed (read the"
+    " files or the diff) before you build on it, integrate the parts"
+    " yourself, and verify the whole: run the full tests and lint, and"
+    " check that the running application actually uses the new code."
+    " Answer the user only when the request is done, and say exactly what"
+    " you verified and what is not done. Until then every reply calls a"
+    " tool: a reply without a tool call ends your turn.")
+# Appended to a worker's system prompt (a sub-agent running one task).
+WORKER_HINT = (
+    "You are a WORKER on one task for the lead, who integrates your result."
+    " Do the task fully: make the changes, run the tests and lint for what"
+    " you changed and fix what they report. Every reply calls a tool until"
+    " you are done; a reply without a tool call ends your task and is your"
+    " report to the lead: what you changed (files), what you verified"
+    " (commands and results), and anything left undone or that the lead"
+    " must know to integrate it.")
+# Appended to the lead's hint in a sandbox project: workers' changes come
+# back as diffs and reach the real tree through one gated submit.
+LEAD_SANDBOX_HINT = (
+    " In this sandbox project each worker's changes come back to you as a"
+    " diff: apply_work(worker) merges it into your own sandbox copy. Run the"
+    " tests there, then call sandbox_submit once for the integrated change.")
 
-# Appended instead of DELEGATION_HINT when [routing] controller = true: the
-# main agent only converses and coordinates; every task runs in a routed
-# sub-agent (design doc §2). The controller's one tool is ``plan``
-# (guru.domain.plan): what the plan must contain is enforced there, not
-# asked for here — this hint carries only what code cannot check (which
-# project a request means, what a task text must say).
-CONTROLLER_HINT = (
-    "You are a CONTROLLER. You converse with the user and coordinate work;"
-    " you never execute a task yourself and have no file, code or web"
-    " tools. Every reply is one call of the plan tool: outcome answer for"
-    " greetings, questions about yourself, clarifications and follow-ups"
-    " on delivered results (your text is the reply, no worker runs), or"
-    " outcome delegate for actual work (guru runs every task in parallel"
-    " on a routed worker and resumes you with their results; then answer"
-    " with plan again, synthesising them).\n"
-    "The working directory in the [project] block of the active context"
-    " (name, absolute path, git branch) is the current project; the user's"
-    " requests refer to it unless they say otherwise. 'This repository',"
-    " 'the codebase', 'the tests', 'the README' all mean that project."
-    " Never ask which repository, path or codebase is meant: delegate"
-    " immediately with a self-contained task goal that names the project"
-    " path, and let the worker look around.\n"
-    "Every task that edits code must say: verify with run_tests/"
-    "check_syntax before reporting.\n"
-    "How workers run: each task gets a fresh worker with a budget of 40"
-    " tool rounds; it cannot be addressed again after it reports. Give a"
-    " writing task (build, refactor, docs) the deliverables it owns, at"
-    " most 3 files a worker can write in that budget, and put the facts"
-    " you already know (paths, line numbers, the interfaces to use) in the"
-    " goal so it does not re-explore. Work that depends on another task's"
-    " files goes in a later delegate round, not in parallel. A result"
-    " marked capped carries the worker's handoff, one marked incomplete"
-    " names the deliverables it did not write: re-delegate the remaining"
-    " part from that, do not start the exploration over. Tests go in the"
-    " same task as the code they test (its deliverables include the test"
-    " file): a later delegate round may never come. Gathering facts for"
-    " a later task is standard complexity, however large the codebase."
-    " A feature is done only when the running application uses it: the"
-    " round that builds a component also owns wiring it in (the file"
-    " that installs it is some task's deliverable). Spend no task on work"
-    " the user did not ask for (design notes, extra documents) unless the"
-    " project rules require it."
-)
-
-# The plan tool's description (guru.domain.tools._PLAN_SPEC); the field
-# semantics live in the schema (guru.domain.plan.SCHEMA).
-# The controller's contract, stated where the controller reads it: in the
-# plan tool's own description (the tool is all it has; the prose hint that
-# used to say so is gone). Eval sandbox-dependency-request 689aecc6283a:
-# the controller answered "I need to search for the sandbox tool ..."
-# instead of delegating.
-PLAN_CONTRACT_SENTENCE = (
-    'You have no other tools. Anything that needs a file, a command, a'
-    ' package, a test or the sandbox must be delegated; answer is for'
-    ' replies that need no work.')
-
-PLAN_TOOL_DESCRIPTION = (
-    'Your one reply per turn. ' + PLAN_CONTRACT_SENTENCE
-    + ' outcome answer: reply to the user with'
-    ' answer (no worker runs; a simple question has no task). outcome'
-    ' delegate: guru runs every task in tasks on a routed worker in'
-    ' parallel, joins them and resumes you with their results; when a'
-    ' request names several concerns (correctness, security, performance,'
-    ' reliability, design, tests, docs) give each its own task.')
-
-# The final_answer tool's description (guru.domain.tools._FINAL_ANSWER_SPEC).
-FINAL_ANSWER_DESCRIPTION = (
-    'Deliver your complete final answer to the user and end the turn.'
-    ' Call it once, when the task is done; until then call the tools you'
-    ' need.')
+# Thinking (extended reasoning) per round, as a provider-neutral effort:
+# ``low``, ``medium`` or ``high``; ``off`` (or '') sends none. The lead
+# plans, reviews and integrates; workers execute a scoped task.
+# settings.toml ``[thinking] lead = ... / worker = ...``.
+THINKING_EFFORTS = ('low', 'medium', 'high')
+THINKING_LEAD = 'high'
+THINKING_WORKER = 'medium'
 
 # Deterministic code-review panel (the /review command) and the target of the
 # delegation steering: each entry is (role, skill, focus) — one specialist
@@ -427,12 +409,7 @@ REVIEW_PANEL = [
      'security: injection, authz, secrets, path traversal, vulnerable deps'),
 ]
 
-# Delegation nudge: if a delegation-capable MAIN agent answers a broad task
-# (>= this many DISTINCT paths read with the read tools, and a request
-# that is not a single-file edit) having spawned no sub-agent, nudge it
-# once to decompose into a parallel domain panel. Never for a controller.
-# Set 0 to disable the nudge.
-DELEGATION_NUDGE_MIN_READS = 3
+# The read tools (the stall monitor's handoff lists the paths read).
 DELEGATION_READ_TOOLS = {'read_file', 'search_code', 'list_dir', 'list_tree',
                          'outline', 'find_symbol'}
 # The former over-read guard (OVER_READ_LIMIT, a mid-turn nudge after 8
@@ -624,6 +601,7 @@ def _apply_settings() -> None:
     global DECISIONS_BREAKER_TIMEOUTS
     global DECISIONS_BREAKER_COOLDOWN_S, DECISIONS_LABELS_MARGIN
     global LEDGER_ENABLED, LEDGER_TURN_LINE, PRICING_OVERRIDES
+    global USAGE_DB, DASHBOARD_ENABLED, DASHBOARD_PORT, TOPIC_LABELS
     ctx = load_context_settings()
     try:
         WEB_SUMMARIZE_OVER_CHARS = int(
@@ -658,8 +636,9 @@ def _apply_settings() -> None:
     except (TypeError, ValueError):
         pass
     dec = settings_section('decisions')
-    global ANSWER_CHECK
+    global ANSWER_CHECK, GATE_REVIEW
     ANSWER_CHECK = bool(dec.get('answer_check', True))
+    GATE_REVIEW = bool(dec.get('gate_review', True))
     mode = str(dec.get('mode', DECISIONS_MODE))
     if mode not in DECISIONS_MODES:
         log.info('ignoring unknown [decisions] mode %r; expected one of %s',
@@ -703,6 +682,7 @@ def _apply_settings() -> None:
     else:
         log.info('ignoring [decisions] labels_margin %r; expected a '
                  'non-negative number', margin)
+    _apply_thinking(settings_section('thinking'))
     ev = settings_section('evals')
     model = ev.get('model', EVALS_MODEL)
     if isinstance(model, str):
@@ -717,11 +697,43 @@ def _apply_settings() -> None:
     ledger = settings_section('ledger')
     LEDGER_ENABLED = bool(ledger.get('enabled', True))
     LEDGER_TURN_LINE = bool(ledger.get('turn_line', True))
+    USAGE_DB = bool(ledger.get('usage_db', True))
+    dash = settings_section('dashboard')
+    DASHBOARD_ENABLED = bool(dash.get('enabled', True))
+    TOPIC_LABELS = bool(dash.get('topic_labels', True))
+    port = dash.get('port', 7340)
+    if isinstance(port, int) and not isinstance(port, bool) \
+            and 1024 <= port <= 65535:
+        DASHBOARD_PORT = port
+    else:
+        log.info('ignoring [dashboard] port %r; expected 1024-65535', port)
+        DASHBOARD_PORT = 7340
     PRICING_OVERRIDES = {
         str(k): {str(f): float(v) for f, v in tbl.items()
                  if isinstance(v, (int, float))}
         for k, tbl in settings_section('pricing').items()
         if isinstance(tbl, dict)}
+
+
+def _apply_thinking(table: dict) -> None:
+    """Apply ``[thinking] lead`` / ``worker``: an effort from
+    ``THINKING_EFFORTS``, or ``off`` / ``''`` for none; anything else is
+    logged and the default kept."""
+    global THINKING_LEAD, THINKING_WORKER
+    for key in ('lead', 'worker'):
+        if key not in table:
+            continue
+        value = str(table[key]).strip().lower()
+        if value in ('off', '', 'none', 'false'):
+            value = ''
+        elif value not in THINKING_EFFORTS:
+            log.info('ignoring [thinking] %s = %r; expected one of %s or'
+                     ' off', key, table[key], ', '.join(THINKING_EFFORTS))
+            continue
+        if key == 'lead':
+            THINKING_LEAD = value
+        else:
+            THINKING_WORKER = value
 
 
 def _proc_limits(table: dict) -> dict:

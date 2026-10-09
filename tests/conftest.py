@@ -70,6 +70,21 @@ def _isolated_brief_store(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_usage_store(tmp_path, monkeypatch):
+    """The usage store lives in this test's temp dir (never the developer's
+    ``~/.guru/usage.db`` or an exported ``GURU_USAGE_DB``), and no test
+    serves the dashboard on the real port unless it asks for one; a
+    dashboard a test started is stopped afterwards."""
+    from guru import cli
+    monkeypatch.setattr(config, 'USAGE_DB_PATH', tmp_path / 'usage.db')
+    monkeypatch.setattr(config, 'DASHBOARD_ENABLED', False)
+    yield
+    if cli.DASHBOARD is not None:
+        cli.DASHBOARD.stop()
+        cli.DASHBOARD = None
+
+
+@pytest.fixture(autouse=True)
 def _no_log_file(monkeypatch):
     """``guru.log.setup`` is a no-op under the tests: the eval CLI (and
     any other entry point a test calls) must not attach a handler to the

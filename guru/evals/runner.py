@@ -18,8 +18,8 @@ repository) is restored afterwards.
 Routing: :func:`run_suite` takes a :class:`RoutingSettings` (parsed from a
 ``[routing]`` file by :func:`load_routing_file`) and builds the adapter
 registry over the suite's adapters, so :class:`guru.bench.BenchRun` routes
-sub-agents exactly as the TUI would; ``routing.controller`` runs the main
-agent as a controller and ``routing.secret_scan`` binds the secret scanner
+sub-agents exactly as the TUI would; ``routing.secret_scan`` binds the
+secret scanner
 for the duration (``config.SECRET_SCAN`` and the scanner are restored). A
 case records the distinct ``Adapter|model`` its sub-agent tasks ran on
 (``CaseResult.routes``). Remote spend is denied unless ``allow_spend`` is
@@ -104,6 +104,8 @@ from guru.domain import files, gate, ledger, ledger_report, policy, spend
 from guru.domain import routing as routing_domain
 from guru.domain import tools
 from guru.judges.claims import ClaimsReviewer
+from guru.repositories.fanout import FanOutLedger
+from guru.repositories.usage_sqlite import SqliteUsage
 from guru.evals import cases, checks, rubric, runs
 from guru.evals.cases import Case, GitFixture
 from guru.evals.checks import Observed
@@ -710,7 +712,9 @@ def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
         spend.reset()
         provision.set_approve_asker(_grant_intended if allow_spend
                                     else _deny)
-        ledger.set_repository(repo)
+        # The case's own run ledger, and the shared usage store with its
+        # calls marked source = eval (the dashboard can filter them).
+        ledger.set_repository(FanOutLedger(repo, _eval_usage()))
         yield state
     finally:
         ledger.flush()
@@ -740,6 +744,39 @@ def _sandbox(copy: Path, mode: str, repo: JsonlLedger,
         else:
             os.environ[briefs.BRIEFS_DIR_ENV] = prev_briefs
         os.chdir(prev_cwd)
+
+
+_EVAL_USAGE: Optional[SqliteUsage] = None
+
+
+def _eval_usage() -> Optional[SqliteUsage]:
+    """The usage store eval cases write to (``source = eval``), one per
+    process; None when ``[ledger] usage_db`` is off."""
+    global _EVAL_USAGE
+    if not config.USAGE_DB:
+        return None
+    if _EVAL_USAGE is None or _EVAL_USAGE.path != config.USAGE_DB_PATH:
+        _EVAL_USAGE = SqliteUsage(config.USAGE_DB_PATH, source='eval')
+    return _EVAL_USAGE
+
+
+@contextlib.contextmanager
+def _usage_only():
+    """Record calls made in the block (the rubric judge's) in the usage
+    store only (``source = eval``): the run ledger's per-case cost stays
+    the agent's own."""
+    store = _eval_usage()
+    prev_repo, prev_enabled = ledger.repository(), config.LEDGER_ENABLED
+    if store is not None:
+        ledger.set_repository(store)
+        config.LEDGER_ENABLED = True
+    try:
+        yield
+    finally:
+        if store is not None:
+            ledger.flush()
+            ledger.set_repository(prev_repo)
+            config.LEDGER_ENABLED = prev_enabled
 
 
 def _drain_workers(agents: list, limit: float = WORKER_DRAIN_S) -> bool:
@@ -1094,10 +1131,12 @@ def grade_case(case: Case, res: CaseResult, judge: rubric.Judge,
         if not answer.strip():
             grade = empty_answer_grade(samples)
         else:
-            grade = rubric.grade_samples(
-                case.prompt, case.expect.rubric, answer, judge,
-                evidence_text=rubric.evidence(res.observed, res.cost_usd),
-                samples=samples)
+            with _usage_only():
+                grade = rubric.grade_samples(
+                    case.prompt, case.expect.rubric, answer, judge,
+                    evidence_text=rubric.evidence(res.observed,
+                                                  res.cost_usd),
+                    samples=samples)
     except Exception as e:                           # noqa: BLE001
         res.rubric_reason = f'error: {e}'
         log.warning('evals: rubric grading of %s failed: %s', case.name, e)
@@ -1162,15 +1201,19 @@ def _judges_for(decisions: Optional[DecisionsSettings]
     ``judges.install()``, warms the judges synchronously (so the first
     active decision is not spent loading a model) and yields the installed
     judges as ``point=name``; afterwards the config values are restored
-    and the judge registry is cleared. No-op (yields ``[]``, touches
-    nothing) without a table.
+    and the judge registry is cleared. ``gate_review = false`` turns the
+    sandbox gate's LLM reviewer off for the run (``config.GATE_REVIEW``)
+    and yields ``gate_review=off``; ``answer_check = false`` is applied by
+    :func:`run_suite` and yields ``answer_check=off``. No-op (yields
+    ``[]``, touches nothing) without a table.
     """
     if decisions is None:
         yield []
         return
     prev = (config.DECISIONS_MODE, config.DECISIONS_POINTS,
             config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS,
-            config.DECISIONS_LABELS_MARGIN)
+            config.DECISIONS_LABELS_MARGIN, config.GATE_REVIEW)
+    config.GATE_REVIEW = config.GATE_REVIEW and decisions.gate_review
     config.DECISIONS_MODE = decisions.mode
     config.DECISIONS_POINTS = dict(decisions.points)
     config.DECISIONS_ACTIVE = dict(decisions.active)
@@ -1180,12 +1223,15 @@ def _judges_for(decisions: Optional[DecisionsSettings]
         installed = judges.install(warm=False)
         if installed:
             judges.warm_up_all(timeout_s=JUDGE_WARM_UP_S)
-        yield [f'{point}={name}' for point, name in installed.items()]
+        names = [f'{point}={name}' for point, name in installed.items()]
+        names += [f'{key}=off' for key in ('answer_check', 'gate_review')
+                  if not getattr(decisions, key)]
+        yield names
     finally:
         decision_seam.clear_judges()
         (config.DECISIONS_MODE, config.DECISIONS_POINTS,
          config.DECISIONS_ACTIVE, config.DECISIONS_THRESHOLDS,
-         config.DECISIONS_LABELS_MARGIN) = prev
+         config.DECISIONS_LABELS_MARGIN, config.GATE_REVIEW) = prev
 
 
 def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
@@ -1247,7 +1293,9 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
     judges.set_registry(registry, routing if routing is not None
                         else RoutingSettings())
     claims.set_checker(ClaimsReviewer()       # as the CLI installs it
-                       if config.ANSWER_CHECK else None)
+                       if config.ANSWER_CHECK and (
+                           decisions is None or decisions.answer_check)
+                       else None)
     try:
         judge: Optional[rubric.LLMJudge] = None
         if rubric_spec:
@@ -1275,7 +1323,6 @@ def run_suite(suite: list[Case], model_spec: Optional[str], out_root: Path,
               cases=results,
               num_ctx=base_state.num_ctx or base_state.num_ctx_override,
               routing=routing_name if routing is not None else '',
-              controller=bool(routing is not None and routing.controller),
               judges=judge_names, rubric=rubric_spec if judge else '',
               rubric_samples=rubric_samples if judge else 1)
     runs.save(run, out_root)

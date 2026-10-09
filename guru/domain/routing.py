@@ -19,9 +19,10 @@ COMPLEXITY = ('trivial', 'standard', 'hard')
 KINDS = ('debug', 'build', 'refactor', 'review', 'explain', 'docs', 'ops',
          'other')
 MODES = ('local-only', 'local-and-remote', 'remote-only')
-# What each label means: the controller hint (config.CONTROLLER_HINT) and
-# the ``labels`` judge (decisions.label_questions) both read these, so the
-# model that labels and the judge that checks it share one rubric. The
+# What each label means: the spawn tool's ``complexity`` parameter
+# (guru.domain.tools._SPAWN_SPEC) and the ``labels`` judge
+# (decisions.label_questions) both read these, so the model that labels
+# and the judge that checks it share one rubric. The
 # examples after "e.g." are drawn from the real cases in
 # evals/triage/2026-09-24-real-cases.md, where labelling was the weak spot.
 COMPLEXITY_DESCRIPTIONS = {

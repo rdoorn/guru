@@ -41,7 +41,7 @@ class TestOffMode:
             {'adapter': 'A', 'model': 'm', 'max_complexity': 'hard'}]}
         s = rs.load_routing(section)
         assert s == rs.RoutingSettings(off=True)
-        assert s.present is False and s.controller is False
+        assert s.present is False
 
     def test_off_still_rejects_a_broken_table(self) -> None:
         with pytest.raises(ValueError, match='unknown keys'):
@@ -64,7 +64,8 @@ class TestDefaultRoutingToml:
     def test_renders_the_measured_configuration(self) -> None:
         data = self._parse()
         s = rs.load_routing(data['routing'])
-        assert s.mode == 'local-and-remote' and s.controller is True
+        assert s.mode == 'local-and-remote'
+        assert 'controller' not in data['routing']   # retired key
         assert s.complexity_router is True and s.type_router is True
         assert s.spend_confirm == 'ask' and s.secret_scan is True
         default = s.ladders['default']
@@ -439,7 +440,7 @@ class TestRoutingCommand:
         decisions.set_judge('labels', J())
         out = cli._format_routing(full, tmp_path / 's.toml')
         assert out.splitlines()[0] == 'routing: on (mode local-and-remote)'
-        assert 'controller on' in out and 'type router on' in out
+        assert 'type router on' in out and 'controller' not in out
         assert 'ladder default:' in out and 'ladder review (kind review):' \
             in out
         assert 'SBP Litellm | aws/claude-4-5-haiku' in out

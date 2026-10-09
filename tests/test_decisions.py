@@ -457,14 +457,12 @@ class TestLabelQuestions:
         assert tuple(qs[1].options) == routing.KINDS
         assert all('fix the failing test in cli.py' in q.state for q in qs)
 
-    def test_complexity_options_carry_the_controller_descriptions(self):
-        """The judge and the controller's plan schema share one rubric."""
-        from guru.domain import plan, routing
+    def test_complexity_options_carry_the_tier_descriptions(self):
+        """The judge's options are the routing tier rubric."""
+        from guru.domain import routing
         q = decisions.label_questions('t')[0]
-        schema = plan.TASK_SCHEMA['properties']['complexity']['description']
         for tier, desc in routing.COMPLEXITY_DESCRIPTIONS.items():
             assert desc in q.options[tier]
-            assert desc in schema
         assert len(set(q.options.values())) == len(q.options)
 
     def test_complexity_options_carry_the_tier_examples(self) -> None:

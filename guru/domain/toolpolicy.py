@@ -18,12 +18,10 @@ __all__ = ['ALWAYS_ON_TOOLS', 'KIND_HIDDEN_TOOLS', 'ToolsPolicy',
            'is_enabled', 'kind_refusal', 'set_policy']
 
 # Tools every agent has regardless of the project tool policy: discovery,
-# method selection, the delegation mailbox and the turn contract's own
-# calls (``final_answer``, a controller's ``plan``) are not registry tools
-# and are never gated.
+# method selection and the lead's delegation mailbox (``apply_work``
+# included) are not registry tools and are never gated.
 ALWAYS_ON_TOOLS = frozenset(
-    ('search_tools', 'use_skill', 'spawn', 'check', 'join', 'final_answer',
-     'plan'))
+    ('search_tools', 'use_skill', 'spawn', 'check', 'join', 'apply_work'))
 
 # Every registry tool that changes files -- directly, or in the sandbox
 # copy (``sandbox_run`` executes a command in the copy; ``sandbox_python``

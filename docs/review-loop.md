@@ -176,7 +176,7 @@ add a ladder for it and switch `type_router = true`:
 ```toml
 [routing]
 type_router = true
-[[routing.ladders.review]]      # kind from the controller's KINDS
+[[routing.ladders.review]]      # kind from routing.KINDS
 adapter = "SBP Litellm"
 model = "aws/claude-5-sonnet"
 max_complexity = "standard"

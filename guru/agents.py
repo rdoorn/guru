@@ -49,14 +49,11 @@ class Agent:
     task_rec: Any = None
     started: float = 0.0
     # How the task ended, as recorded on its closing TaskRecord (done,
-    # capped, incomplete, error, cancelled, fell_back); '' until then.
+    # stalled, error, cancelled, fell_back); '' until then.
     outcome: str = ''
-    # Files the task owns (plan deliverables) and the wall-clock time it
-    # was first launched: a deliverable not written since then makes the
-    # task ``incomplete`` (Orchestrator.on_done).
-    deliverables: list = field(default_factory=list)
-    started_wall: float = 0.0
-    preexisting: set = field(default_factory=set)   # deliverables at launch
+    # The worker's sandbox diff block for its report (read on its own
+    # thread when its turn ends; '' without a sandbox change).
+    report_diff: str = ''
     # Finished and due to leave the tab bar once the user has looked at it
     # and switched away (AgentManager.retire / select).
     retire_pending: bool = False
@@ -121,7 +118,7 @@ class AgentManager:
 
     def retire(self, agent: Agent, keep: bool) -> None:
         """A sub-agent finished: archive it now, or (``keep`` — it ended
-        capped, incomplete or in error — or it is on screen) once the user
+        stalled or in error — or it is on screen) once the user
         has viewed it and switched away. ``main`` never retires."""
         if agent is self.agents[0] or agent not in self.agents:
             return

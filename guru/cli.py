@@ -13,9 +13,13 @@ from guru.adapters.base import Adapter
 from guru.adapters.anthropic import AnthropicAdapter
 from guru.adapters.litellm import LiteLLMAdapter
 from guru.adapters.ollama import OllamaAdapter
-from guru.domain import claims, ledger, policy, tools
+from guru.domain import claims, ledger, policy, tools, usage
+from guru.dashboard.server import Dashboard
 from guru.judges import quiet
 from guru.judges.claims import ClaimsReviewer
+from guru.judges.topic import RoutedTopicLabeler
+from guru.repositories.fanout import FanOutLedger
+from guru.repositories.usage_sqlite import SqliteUsage
 from guru.repositories import settings as routing_settings
 from guru.repositories.adapters import AdapterRegistry, registry_from
 from guru.repositories.jsonl_ledger import JsonlLedger
@@ -27,6 +31,9 @@ ADAPTERS: list = []
 ADAPTER_CONFIGS: list = []
 # Name -> Adapter view of ADAPTERS for the routing layer (rebuilt with it).
 REGISTRY = AdapterRegistry()
+# The usage store and dashboard of this process (set at startup).
+USAGE: Optional[SqliteUsage] = None
+DASHBOARD: Optional[Dashboard] = None
 
 DEFAULT_MODEL = "qwen3-abliterated-32k:latest"
 
@@ -716,8 +723,8 @@ def _format_routing(settings: routing_settings.RoutingSettings,
         head = f'routing: on (mode {settings.mode})'
     flag = {True: 'on', False: 'off'}
     lines = [head,
-             f"controller {flag[bool(settings.controller)]} · complexity "
-             f"router {flag[settings.complexity_router]} · type router "
+             f"complexity router {flag[settings.complexity_router]} · "
+             f"type router "
              f"{flag[settings.type_router]} · spend {settings.spend_confirm}"
              f" · secret scan {flag[settings.secret_scan]}"]
     for name, specs in settings.ladders.items():
@@ -849,14 +856,21 @@ def _model_detail(adapter: Adapter) -> str:
 def _start(args: argparse.Namespace,
            progress: startup.RichProgress) -> routing_settings.RoutingSettings:
     """The startup phases, one reported step each; returns the routing."""
-    global ADAPTERS, REGISTRY
+    global ADAPTERS, REGISTRY, USAGE
     from guru import log, skills
     with progress.step('settings, skills, ledger') as step:
         skills.setup(reset=args.reset_skills)
-        ledger.set_repository(JsonlLedger(config.LEDGER_DIR))
+        # The JSONL ledger, and next to it the usage store every guru
+        # process shares (calls, topics, tasks; guru.repositories).
+        USAGE = (SqliteUsage(config.USAGE_DB_PATH, source='cli')
+                 if config.USAGE_DB else None)
+        ledger.set_repository(FanOutLedger(JsonlLedger(config.LEDGER_DIR),
+                                           USAGE))
         tools.set_policy(load_tools_policy())
         session.num_ctx_override = args.num_ctx
-        step.detail(_home(config.GLOBAL_SETTINGS_PATH))
+        step.detail(_home(config.GLOBAL_SETTINGS_PATH)
+                    + (f' · usage {_home(config.USAGE_DB_PATH)}'
+                       if USAGE is not None else ''))
 
     with progress.step('adapters') as step:
         ADAPTERS = _build_adapters()
@@ -883,10 +897,15 @@ def _start(args: argparse.Namespace,
 
     with progress.step('judges') as step:
         judges.set_registry(REGISTRY, routing)   # llm: judges, gate reviewer
-        # The controller's answer to delegated work is checked against the
-        # changes once per request (guru.domain.claims).
+        # The lead's answer to work it did is checked against the changes
+        # once per request (guru.domain.claims).
         claims.set_checker(ClaimsReviewer() if config.ANSWER_CHECK
                            else None)
+        # Each user request gets a short topic label from the cheapest
+        # routed model, in the background (guru.domain.usage).
+        usage.set_labeler(RoutedTopicLabeler()
+                          if USAGE is not None and config.TOPIC_LABELS
+                          else None)
         installed = judges.install()
         if installed:
             log.info('shadow judges: %s', installed)
@@ -897,7 +916,31 @@ def _start(args: argparse.Namespace,
             step.detail('\n'.join(described + ['warming in background']))
         else:
             step.detail('\n'.join(described))
+
+    with progress.step('dashboard') as step:
+        step.detail(_start_dashboard())
     return routing
+
+
+def _start_dashboard() -> str:
+    """Serve the usage dashboard, or find the guru that does (the
+    single-server rule); the status line for the startup step."""
+    global DASHBOARD
+    if not config.DASHBOARD_ENABLED or USAGE is None:
+        return 'off'
+    DASHBOARD = Dashboard(USAGE, config.DASHBOARD_PORT)
+    DASHBOARD.start()
+    return DASHBOARD.status()
+
+
+def _dashboard_command() -> None:
+    """``/dashboard``: where the usage dashboard is served."""
+    if DASHBOARD is None:
+        ui.console.print('dashboard: off ([dashboard] enabled, [ledger]'
+                         ' usage_db in settings.toml)', markup=False)
+        return
+    ui.console.print(f'dashboard: {DASHBOARD.status()}', markup=False,
+                     highlight=False)
 
 
 def _run_startup(
@@ -937,7 +980,11 @@ def main() -> None:
     tools.reset_active_tools()
 
     from guru import tui
-    tui.run(registry=REGISTRY, routing=routing)
+    try:
+        tui.run(registry=REGISTRY, routing=routing)
+    finally:
+        if DASHBOARD is not None:
+            DASHBOARD.stop()      # another guru takes over the port
     line = _session_line()
     if line:
         ui.console.print(f'[dim]{line}[/dim]', highlight=False)

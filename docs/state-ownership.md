@@ -31,16 +31,9 @@ is injected through setters rather than hard-coded:
 
 - `tools.set_spawn_handler` / `set_check_handler` / `set_join_handler` — the
   delegation mailbox, supplied by `guru.orchestrator.Orchestrator`.
-- `tools.set_plan_handler` — the controller's `plan` tool
-  (`Orchestrator.do_plan`): validates the typed plan
-  (`guru.domain.plan.evaluate`, pure) and for `delegate` spawns the tasks
-  through `spawn_panel`, opens the join barrier and ends the turn. The
-  turn loop reads the handler's decision back from the tool result text
-  (`plan.ANSWER_ACK`, `DELEGATED_PREFIX`, `REASK_PREFIX`) and counts
-  re-asks in the conversation itself (`plan.reasks_in`), so no per-turn
-  protocol state lives outside category 1. Whether an adapter forces the
-  tool call is the adapter's own property (`Adapter.forces`), read per
-  round by the loop through `turn.forced_tool`.
+- `tools.set_apply_work_handler` — the lead's `apply_work`
+  (`Orchestrator.do_apply_work`): merges a finished worker's sandbox diff
+  into the lead's copy (`guru.sandbox.verbs.apply_work`).
 - `tools.set_domain_asker` / `files.set_path_asker` — the permission prompts.
   The TUI installs an interactive asker; the benchmark installs an auto-deny.
 - `spend.set_spend_asker` — the once-per-run "allow remote model spend?"
@@ -89,8 +82,7 @@ is injected through setters rather than hard-coded:
   the table's `mode` line (`settings.switch_routing`), reloads the table
   through `cli.load_routing` (which rebinds the scanner and
   `config.SECRET_SCAN`) and hands the result to the orchestrator. The
-  main agent's tool set (controller or hands-on) is fixed at configure
-  time and follows the new setting on the next start.
+  main agent's tool set is fixed at configure time.
 - `toolpolicy.set_policy` (re-exported as `tools.set_policy`) — the
   project's tool policy (`.guru/tools.toml`, loaded by
   `guru.repositories.settings.load_tools_policy`): which registry tools
@@ -105,12 +97,9 @@ is injected through setters rather than hard-coded:
   `_core_tool_fns` (pre-activation), `activate`, `search_tools` results and
   `specs_for` all skip a disabled tool, so a policy never has to rely on the
   refusal alone. The always-on tools (`toolpolicy.ALWAYS_ON_TOOLS`:
-  `search_tools`, `use_skill`, `final_answer`, `spawn`, `check`, `join`, a
-  controller's `plan`) are never subject to it — `is_enabled` returns True
-  for them before it looks at the policy. `plan` and `final_answer` are
-  also exempt from `validate_arguments` (`tools._SELF_VALIDATING`): the
-  plan is validated by `guru.domain.plan.parse` with the loop's one
-  re-ask, and `final_text` tolerates a misnamed field.
+  `search_tools`, `use_skill`, `spawn`, `check`, `join`, `apply_work`)
+  are never subject to it — `is_enabled` returns True for them before it
+  looks at the policy.
 
 These are the dependency-injection points, and they already exist where
 front-ends actually diverge.

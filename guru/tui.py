@@ -42,7 +42,7 @@ from guru.orchestrator import Orchestrator
 from guru.tui_io import _app_cols, _BufferWriter, _MainWriter, _status_from
 
 # Sub-agent endings worth a look before the tab goes away.
-_KEEP_OUTCOMES = frozenset(('capped', 'incomplete', 'error'))
+_KEEP_OUTCOMES = frozenset(('stalled', 'error'))
 
 _CTX_COLOUR = {'green': 'ansigreen', 'yellow': 'ansiyellow', 'red': 'ansired'}
 _CHROME_ROWS = 5   # 2 rules + prompt + status + tabs
@@ -56,12 +56,11 @@ _QUIT = object()
 def run(registry=None, routing=None) -> None:
     """Run the hybrid TUI. ``registry`` (AdapterRegistry) and ``routing``
     (RoutingSettings) come from the CLI; without them sub-agent routing is
-    inert. ``routing.controller`` makes the main agent a controller."""
+    inert."""
     ui.refresh_git_branch()
     manager = AgentManager()
     main = manager.active
     main.state = session.current()
-    controller = bool(routing is not None and routing.controller)
 
     state: dict = {
         'loop': None, 'view': 'main', 'quit': False, 'closing': False}
@@ -197,9 +196,9 @@ def run(registry=None, routing=None) -> None:
 
     orch = _TuiOrchestrator(manager, registry=registry, routing=routing)
     # The main agent is set up by the same helper every other delegation-
-    # capable agent uses (fresh conversation + hint + tool set, controller
-    # mode from [routing]); only its console is the main-buffer writer.
-    orch.configure(main, main.state, can_spawn=True, controller=controller)
+    # capable agent uses (fresh conversation + lead hint + tool set); only
+    # its console is the main-buffer writer.
+    orch.configure(main, main.state, can_spawn=True)
     main.console = main_console
 
     def _submit(agent, text: str) -> None:
@@ -208,7 +207,7 @@ def run(registry=None, routing=None) -> None:
     def _new_agent() -> None:
         base = manager.active.state
         agent = manager.add()
-        orch.configure(agent, base, can_spawn=True, controller=controller)
+        orch.configure(agent, base, can_spawn=True)
         agent.append(f"[{agent.title}] new agent · model {agent.state.model}")
         manager.select(len(manager.agents) - 1)
 
@@ -539,6 +538,10 @@ def run(registry=None, routing=None) -> None:
             if new_routing is not None:
                 orch.set_routing(new_routing)
             return True
+        if text == '/dashboard':
+            import guru.cli as cli
+            cli._dashboard_command()
+            return True
         if text == '/brief' or text.startswith('/brief '):
             from guru import briefcmd
             await _in_terminal(lambda: print(briefcmd.brief_command(
@@ -552,6 +555,7 @@ def run(registry=None, routing=None) -> None:
             # The spend question must not be asked on the loop thread
             # (spawn_panel runs here): settle it in a worker first.
             await state['loop'].run_in_executor(None, orch.preconfirm_spend)
+            orch.begin_request(main, text)
             orch.spawn_panel(main, tasks,
                              synthesis=config.review_synthesis(area))
             return True
@@ -624,7 +628,8 @@ def run(registry=None, routing=None) -> None:
             " · Shift+Tab cycle access mode · double Ctrl+C exit")
         main.console.print(
             "[dim]/mode /role /skill /review /models /context /adapters /save"
-            " /resume /compact /search /sandbox /routing /brief[/dim]\n")
+            " /resume /compact /search /sandbox /routing /brief /dashboard"
+            "[/dim]\n")
 
     async def _amain() -> None:
         state['loop'] = asyncio.get_running_loop()
@@ -642,6 +647,7 @@ def run(registry=None, routing=None) -> None:
         finally:
             state['closing'] = True
             judges.set_warm_listener(None)
+            orch.cleanup_copies()
             ui.reset_terminal()
 
     asyncio.run(_amain())

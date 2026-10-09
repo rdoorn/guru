@@ -1,0 +1,42 @@
+# Dogfood case (2026-10-08): the user's full usage-dashboard request plus
+# the decisions the user gave when asked, i.e. the same information the
+# reference build had. Reference: local branch `opus` (2dd053d). Pinned to
+# main after PR #5 (38d2107, which carries AGENTS.md). Run with:
+#   --model 'SBP Litellm|aws/claude-5-5-opus'
+#   --routing evals/routing/claude-tiers.toml --allow-spend
+#   --rubric 'SBP Litellm|aws/claude-5-sonnet'
+name = "guru-usage-dashboard"
+prompt = """have a look a guru, i'd like a web interface on guru, in which i can view the usage of models, their cost, what topic they were working on, and what project. a dashboard that shows an overview of what was used where in some nice graphs, and tables. just listening on localhost on a specific port for guru. guru writes the data in a local database (sqllite or something simple on disk, in a ~/.guru/ folder or something. keep in mind we could be running multiple guru's, show where your listening, and check if anoyher guru is already listening, then we don't listen again unless some other guru stops serving. so any guru could serve, but there can be only one.
+
+My decisions on the open questions:
+- Scope: build all of it now: the on-disk usage store, the localhost dashboard, and the one-server-among-many-gurus rule.
+- Store: SQLite (stdlib sqlite3) under ~/.guru/, safe for several guru processes writing at once, recording every model call guru makes (adapter, model, tokens, cost, project, topic), wired into the existing ledger call recording. Start empty (no import of the old ledger history) and keep the data forever. Eval runs are recorded too, marked as such so the dashboard can filter them.
+- Topic: every user request gets a short (3-6 word) topic label generated in the background by the cheapest routed remote model; when none can be used, the topic is the request text. The calls of sub-agents working on that request belong to the same topic.
+- Serving: every guru tries to serve on 127.0.0.1, port 7340 by default, configurable as `[dashboard] port` in settings.toml; the first one wins; the others show where the dashboard is served and retry, so another guru takes over when the server stops. Show at startup where it is served.
+- Dashboard: no new dependencies (stdlib HTTP server, plain HTML/JS, SVG charts). Views: overview totals and cost per day by model; cost per model, per project and per topic (charts and tables); recent calls; a time range filter (today, 7 days, 30 days, all).
+
+Follow the project rules in AGENTS.md. Run the tests and lint before you report."""
+mode = "auto"
+timeout_s = 3600
+tags = ["real", "build", "dogfood"]
+
+[fixture_git]
+path = "."
+ref = "38d2107f37b9355f647bbb8f939c24e4cc6b6d52"
+
+[expect.behaviour]
+tools_used_any = ["write_file", "edit_file", "apply_patch"]
+tools_used_all = ["run_tests"]
+task_status_none = ["stalled", "error"]
+max_cost_usd = 25.0
+max_seconds = 3600
+
+[expect.content]
+# Wired in where the app installs implementations (AGENTS.md).
+files_changed_any = ["guru/cli.py"]
+fixture_tests_pass = true
+fixture_lint_pass = true
+fixture_home_clean = true
+
+[expect.rubric]
+text = "All of: (1) a SQLite store under ~/.guru (stdlib sqlite3, safe for concurrent guru processes) records every model call with adapter, model, tokens, cost, project and topic, installed by guru/cli.py next to the existing ledger, never breaking a run when the database is busy or broken, file private (0600); (2) every user request has a topic: a short label generated in the background by the cheapest remote routed model with the request text as fallback, and sub-agent calls of that request carry the same topic; (3) a stdlib HTTP dashboard on 127.0.0.1, port 7340 configurable as [dashboard] port, with overview totals, cost per day by model, per model/project/topic charts and tables, recent calls and a today/7d/30d/all filter, read-only and safe (loopback only, user text never inserted as HTML); (4) one server among many gurus: the first to bind serves, the others report where it is served and retry, taking over when it stops; startup shows where it is served; (5) eval calls recorded and marked; (6) tests isolated from the real home cover the store, topics, the server and the election; the answer reports the actual test and lint results."

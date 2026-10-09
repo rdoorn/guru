@@ -9,7 +9,6 @@ sibling table)::
 
     [routing]
     mode = "local-and-remote"   # local-only | local-and-remote | remote-only
-    controller = true           # default: on when any ladder rung is set
     complexity_router = true
     type_router = true          # default: on when a per-kind ladder is set
     spend_confirm = "ask"            # ask | auto | never
@@ -38,15 +37,12 @@ Validation is strict: unknown keys, unknown enum values and duplicate
 defaults raise ``ValueError`` naming the offender, so a typo cannot silently
 route a task to the wrong model.
 
-``controller`` defaults to *on when any ladder rung is configured* (a
-ladder without a controller is the over-reading configuration of triage
-2026-09-24: the main agent inspects dozens of files itself before it
-delegates); write ``controller = false`` next to a ladder to keep the main
-agent hands-on. Without a ladder the default is off. ``type_router``
-defaults the same way, to *on when any per-kind ladder is configured*: a
-``[[routing.ladders.review]]`` table is meant to be used, so it is, unless
-``type_router = false`` says otherwise. Both fields of
-``RoutingSettings`` are always the effective booleans.
+``type_router`` defaults to *on when any per-kind ladder is configured*:
+a ``[[routing.ladders.review]]`` table is meant to be used, so it is,
+unless ``type_router = false`` says otherwise; the field is always the
+effective boolean. The retired ``controller`` key (the main agent is
+always the lead now) is accepted and ignored, so older settings files
+keep loading.
 
 ``[decisions]`` (:func:`load_decisions`) carries the judge setup an eval
 experiment installs for its run — ``mode`` plus the ``points``, ``active``
@@ -112,9 +108,11 @@ MODE_OFF = 'off'
 
 SPEND_CONFIRM = ('ask', 'auto', 'never')
 
-_FLAGS = ('controller', 'complexity_router', 'type_router', 'secret_scan')
+_FLAGS = ('complexity_router', 'type_router', 'secret_scan')
+# Accepted and ignored (see the module docstring).
+_RETIRED_KEYS = ('controller',)
 _KNOWN_KEYS = frozenset(
-    ('mode', 'spend_confirm', 'ladder', 'ladders') + _FLAGS)
+    ('mode', 'spend_confirm', 'ladder', 'ladders') + _FLAGS + _RETIRED_KEYS)
 _RUNG_KEYS = frozenset(('adapter', 'model', 'max_complexity', 'default'))
 
 
@@ -132,14 +130,11 @@ class RoutingSettings:
     """The validated ``[routing]`` table. ``ladders`` maps ``'default'`` and
     per-kind names to their rung specs, lowest rung first.
 
-    ``controller`` may be given as None (the key was not set): it then
-    resolves to True when any ladder has a rung, else False, so after
-    construction it is always the effective boolean. ``type_router`` is
-    resolved the same way by :func:`load_routing` (on when a per-kind
-    ladder is configured); constructed directly it is the plain default.
+    ``type_router`` is resolved by :func:`load_routing` (on when a
+    per-kind ladder is configured); constructed directly it is the plain
+    default.
     """
     mode: str = 'local-and-remote'
-    controller: Optional[bool] = None
     complexity_router: bool = True
     type_router: bool = False
     spend_confirm: str = 'ask'
@@ -152,14 +147,10 @@ class RoutingSettings:
     # True when the table says ``mode = "off"`` (kept but disabled).
     off: bool = False
 
-    def __post_init__(self) -> None:
-        if self.controller is None:
-            self.controller = any(
-                bool(specs) for specs in self.ladders.values())
-
 
 _DECISION_KEYS = frozenset(
-    ('mode', 'points', 'active', 'thresholds', 'labels_margin'))
+    ('mode', 'points', 'active', 'thresholds', 'labels_margin',
+     'answer_check', 'gate_review'))
 DEFAULT_LABELS_MARGIN = 0.15
 
 
@@ -167,12 +158,16 @@ DEFAULT_LABELS_MARGIN = 0.15
 class DecisionsSettings:
     """The validated ``[decisions]`` table of an experiment file: the
     values ``config.DECISIONS_MODE/POINTS/ACTIVE/THRESHOLDS`` and
-    ``config.DECISIONS_LABELS_MARGIN`` take for a run."""
+    ``config.DECISIONS_LABELS_MARGIN`` take for a run, and whether the
+    run keeps the answer check and the gate's LLM reviewer (both on unless
+    the table says ``false``: an A/B run without the judges)."""
     mode: str = 'off'
     points: dict[str, str] = field(default_factory=dict)
     active: dict[str, bool] = field(default_factory=dict)
     thresholds: dict[str, float] = field(default_factory=dict)
     labels_margin: float = DEFAULT_LABELS_MARGIN
+    answer_check: bool = True
+    gate_review: bool = True
 
 
 def _is_number(v: object) -> bool:
@@ -218,6 +213,11 @@ def load_decisions(section: dict) -> DecisionsSettings:
         raise ValueError(
             f'[decisions] labels_margin = {margin!r}; expected a '
             'non-negative number')
+    for key in ('answer_check', 'gate_review'):
+        if not isinstance(section.get(key, True), bool):
+            raise ValueError(
+                f'[decisions] {key} = {section[key]!r}; expected true or'
+                ' false')
     return DecisionsSettings(
         mode=str(mode),
         points=_typed_table(section, 'points',
@@ -227,6 +227,8 @@ def load_decisions(section: dict) -> DecisionsSettings:
         thresholds=_typed_table(section, 'thresholds', _is_number,
                                 'numbers', float),
         labels_margin=float(margin),
+        answer_check=bool(section.get('answer_check', True)),
+        gate_review=bool(section.get('gate_review', True)),
     )
 
 
@@ -333,7 +335,6 @@ def load_routing(section: Optional[dict] = None, *,
                           if kind != routing.DEFAULT_LADDER)
     parsed = RoutingSettings(
         mode=_enum(section, 'mode', routing.MODES, 'local-and-remote'),
-        controller=_flag(section, 'controller', None),
         complexity_router=bool(_flag(section, 'complexity_router', True)),
         type_router=type_router,
         spend_confirm=_enum(section, 'spend_confirm', SPEND_CONFIRM, 'ask'),
@@ -389,16 +390,14 @@ DEFAULT_TIER_MODELS = {
 _ROUTING_HEADER = """\
 # Routing defaults written by guru: the configuration measured in
 # evals/routing/claude-tiers-judges.toml (evals/triage/2026-09-24-*).
-# Sub-agent tasks run on Claude tiers picked by the controller's
-# complexity label; reviews never run on Haiku. Measured with Haiku 4.5
-# as the main (controller) model: pick it in /models.
+# Sub-agent tasks run on Claude tiers picked by the lead's complexity
+# label; reviews never run on Haiku.
 # /routing shows this; /routing off disables it (mode = "off");
 # guru never rewrites an existing [routing] table.
 """
 _ROUTING_TABLE = """
 [routing]
 mode = "local-and-remote"   # local-only | local-and-remote | remote-only | off
-controller = true           # the main agent only spawns, checks and joins
 complexity_router = true    # lowest rung whose max_complexity covers the task
 type_router = true          # review tasks use [[routing.ladders.review]]
 spend_confirm = "ask"       # ask (once per run) | auto | never
@@ -428,7 +427,7 @@ panel = false               # shadow until labelled rows say otherwise
 """
 _JUDGE_EXTRA_NOTE = """\
 # The judges need the judge extra (uv sync --extra judge);
-# until it is installed labels stays off (the controller's label
+# until it is installed labels stays off (the lead's label
 # routes). Set it to true afterwards.
 """
 

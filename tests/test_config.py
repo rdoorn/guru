@@ -67,63 +67,38 @@ class TestReviewPanel:
         assert 'the repo' in s and 'consolidate' in s.lower()
 
 
-class TestControllerHint:
-    """CONTROLLER_HINT tells the controller which project requests refer
-    to and how to label complexity (triage 2026-09-23-claude-tiers)."""
+class TestLeadHint:
+    """LEAD_HINT makes the main agent the lead (it works, delegates,
+    reviews and integrates); the sandbox part names apply_work. The tier
+    rubric the spawn tool's complexity follows lives in
+    routing.COMPLEXITY_DESCRIPTIONS."""
 
-    def test_never_asks_which_repository(self) -> None:
-        hint = config.CONTROLLER_HINT
-        assert 'Never ask which repository' in hint
-        assert '[project]' in hint
-        assert 'refer to it' in hint
+    def test_hint_names_the_lead_and_its_delegation_tools(self) -> None:
+        hint = config.LEAD_HINT
+        assert 'You are the LEAD' in hint
+        assert 'spawn' in hint and 'kind and complexity' in hint
+        assert 'join' in hint
 
-    def test_enforced_rules_are_not_prose(self) -> None:
-        """What guru.domain.plan checks in code is no longer requested in
-        the hint: decomposition, one worker per concern, join/check
-        polling, whole-file reading."""
-        hint = config.CONTROLLER_HINT
-        for phrase in ('DECOMPOSE', 'one worker per named concern',
-                       'never fold distinct concerns', 'check to poll',
-                       'join to be resumed', 'prefer outline',
-                       'Spawn independent tasks', 'spawn(task'):
+    def test_retired_controller_vocabulary_is_gone(self) -> None:
+        hint = config.LEAD_HINT + config.LEAD_SANDBOX_HINT
+        for phrase in ('plan tool', 'outcome delegate', 'final_answer',
+                       'tool rounds', 'check to poll', 'prefer outline'):
             assert phrase not in hint, phrase
-        assert 'check to poll' not in config.DELEGATION_HINT
-        assert 'outline' not in config.DELEGATION_HINT
         assert 'Prefer outline' not in config.SYSTEM_PROMPT
 
-    def test_hint_names_the_plan_tool_and_both_outcomes(self) -> None:
-        hint = config.CONTROLLER_HINT
-        assert 'plan tool' in hint
-        assert 'outcome answer' in hint and 'outcome delegate' in hint
-        assert 'never execute a task yourself' in hint
-
-    def test_plan_tool_description_names_the_concern_vocabulary(self):
-        from guru.domain import plan
-        for concern in plan.CONCERNS:
-            assert concern in config.PLAN_TOOL_DESCRIPTION, concern
-        assert 'final_answer' not in config.PLAN_TOOL_DESCRIPTION
-        assert 'end the turn' in config.FINAL_ANSWER_DESCRIPTION
-
-    def test_task_names_the_project_path(self) -> None:
-        assert 'project path' in config.CONTROLLER_HINT
-
-    def test_complexity_examples(self) -> None:
-        """The tier rubric moved from the hint into the plan schema, on
-        the field the controller fills in."""
-        from guru.domain import plan
-        text = plan.TASK_SCHEMA['properties']['complexity']['description']
-        for word in ('trivial', 'standard', 'hard', 'greetings',
-                     'one-file edit', 'multi-file refactor', 'concurrency',
-                     'whole codebase'):
-            assert word in text, word
-        assert 'trivial' not in config.CONTROLLER_HINT
+    def test_sandbox_hint_names_apply_work_and_one_submit(self) -> None:
+        hint = config.LEAD_SANDBOX_HINT
+        assert 'apply_work' in hint
+        assert 'sandbox_submit once' in hint
 
     def test_concrete_tier_examples_from_the_real_cases(self) -> None:
         """Each tier carries examples drawn from the 2026-09-24 real
         cases (triage: labels were the weak spot)."""
-        from guru.domain import plan
-        hint = plan.TASK_SCHEMA['properties']['complexity']['description']
+        from guru.domain import routing
+        text = ' '.join(routing.COMPLEXITY_DESCRIPTIONS.values())
         for phrase in (
+                'greetings', 'one-file edit', 'multi-file refactor',
+                'concurrency', 'whole codebase',
                 # trivial
                 'summarise one README section',
                 'find where a function is defined and who calls it',
@@ -138,7 +113,7 @@ class TestControllerHint:
                 'explain an algorithm that spans multiple files with its'
                 ' measurements and persistence',
                 'concurrency bugs', 'architecture'):
-            assert phrase in hint, phrase
+            assert phrase in text, phrase
 
     def test_examples_sit_under_their_own_tier(self) -> None:
         from guru.domain import routing

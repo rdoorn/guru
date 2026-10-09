@@ -23,7 +23,7 @@ ref = "81dc231818e120e7b66d6d1568741401202754c1"
 [expect.behaviour]
 tools_used_any = ["write_file", "edit_file", "apply_patch"]
 tools_used_all = ["run_tests"]
-task_status_none = ["capped", "incomplete", "error"]
+task_status_none = ["stalled", "error"]
 max_cost_usd = 20.0
 max_seconds = 2400
 
